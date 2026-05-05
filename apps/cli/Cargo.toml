@@ -1,0 +1,11 @@
+[package]
+name = "logiguard-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-types = { path = "../../crates/core-types" }
+control-api = { path = "../../crates/control-api" }
+serde_json = "1"
+

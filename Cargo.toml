@@ -1,0 +1,19 @@
+[workspace]
+members = [
+  "crates/core-types",
+  "crates/policy-engine",
+  "crates/decision-engine",
+  "crates/state-store",
+  "crates/control-api",
+  "crates/control-service",
+  "apps/daemon",
+  "apps/cli",
+  "apps/gpui",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "Apache-2.0"
+

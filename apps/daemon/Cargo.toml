@@ -1,0 +1,12 @@
+[package]
+name = "logiguard-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+control-api = { path = "../../crates/control-api" }
+control-service = { path = "../../crates/control-service" }
+serde_json = "1"
+state-store = { path = "../../crates/state-store" }
+

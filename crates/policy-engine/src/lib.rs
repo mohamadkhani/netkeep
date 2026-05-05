@@ -1,0 +1,159 @@
+use core_types::{DestinationMatcher, FlowContext, Rule, RuleAction};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRule {
+    pub rule_id: String,
+    pub action: RuleAction,
+}
+
+fn wildcard_matches(pattern: &str, host: &str) -> bool {
+    if let Some(rest) = pattern.strip_prefix("*.") {
+        return host.ends_with(&format!(".{rest}"));
+    }
+    false
+}
+
+fn destination_matches(rule: &Rule, flow: &FlowContext) -> bool {
+    match &rule.destination {
+        DestinationMatcher::IpExact(ip) => flow.destination_ip == *ip,
+        DestinationMatcher::Cidr(prefix) => flow.destination_ip.starts_with(prefix),
+        DestinationMatcher::DomainExact(domain) => flow.destination_domain.as_ref() == Some(domain),
+        DestinationMatcher::DomainWildcard(pattern) => flow
+            .destination_domain
+            .as_ref()
+            .map(|h| wildcard_matches(pattern, h))
+            .unwrap_or(false),
+    }
+}
+
+fn process_matches(rule: &Rule, flow: &FlowContext) -> bool {
+    match (&rule.process_name, &flow.process_name) {
+        (None, _) => true,
+        (Some(rp), Some(fp)) => rp == fp,
+        (Some(_), None) => false,
+    }
+}
+
+fn specificity(rule: &Rule) -> u8 {
+    let base = match rule.destination {
+        DestinationMatcher::IpExact(_) | DestinationMatcher::DomainExact(_) => 3,
+        DestinationMatcher::Cidr(_) | DestinationMatcher::DomainWildcard(_) => 2,
+    };
+    if rule.process_name.is_some() {
+        base + 2
+    } else {
+        base
+    }
+}
+
+fn action_rank(action: RuleAction) -> u8 {
+    match action {
+        RuleAction::Deny => 3,
+        RuleAction::Allow => 2,
+        RuleAction::Ask => 1,
+    }
+}
+
+pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule> {
+    rules
+        .iter()
+        .filter(|r| r.enabled)
+        .filter(|r| process_matches(r, flow) && destination_matches(r, flow))
+        .max_by_key(|r| (specificity(r), action_rank(r.action)))
+        .map(|r| ResolvedRule {
+            rule_id: r.id.clone(),
+            action: r.action,
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_types::{RuleDuration, Rule};
+
+    fn mk_rule(
+        id: &str,
+        action: RuleAction,
+        process_name: Option<&str>,
+        destination: DestinationMatcher,
+    ) -> Rule {
+        Rule {
+            id: id.to_string(),
+            enabled: true,
+            action,
+            duration: RuleDuration::UntilRestart,
+            process_name: process_name.map(str::to_string),
+            destination,
+        }
+    }
+
+    #[test]
+    fn wildcard_matches_subdomain_but_not_apex() {
+        let flow_sub = FlowContext {
+            process_name: None,
+            destination_ip: "1.1.1.1".to_string(),
+            destination_domain: Some("api.example.com".to_string()),
+        };
+        let flow_apex = FlowContext {
+            process_name: None,
+            destination_ip: "1.1.1.1".to_string(),
+            destination_domain: Some("example.com".to_string()),
+        };
+        let rule = mk_rule(
+            "r1",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::DomainWildcard("*.example.com".to_string()),
+        );
+        assert_eq!(resolve_action(&[rule.clone()], &flow_sub).map(|r| r.action), Some(RuleAction::Allow));
+        assert_eq!(resolve_action(&[rule], &flow_apex), None);
+    }
+
+    #[test]
+    fn specific_process_rule_beats_general_rule() {
+        let flow = FlowContext {
+            process_name: Some("firefox".to_string()),
+            destination_ip: "9.9.9.9".to_string(),
+            destination_domain: Some("api.example.com".to_string()),
+        };
+        let general = mk_rule(
+            "general",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::DomainWildcard("*.example.com".to_string()),
+        );
+        let specific = mk_rule(
+            "specific",
+            RuleAction::Deny,
+            Some("firefox"),
+            DestinationMatcher::DomainWildcard("*.example.com".to_string()),
+        );
+        let resolved = resolve_action(&[general, specific], &flow).expect("must resolve");
+        assert_eq!(resolved.rule_id, "specific");
+        assert_eq!(resolved.action, RuleAction::Deny);
+    }
+
+    #[test]
+    fn deny_beats_allow_at_same_specificity() {
+        let flow = FlowContext {
+            process_name: None,
+            destination_ip: "8.8.8.8".to_string(),
+            destination_domain: Some("example.com".to_string()),
+        };
+        let allow = mk_rule(
+            "allow",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+        let deny = mk_rule(
+            "deny",
+            RuleAction::Deny,
+            None,
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+        let resolved = resolve_action(&[allow, deny], &flow).expect("must resolve");
+        assert_eq!(resolved.rule_id, "deny");
+    }
+}
+
