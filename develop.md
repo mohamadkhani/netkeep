@@ -336,6 +336,10 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Added `show-config` CLI command with JSON health/config output for scripting
 - [x] Added global `--json` CLI output mode for structured command responses
 - [x] Added SOCKS5 emulator app for proxy-based testing without system-wide interception
+- [x] Added pending polling API (`AwaitPendingDecision`) and wait-state response
+- [x] Added CLI pending introspection command (`list-pendings`)
+- [x] Implemented emulator wait-until-decision behavior for pending flows
+- [x] Added integration tests for both immediate-allow relay and pending-then-allow relay
 
 ## 11) Definition of Done (MVP)
 
