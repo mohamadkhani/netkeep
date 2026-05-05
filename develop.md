@@ -340,6 +340,7 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Added CLI pending introspection command (`list-pendings`)
 - [x] Implemented emulator wait-until-decision behavior for pending flows
 - [x] Added integration tests for both immediate-allow relay and pending-then-allow relay
+- [x] Added `enforcer` crate skeleton with dry-run mark allocation and verdict sink tests
 
 ## 11) Definition of Done (MVP)
 

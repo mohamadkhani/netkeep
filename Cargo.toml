@@ -6,6 +6,7 @@ members = [
   "crates/state-store",
   "crates/control-api",
   "crates/control-service",
+  "crates/enforcer",
   "apps/daemon",
   "apps/cli",
   "apps/gpui",
