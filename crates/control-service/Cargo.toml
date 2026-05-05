@@ -8,6 +8,7 @@ license.workspace = true
 core-types = { path = "../core-types" }
 control-api = { path = "../control-api" }
 decision-engine = { path = "../decision-engine" }
+enforcer = { path = "../enforcer" }
 policy-engine = { path = "../policy-engine" }
 state-store = { path = "../state-store" }
 

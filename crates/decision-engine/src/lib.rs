@@ -135,6 +135,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_domain: Some("example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            device_label: None,
         }
     }
 

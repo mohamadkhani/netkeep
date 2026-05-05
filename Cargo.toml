@@ -3,6 +3,7 @@ members = [
   "crates/core-types",
   "crates/policy-engine",
   "crates/decision-engine",
+  "crates/flow-classifier",
   "crates/state-store",
   "crates/control-api",
   "crates/control-service",

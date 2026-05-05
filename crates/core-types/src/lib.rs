@@ -37,6 +37,7 @@ pub struct FlowContext {
     pub destination_ip: String,
     pub destination_domain: Option<String>,
     pub protocol: TransportProtocol,
+    pub device_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

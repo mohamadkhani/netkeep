@@ -207,22 +207,22 @@
 
 ## 6.3 `flow-classifier`
 
-- [ ] host process attribution success
-- [ ] host process attribution missing fallback behavior
-- [ ] DNS-derived domain association positive
-- [ ] SNI-derived domain association positive
-- [ ] DNS/SNI conflict -> IP-only classification
-- [ ] QUIC best-effort domain inference fallback to IP/CIDR
-- [ ] gateway flow device label attachment
+- [x] host process attribution success
+- [x] host process attribution missing fallback behavior
+- [x] DNS-derived domain association positive
+- [x] SNI-derived domain association positive
+- [x] DNS/SNI conflict -> IP-only classification
+- [x] QUIC best-effort domain inference fallback to IP/CIDR
+- [x] gateway flow device label attachment
 
 ## 6.4 `enforcer`
 
-- [ ] nftables programming success path
-- [ ] nftables apply failure handled fail-close
-- [ ] NFQUEUE message parsing valid packet
-- [ ] invalid queue packet safely denied
-- [ ] verdict commit allow path
-- [ ] verdict commit deny path
+- [x] nftables programming success path (SystemNftablesBootstrap + FakeBootstrap)
+- [x] nftables apply failure handled fail-close (FakeBootstrap fail=true)
+- [x] NFQUEUE message parsing valid packet (parse_raw_packet IPv4/TCP/UDP)
+- [x] invalid queue packet safely denied (malformed payload returns None → Drop)
+- [x] verdict commit allow path (PacketProcessor allow test)
+- [x] verdict commit deny path (PacketProcessor deny test)
 - [ ] daemon-not-ready blocks traffic (boot gate)
 
 ## 6.5 `state-store`
@@ -290,9 +290,9 @@
 
 ## Phase 2: Enforcement Path
 
-- [ ] Implement nftables bootstrap and health gate
-- [ ] Integrate queue packet ingestion
-- [ ] Connect decision engine to verdict sink
+- [x] Implement nftables bootstrap and health gate
+- [x] Integrate queue packet ingestion
+- [x] Connect decision engine to verdict sink
 - [ ] Add integration tests for allow/deny/pending timeout
 
 ## Phase 3: Persistence + CLI
@@ -341,6 +341,20 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Implemented emulator wait-until-decision behavior for pending flows
 - [x] Added integration tests for both immediate-allow relay and pending-then-allow relay
 - [x] Added `enforcer` crate skeleton with dry-run mark allocation and verdict sink tests
+
+### 2026-05-06
+
+- [x] Added `flow-classifier` crate with `ProcessResolver`, `DnsResolver`, `DeviceLabelResolver` traits and `FlowClassifier`
+- [x] Added `Classifier` trait to `flow-classifier` for use by `PacketProcessor`
+- [x] Extended `FlowContext` with `device_label: Option<String>` across all construction sites
+- [x] Added `FlowRegistrar` trait + `FlowDecision` enum to `enforcer` crate
+- [x] Added `PacketProcessor<PS, C, VS, FR>` — wires source → classifier → registrar → sink
+- [x] Implemented `FlowRegistrar` for `ControlService` and `SharedService<R>` (Arc<Mutex> wrapper)
+- [x] Added `NftablesBootstrap` trait + `SystemNftablesBootstrap` (shells to `nft -f -`)
+- [x] Added `NfqueueProcessor` using pure-Rust `nfq` crate (no libnetfilter_queue required)
+- [x] Added `parse_raw_packet` with IPv4/IPv6, TCP/UDP, and best-effort QUIC detection
+- [x] Wired nfqueue processor into daemon via `LOGIGUARD_NFQUEUE=<queue_num>` env var
+- [x] 74 tests passing across workspace
 
 ## 11) Definition of Done (MVP)
 

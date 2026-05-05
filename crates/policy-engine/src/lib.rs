@@ -94,12 +94,14 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_domain: Some("api.example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            device_label: None,
         };
         let flow_apex = FlowContext {
             process_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_domain: Some("example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            device_label: None,
         };
         let rule = mk_rule(
             "r1",
@@ -118,6 +120,7 @@ mod tests {
             destination_ip: "9.9.9.9".to_string(),
             destination_domain: Some("api.example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            device_label: None,
         };
         let general = mk_rule(
             "general",
@@ -143,6 +146,7 @@ mod tests {
             destination_ip: "8.8.8.8".to_string(),
             destination_domain: Some("example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            device_label: None,
         };
         let allow = mk_rule(
             "allow",

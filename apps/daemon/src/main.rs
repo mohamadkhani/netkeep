@@ -4,8 +4,13 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
 use control_api::{ControlRequest, ControlResponse};
-use control_service::{ControlService, HealthConfig};
+use control_service::{ControlService, HealthConfig, SharedService};
 use decision_engine::{DecisionEngine, OverflowPolicy};
+use enforcer::{NftablesBootstrap, SystemNftablesBootstrap};
+use enforcer::nfqueue::NfqueueProcessor;
+use flow_classifier::{
+    FlowClassifier, FakeProcessResolver, FakeDnsResolver, FakeDeviceLabelResolver,
+};
 use state_store::SqliteRuleRepository;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
@@ -98,6 +103,37 @@ fn main() {
     println!(
         "daemon listening on {socket_path}, db={db_path}, timeouts(default={default_timeout_secs}, tcp={tcp_timeout_secs}, udp={udp_timeout_secs}, quic={quic_timeout_secs}, other={other_timeout_secs}) {health:?}"
     );
+
+    // Optional NFQUEUE enforcement mode.
+    // Set LOGIGUARD_NFQUEUE=<queue_num> (e.g. LOGIGUARD_NFQUEUE=0) to enable.
+    // Requires root / CAP_NET_ADMIN.
+    if let Ok(queue_str) = std::env::var("LOGIGUARD_NFQUEUE") {
+        let queue_num: u16 = queue_str.trim().parse().unwrap_or(0);
+        let bootstrap = SystemNftablesBootstrap;
+        // The classifier uses no-op fakes for now; a real /proc resolver is Phase 3.
+        let classifier = FlowClassifier::new(
+            FakeProcessResolver { result: None },
+            FakeDnsResolver { result: None },
+            FakeDeviceLabelResolver { result: None },
+        );
+        let registrar = SharedService(Arc::clone(&service));
+        let thread_result = NfqueueProcessor::open(queue_num, classifier, registrar);
+        match thread_result {
+            Err(e) => eprintln!("nfqueue open failed (are you root?): {e}"),
+            Ok(mut processor) => {
+                if let Err(e) = bootstrap.setup(queue_num) {
+                    eprintln!("nftables setup failed: {e}");
+                } else {
+                    println!("nftables rules applied, nfqueue processor running on queue {queue_num}");
+                    std::thread::spawn(move || {
+                        if let Err(e) = processor.run_loop() {
+                            eprintln!("nfqueue processor stopped: {e}");
+                        }
+                    });
+                }
+            }
+        }
+    }
 
     for stream in listener.incoming() {
         match stream {

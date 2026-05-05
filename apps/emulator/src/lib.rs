@@ -105,6 +105,7 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
             .unwrap_or_else(|| "0.0.0.0".to_string()),
         destination_domain: if parsed_ip.is_none() { Some(host.clone()) } else { None },
         protocol: TransportProtocol::Tcp,
+        device_label: None,
     };
     let response = send_control_request(
         socket_path,

@@ -1,6 +1,7 @@
 use control_api::{validate_request, ControlRequest, ControlResponse};
-use core_types::RuleAction;
+use core_types::{FlowContext, RuleAction};
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
+use enforcer::{FlowDecision, FlowRegistrar};
 use policy_engine::resolve_action;
 use state_store::RuleRepository;
 
@@ -140,6 +141,38 @@ impl<R: RuleRepository> ControlService<R> {
     }
 }
 
+/// Newtype wrapper that lets a shared `ControlService` be used as a `FlowRegistrar`
+/// across threads (e.g., handed to the nfqueue processor thread).
+pub struct SharedService<R: RuleRepository>(
+    pub std::sync::Arc<std::sync::Mutex<ControlService<R>>>,
+);
+
+impl<R: RuleRepository> FlowRegistrar for SharedService<R> {
+    fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
+        self.0.lock().expect("service lock poisoned").register(flow, now_secs)
+    }
+}
+
+impl<R: RuleRepository> FlowRegistrar for ControlService<R> {
+    fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
+        if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
+            match resolved.action {
+                RuleAction::Allow | RuleAction::Deny => {
+                    return FlowDecision::Immediate(resolved.action);
+                }
+                RuleAction::Ask => {}
+            }
+        }
+        match self.decision_engine.register_unknown_flow(flow, now_secs) {
+            DecisionOutcome::Immediate(action) => FlowDecision::Immediate(action),
+            DecisionOutcome::Pending(p) => FlowDecision::Pending {
+                id: p.id,
+                deadline_at_secs: p.deadline_at_secs,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use control_api::{ControlRequest, ControlResponse};
@@ -166,6 +199,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_domain: Some("example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            device_label: None,
         }
     }
 

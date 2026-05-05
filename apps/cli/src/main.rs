@@ -85,6 +85,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                         destination_ip: cmd_args[2].clone(),
                         destination_domain: domain,
                         protocol,
+                        device_label: None,
                     },
                     now_secs,
                 },
