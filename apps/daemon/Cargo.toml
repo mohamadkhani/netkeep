@@ -13,3 +13,4 @@ flow-classifier = { path = "../../crates/flow-classifier" }
 serde_json = "1"
 state-store = { path = "../../crates/state-store" }
 
+libc = "0.2"

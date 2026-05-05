@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::Stdio;
 
-use core_types::{FlowContext, RuleAction, TransportProtocol};
+use core_types::{FlowContext, RuleAction};
 use flow_classifier::{Classifier, RawPacket};
 
 // ---------------------------------------------------------------------------
@@ -181,7 +181,7 @@ impl<S: VerdictSink> DryRunEnforcer<S> {
 // Nftables bootstrap — sets up/tears down the NFQUEUE interception rules
 // ---------------------------------------------------------------------------
 
-pub trait NftablesBootstrap {
+pub trait NftablesBootstrap: Send + Sync {
     fn setup(&self, queue_num: u16) -> Result<(), String>;
     fn teardown(&self) -> Result<(), String>;
 }
@@ -233,18 +233,27 @@ fn run_nft_script(script: &str) -> Result<(), String> {
 
 #[derive(Debug, Default)]
 pub struct FakeBootstrap {
-    pub setup_count: std::cell::Cell<u32>,
-    pub teardown_count: std::cell::Cell<u32>,
+    pub setup_count: std::sync::atomic::AtomicU32,
+    pub teardown_count: std::sync::atomic::AtomicU32,
     pub fail: bool,
+}
+
+impl FakeBootstrap {
+    pub fn setup_count(&self) -> u32 {
+        self.setup_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn teardown_count(&self) -> u32 {
+        self.teardown_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl NftablesBootstrap for FakeBootstrap {
     fn setup(&self, _queue_num: u16) -> Result<(), String> {
-        self.setup_count.set(self.setup_count.get() + 1);
+        self.setup_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.fail { Err("fake setup failure".to_string()) } else { Ok(()) }
     }
     fn teardown(&self) -> Result<(), String> {
-        self.teardown_count.set(self.teardown_count.get() + 1);
+        self.teardown_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.fail { Err("fake teardown failure".to_string()) } else { Ok(()) }
     }
 }
@@ -434,15 +443,15 @@ mod tests {
     fn fake_bootstrap_setup_records_call() {
         let b = FakeBootstrap::default();
         assert!(b.setup(0).is_ok());
-        assert_eq!(b.setup_count.get(), 1);
-        assert_eq!(b.teardown_count.get(), 0);
+        assert_eq!(b.setup_count(), 1);
+        assert_eq!(b.teardown_count(), 0);
     }
 
     #[test]
     fn fake_bootstrap_teardown_records_call() {
         let b = FakeBootstrap::default();
         assert!(b.teardown().is_ok());
-        assert_eq!(b.teardown_count.get(), 1);
+        assert_eq!(b.teardown_count(), 1);
     }
 
     #[test]

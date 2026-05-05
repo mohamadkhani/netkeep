@@ -192,18 +192,18 @@
 
 ## 6.2 `decision-engine`
 
-- [ ] unknown flow creates pending decision
-- [ ] pending decision resolved by user allow
-- [ ] pending decision resolved by user deny
-- [ ] pending timeout -> auto-deny at 100s default
-- [ ] custom timeout respected
-- [ ] queue cap at 100 enforced
-- [ ] queue overflow default -> deny new flow
-- [ ] overflow policy configurable
-- [ ] until-restart decision expires on restart
+- [x] unknown flow creates pending decision
+- [x] pending decision resolved by user allow
+- [x] pending decision resolved by user deny
+- [x] pending timeout -> auto-deny at 100s default
+- [x] custom timeout respected
+- [x] queue cap at 100 enforced
+- [x] queue overflow default -> deny new flow
+- [x] overflow policy configurable
+- [x] until-restart decision expires on restart
 - [ ] permanent decision persists
-- [ ] protocol-specific pending behavior (TCP vs UDP/QUIC) follows configured policy
-- [ ] pending countdown/deadline metadata surfaced for UI/CLI
+- [x] protocol-specific pending behavior (TCP vs UDP/QUIC) follows configured policy
+- [x] pending countdown/deadline metadata surfaced for UI/CLI
 
 ## 6.3 `flow-classifier`
 
@@ -228,9 +228,9 @@
 ## 6.5 `state-store`
 
 - [ ] migration bootstrap on empty DB
-- [ ] rule insert/read/update/delete
-- [ ] flow event append/read
-- [ ] pending decision persistence
+- [x] rule insert/read/update/delete
+- [x] flow event append/read
+- [x] pending decision persistence
 - [ ] transaction rollback on failure
 - [ ] concurrent access behavior
 
@@ -342,7 +342,7 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Added integration tests for both immediate-allow relay and pending-then-allow relay
 - [x] Added `enforcer` crate skeleton with dry-run mark allocation and verdict sink tests
 
-### 2026-05-06
+### 2026-05-06 (session 2)
 
 - [x] Added `flow-classifier` crate with `ProcessResolver`, `DnsResolver`, `DeviceLabelResolver` traits and `FlowClassifier`
 - [x] Added `Classifier` trait to `flow-classifier` for use by `PacketProcessor`
@@ -355,6 +355,18 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Added `parse_raw_packet` with IPv4/IPv6, TCP/UDP, and best-effort QUIC detection
 - [x] Wired nfqueue processor into daemon via `LOGIGUARD_NFQUEUE=<queue_num>` env var
 - [x] 74 tests passing across workspace
+
+### 2026-05-06 (session 3)
+
+- [x] Fixed Bug 1: `expire_timeouts()` now called every second via daemon timer thread (`ControlService::tick`)
+- [x] Fixed Bug 2: `purge_session_rules()` added to `RuleRepository`; daemon deletes `UntilRestart` rules on every startup
+- [x] Fixed Bug 3: CLI `add-rule` extended with `--action`, `--duration`, `--process` flags; destination type auto-detected (`*.x` → DomainWildcard, `/` → Cidr, IP → IpExact, else DomainExact)
+- [x] Fixed Bug 4: `FlowEvent`/`FlowState` types added; `FlowRepository` trait + SQLite impl; `list-flows [--limit N]` CLI command; flow events recorded on every verdict
+- [x] Fixed Bug 5: `PendingRepository` trait + SQLite impl; pending decisions persisted on register, deleted on resolve/expire; restored on daemon startup via `restore_pending()`
+- [x] Fixed Bug 6: `unlock` CLI command added; daemon checks SO_PEERCRED + `/proc/<pid>/fd/0` to require physical console; tears down nftables on success
+- [x] `NftablesBootstrap` made `Send + Sync`; `FakeBootstrap` switched from `Cell<u32>` to `AtomicU32`
+- [x] `ControlService` now generic over `Repository` supertrait (Rule + Flow + Pending)
+- [x] 93 tests passing across workspace
 
 ## 11) Definition of Done (MVP)
 

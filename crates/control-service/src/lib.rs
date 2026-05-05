@@ -1,14 +1,17 @@
 use control_api::{validate_request, ControlRequest, ControlResponse};
-use core_types::{FlowContext, RuleAction};
+use core_types::{FlowContext, FlowEvent, FlowState, RuleAction};
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
 use policy_engine::resolve_action;
-use state_store::RuleRepository;
+use state_store::Repository;
 
-pub struct ControlService<R: RuleRepository> {
+pub struct ControlService<R: Repository> {
     repo: R,
     decision_engine: DecisionEngine,
     health_config: HealthConfig,
+    /// Wall-clock seconds, updated by `tick()`. Used for event timestamps.
+    now_secs: u64,
+    event_counter: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -21,7 +24,7 @@ pub struct HealthConfig {
     pub other_timeout_secs: u64,
 }
 
-impl<R: RuleRepository> ControlService<R> {
+impl<R: Repository> ControlService<R> {
     pub fn new(repo: R) -> Self {
         let default_timeout_secs = 100;
         let pending_limit = 100;
@@ -62,7 +65,44 @@ impl<R: RuleRepository> ControlService<R> {
             repo,
             decision_engine,
             health_config,
+            now_secs: 0,
+            event_counter: 0,
         }
+    }
+
+    /// Called every second by the daemon timer thread.
+    /// Expires timed-out pending decisions and updates the internal clock.
+    pub fn tick(&mut self, now_secs: u64) {
+        self.now_secs = now_secs;
+        let expired_ids = self.decision_engine.expire_timeouts(now_secs);
+        for id in expired_ids {
+            self.repo.delete_pending(&id);
+            // Record expiry as a flow event (best-effort; we may not have full context here)
+        }
+    }
+
+    /// Load pending decisions from the persistent store back into the decision engine.
+    pub fn restore_pending(&mut self, decisions: Vec<core_types::PendingDecision>) {
+        self.decision_engine.restore_pending(decisions);
+    }
+
+    fn next_event_id(&mut self) -> String {
+        self.event_counter += 1;
+        format!("evt-{}", self.event_counter)
+    }
+
+    fn record_event(&mut self, flow: &FlowContext, state: FlowState, timestamp_secs: u64) {
+        let id = self.next_event_id();
+        self.repo.append_event(FlowEvent {
+            id,
+            process_name: flow.process_name.clone(),
+            device_label: flow.device_label.clone(),
+            destination_ip: flow.destination_ip.clone(),
+            destination_domain: flow.destination_domain.clone(),
+            protocol: flow.protocol,
+            state,
+            timestamp_secs,
+        });
     }
 
     pub fn handle(&mut self, request: ControlRequest) -> ControlResponse {
@@ -90,10 +130,19 @@ impl<R: RuleRepository> ControlService<R> {
             ControlRequest::ListPending => {
                 ControlResponse::PendingList(self.decision_engine.list_pending())
             }
+            ControlRequest::ListFlows { limit } => {
+                ControlResponse::FlowList(self.repo.list_events(limit))
+            }
             ControlRequest::RegisterUnknownFlow { flow, now_secs } => {
                 if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
                     match resolved.action {
                         RuleAction::Allow | RuleAction::Deny => {
+                            let state = if resolved.action == RuleAction::Allow {
+                                FlowState::Allowed
+                            } else {
+                                FlowState::Denied
+                            };
+                            self.record_event(&flow, state, now_secs);
                             return ControlResponse::ImmediateVerdict {
                                 action: resolved.action,
                             };
@@ -101,14 +150,26 @@ impl<R: RuleRepository> ControlService<R> {
                         RuleAction::Ask => {}
                     }
                 }
-                match self.decision_engine.register_unknown_flow(flow, now_secs) {
-                    DecisionOutcome::Immediate(action) => ControlResponse::ImmediateVerdict { action },
-                    DecisionOutcome::Pending(p) => ControlResponse::PendingCreated {
-                        pending_id: p.id,
-                        created_at_secs: p.created_at_secs,
-                        deadline_at_secs: p.deadline_at_secs,
-                        protocol: p.flow.protocol,
-                    },
+                match self.decision_engine.register_unknown_flow(flow.clone(), now_secs) {
+                    DecisionOutcome::Immediate(action) => {
+                        let state = if action == RuleAction::Allow {
+                            FlowState::Allowed
+                        } else {
+                            FlowState::Denied
+                        };
+                        self.record_event(&flow, state, now_secs);
+                        ControlResponse::ImmediateVerdict { action }
+                    }
+                    DecisionOutcome::Pending(p) => {
+                        self.record_event(&flow, FlowState::Pending, now_secs);
+                        self.repo.upsert_pending(&p);
+                        ControlResponse::PendingCreated {
+                            pending_id: p.id,
+                            created_at_secs: p.created_at_secs,
+                            deadline_at_secs: p.deadline_at_secs,
+                            protocol: p.flow.protocol,
+                        }
+                    }
                 }
             }
             ControlRequest::AwaitPendingDecision { pending_id } => {
@@ -122,6 +183,7 @@ impl<R: RuleRepository> ControlService<R> {
             }
             ControlRequest::ResolvePending { pending_id, action } => {
                 if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action) {
+                    self.repo.delete_pending(&pending_id);
                     ControlResponse::PendingResolved { action: chosen }
                 } else {
                     ControlResponse::Error("pending decision not found".to_string())
@@ -137,38 +199,59 @@ impl<R: RuleRepository> ControlService<R> {
                 quic_timeout_secs: self.health_config.quic_timeout_secs,
                 other_timeout_secs: self.health_config.other_timeout_secs,
             },
+            // Unlock is handled by the daemon directly (needs nftables access + console check).
+            // The service just acknowledges it; the daemon does the real work.
+            ControlRequest::Unlock => ControlResponse::Unlocked,
         }
     }
 }
 
 /// Newtype wrapper that lets a shared `ControlService` be used as a `FlowRegistrar`
 /// across threads (e.g., handed to the nfqueue processor thread).
-pub struct SharedService<R: RuleRepository>(
+pub struct SharedService<R: Repository>(
     pub std::sync::Arc<std::sync::Mutex<ControlService<R>>>,
 );
 
-impl<R: RuleRepository> FlowRegistrar for SharedService<R> {
+impl<R: Repository> FlowRegistrar for SharedService<R> {
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
         self.0.lock().expect("service lock poisoned").register(flow, now_secs)
     }
 }
 
-impl<R: RuleRepository> FlowRegistrar for ControlService<R> {
+impl<R: Repository> FlowRegistrar for ControlService<R> {
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
         if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
             match resolved.action {
                 RuleAction::Allow | RuleAction::Deny => {
+                    let state = if resolved.action == RuleAction::Allow {
+                        FlowState::Allowed
+                    } else {
+                        FlowState::Denied
+                    };
+                    self.record_event(&flow, state, now_secs);
                     return FlowDecision::Immediate(resolved.action);
                 }
                 RuleAction::Ask => {}
             }
         }
-        match self.decision_engine.register_unknown_flow(flow, now_secs) {
-            DecisionOutcome::Immediate(action) => FlowDecision::Immediate(action),
-            DecisionOutcome::Pending(p) => FlowDecision::Pending {
-                id: p.id,
-                deadline_at_secs: p.deadline_at_secs,
-            },
+        match self.decision_engine.register_unknown_flow(flow.clone(), now_secs) {
+            DecisionOutcome::Immediate(action) => {
+                let state = if action == RuleAction::Allow {
+                    FlowState::Allowed
+                } else {
+                    FlowState::Denied
+                };
+                self.record_event(&flow, state, now_secs);
+                FlowDecision::Immediate(action)
+            }
+            DecisionOutcome::Pending(p) => {
+                self.record_event(&flow, FlowState::Pending, now_secs);
+                self.repo.upsert_pending(&p);
+                FlowDecision::Pending {
+                    id: p.id,
+                    deadline_at_secs: p.deadline_at_secs,
+                }
+            }
         }
     }
 }
@@ -373,5 +456,72 @@ mod tests {
             }
         );
     }
-}
 
+    #[test]
+    fn tick_expires_timed_out_pending() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let _ = service.handle(ControlRequest::RegisterUnknownFlow {
+            flow: mk_flow(),
+            now_secs: 0,
+        });
+        // deadline is 0 + 100 = 100; tick at 101 should expire it
+        service.tick(101);
+        let out = service.handle(ControlRequest::ListPending);
+        match out {
+            ControlResponse::PendingList(items) => assert!(items.is_empty()),
+            _ => panic!("expected pending list"),
+        }
+    }
+
+    #[test]
+    fn flow_events_recorded_on_immediate_verdict() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let mut deny_rule = mk_rule("deny-r1");
+        deny_rule.action = RuleAction::Deny;
+        let _ = service.handle(ControlRequest::AddRule(deny_rule));
+        let _ = service.handle(ControlRequest::RegisterUnknownFlow {
+            flow: mk_flow(),
+            now_secs: 50,
+        });
+        let out = service.handle(ControlRequest::ListFlows { limit: 10 });
+        match out {
+            ControlResponse::FlowList(events) => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].state, core_types::FlowState::Denied);
+            }
+            _ => panic!("expected flow list"),
+        }
+    }
+
+    #[test]
+    fn pending_persisted_in_repo_on_register() {
+        use state_store::PendingRepository;
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let _ = service.handle(ControlRequest::RegisterUnknownFlow {
+            flow: mk_flow(),
+            now_secs: 10,
+        });
+        let live = service.repo.list_live_pending(10);
+        assert_eq!(live.len(), 1);
+    }
+
+    #[test]
+    fn pending_removed_from_repo_on_resolve() {
+        use state_store::PendingRepository;
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let reg = service.handle(ControlRequest::RegisterUnknownFlow {
+            flow: mk_flow(),
+            now_secs: 10,
+        });
+        let pid = match reg {
+            ControlResponse::PendingCreated { pending_id, .. } => pending_id,
+            _ => panic!(),
+        };
+        let _ = service.handle(ControlRequest::ResolvePending {
+            pending_id: pid,
+            action: RuleAction::Allow,
+        });
+        let live = service.repo.list_live_pending(10);
+        assert!(live.is_empty());
+    }
+}

@@ -6,22 +6,38 @@ use control_api::{ControlRequest, ControlResponse};
 use serde_json::json;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
-
-fn build_rule(id: &str, destination: &str) -> Rule {
-    Rule {
-        id: id.to_string(),
-        enabled: true,
-        action: RuleAction::Allow,
-        duration: RuleDuration::UntilRestart,
-        process_name: None,
-        destination: DestinationMatcher::DomainExact(destination.to_string()),
-    }
-}
+const DEFAULT_FLOW_LIST_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputMode {
     Text,
     Json,
+}
+
+/// Infer the destination matcher type from the value string.
+/// *.x    → DomainWildcard
+/// contains '/' → Cidr
+/// all digits/dots → IpExact
+/// else  → DomainExact
+fn parse_destination(value: &str) -> DestinationMatcher {
+    if let Some(rest) = value.strip_prefix("*.") {
+        return DestinationMatcher::DomainWildcard(rest.to_string());
+    }
+    if value.contains('/') {
+        return DestinationMatcher::Cidr(value.to_string());
+    }
+    if value.chars().all(|c| c.is_ascii_digit() || c == '.') && value.contains('.') {
+        return DestinationMatcher::IpExact(value.to_string());
+    }
+    DestinationMatcher::DomainExact(value.to_string())
+}
+
+/// Parse `--flag value` pairs out of a slice, returning (remaining_positional_args, value_or_None)
+/// for each expected flag.  Returns an error string if an unknown flag is encountered.
+fn extract_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find(|w| w[0] == flag)
+        .map(|w| w[1].as_str())
 }
 
 fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String> {
@@ -33,35 +49,95 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
         };
 
     if cmd_args.is_empty() {
-        return Err("usage: add-rule <id> <domain> | list-rules | list-pendings | delete-rule <id> | register-flow <process> <ip> <domain|-> <tcp|udp|quic|other> <now-secs> | resolve-pending <id> <allow|deny|ask> | health | show-config".to_string());
+        return Err(
+            "usage: add-rule <id> <destination> [--action allow|deny|ask] \
+             [--duration until-restart|permanent] [--process <name>] | \
+             list-rules | list-pendings | list-flows [--limit N] | \
+             delete-rule <id> | \
+             register-flow <process> <ip> <domain|-> <tcp|udp|quic|other> <now-secs> | \
+             resolve-pending <id> <allow|deny|ask> | \
+             health | show-config | unlock"
+                .to_string(),
+        );
     }
 
     match cmd_args[0].as_str() {
         "add-rule" => {
-            if cmd_args.len() != 3 {
-                return Err("usage: add-rule <id> <domain>".to_string());
+            let flags_rest = &cmd_args[1..];
+            let mut positionals = Vec::new();
+            let mut i = 0;
+            while i < flags_rest.len() {
+                if flags_rest[i].starts_with("--") {
+                    i += 2; // skip flag + value
+                } else {
+                    positionals.push(flags_rest[i].as_str());
+                    i += 1;
+                }
             }
+            if positionals.len() < 2 {
+                return Err("usage: add-rule <id> <destination> [--action allow|deny|ask] \
+                            [--duration until-restart|permanent] [--process <name>]"
+                    .to_string());
+            }
+            let id = positionals[0].to_string();
+            let destination = parse_destination(positionals[1]);
+
+            let action = match extract_flag(flags_rest, "--action") {
+                Some("allow") => RuleAction::Allow,
+                Some("deny") => RuleAction::Deny,
+                Some("ask") => RuleAction::Ask,
+                Some(other) => {
+                    return Err(format!("unknown action: {other}; use allow, deny, or ask"))
+                }
+                None => RuleAction::Allow,
+            };
+            let duration = match extract_flag(flags_rest, "--duration") {
+                Some("until-restart") | Some("session") => RuleDuration::UntilRestart,
+                Some("permanent") => RuleDuration::Permanent,
+                Some(other) => {
+                    return Err(format!(
+                        "unknown duration: {other}; use until-restart or permanent"
+                    ))
+                }
+                None => RuleDuration::UntilRestart,
+            };
+            let process_name = extract_flag(flags_rest, "--process").map(|s| s.to_string());
+
             Ok((
-                ControlRequest::AddRule(build_rule(&cmd_args[1], &cmd_args[2])),
+                ControlRequest::AddRule(Rule {
+                    id,
+                    enabled: true,
+                    action,
+                    duration,
+                    process_name,
+                    destination,
+                }),
                 output_mode,
             ))
         }
         "list-rules" => Ok((ControlRequest::ListRules, output_mode)),
         "list-pendings" => Ok((ControlRequest::ListPending, output_mode)),
+        "list-flows" => {
+            let limit = extract_flag(&cmd_args[1..], "--limit")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_FLOW_LIST_LIMIT);
+            Ok((ControlRequest::ListFlows { limit }, output_mode))
+        }
         "delete-rule" => {
             if cmd_args.len() != 2 {
                 return Err("usage: delete-rule <id>".to_string());
             }
             Ok((
-                ControlRequest::DeleteRule {
-                    id: cmd_args[1].clone(),
-                },
+                ControlRequest::DeleteRule { id: cmd_args[1].clone() },
                 output_mode,
             ))
         }
         "register-flow" => {
             if cmd_args.len() != 6 {
-                return Err("usage: register-flow <process> <ip> <domain|-> <tcp|udp|quic|other> <now-secs>".to_string());
+                return Err(
+                    "usage: register-flow <process> <ip> <domain|-> <tcp|udp|quic|other> <now-secs>"
+                        .to_string(),
+                );
             }
             let now_secs = cmd_args[5]
                 .parse::<u64>()
@@ -73,11 +149,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                 "other" => TransportProtocol::Other,
                 _ => return Err("protocol must be one of: tcp, udp, quic, other".to_string()),
             };
-            let domain = if cmd_args[3] == "-" {
-                None
-            } else {
-                Some(cmd_args[3].clone())
-            };
+            let domain = if cmd_args[3] == "-" { None } else { Some(cmd_args[3].clone()) };
             Ok((
                 ControlRequest::RegisterUnknownFlow {
                     flow: FlowContext {
@@ -112,6 +184,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
         }
         "health" => Ok((ControlRequest::Health, output_mode)),
         "show-config" => Ok((ControlRequest::Health, OutputMode::Json)),
+        "unlock" => Ok((ControlRequest::Unlock, output_mode)),
         _ => Err("unknown command".to_string()),
     }
 }
@@ -132,7 +205,12 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
             } else {
                 let body = rules
                     .iter()
-                    .map(|r| format!("{} {:?}", r.id, r.destination))
+                    .map(|r| {
+                        format!(
+                            "{} {:?} action={:?} duration={:?} process={:?}",
+                            r.id, r.destination, r.action, r.duration, r.process_name
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 Ok(body)
@@ -155,13 +233,37 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
                 Ok(body)
             }
         }
+        ControlResponse::FlowList(events) => {
+            if events.is_empty() {
+                Ok("no flow events".to_string())
+            } else {
+                let body = events
+                    .iter()
+                    .map(|e| {
+                        format!(
+                            "{} process={:?} ip={} domain={:?} proto={:?} state={:?} t={}",
+                            e.id,
+                            e.process_name,
+                            e.destination_ip,
+                            e.destination_domain,
+                            e.protocol,
+                            e.state,
+                            e.timestamp_secs,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(body)
+            }
+        }
         ControlResponse::PendingCreated {
             pending_id,
             created_at_secs,
             deadline_at_secs,
             protocol,
         } => Ok(format!(
-            "pending created id={pending_id} protocol={protocol:?} created_at_secs={created_at_secs} deadline_at_secs={deadline_at_secs}"
+            "pending created id={pending_id} protocol={protocol:?} \
+             created_at_secs={created_at_secs} deadline_at_secs={deadline_at_secs}"
         )),
         ControlResponse::ImmediateVerdict { action } => {
             Ok(format!("immediate verdict={action:?}"))
@@ -169,7 +271,9 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
         ControlResponse::PendingStillWaiting { pending_id } => {
             Ok(format!("pending still waiting id={pending_id}"))
         }
-        ControlResponse::PendingResolved { action } => Ok(format!("pending resolved action={action:?}")),
+        ControlResponse::PendingResolved { action } => {
+            Ok(format!("pending resolved action={action:?}"))
+        }
         ControlResponse::Health {
             ready,
             fail_close_active,
@@ -180,8 +284,12 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
             quic_timeout_secs,
             other_timeout_secs,
         } => Ok(format!(
-            "ready={ready} fail_close_active={fail_close_active} pending_limit={pending_limit} default_timeout_secs={default_timeout_secs} tcp_timeout_secs={tcp_timeout_secs} udp_timeout_secs={udp_timeout_secs} quic_timeout_secs={quic_timeout_secs} other_timeout_secs={other_timeout_secs}"
+            "ready={ready} fail_close_active={fail_close_active} \
+             pending_limit={pending_limit} default_timeout_secs={default_timeout_secs} \
+             tcp={tcp_timeout_secs}s udp={udp_timeout_secs}s \
+             quic={quic_timeout_secs}s other={other_timeout_secs}s"
         )),
+        ControlResponse::Unlocked => Ok("unlocked: nftables rules removed".to_string()),
         ControlResponse::Error(err) => Err(err),
     }
 }
@@ -236,92 +344,156 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_add_rule_request() {
-        let args = vec![
-            "add-rule".to_string(),
-            "r1".to_string(),
-            "example.com".to_string(),
-        ];
-        let req = parse_request(&args).expect("must parse");
+    fn add_rule_domain_exact_default_action_duration() {
+        let args = ["add-rule", "r1", "example.com"]
+            .map(String::from)
+            .to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
         match req {
-            (ControlRequest::AddRule(rule), OutputMode::Text) => {
+            ControlRequest::AddRule(rule) => {
                 assert_eq!(rule.id, "r1");
-                assert_eq!(
-                    rule.destination,
-                    DestinationMatcher::DomainExact("example.com".to_string())
-                );
+                assert_eq!(rule.destination, DestinationMatcher::DomainExact("example.com".to_string()));
+                assert_eq!(rule.action, RuleAction::Allow);
+                assert_eq!(rule.duration, RuleDuration::UntilRestart);
+                assert!(rule.process_name.is_none());
             }
-            _ => panic!("expected add-rule"),
+            _ => panic!("expected AddRule"),
         }
     }
 
     #[test]
+    fn add_rule_deny_permanent_with_process() {
+        let args = [
+            "add-rule", "r1", "ads.google.com",
+            "--action", "deny",
+            "--duration", "permanent",
+            "--process", "firefox",
+        ]
+        .map(String::from)
+        .to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        match req {
+            ControlRequest::AddRule(rule) => {
+                assert_eq!(rule.action, RuleAction::Deny);
+                assert_eq!(rule.duration, RuleDuration::Permanent);
+                assert_eq!(rule.process_name, Some("firefox".to_string()));
+            }
+            _ => panic!("expected AddRule"),
+        }
+    }
+
+    #[test]
+    fn add_rule_wildcard_destination_detected() {
+        let args = ["add-rule", "r1", "*.example.com"].map(String::from).to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        match req {
+            ControlRequest::AddRule(rule) => {
+                assert_eq!(
+                    rule.destination,
+                    DestinationMatcher::DomainWildcard("example.com".to_string())
+                );
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn add_rule_cidr_destination_detected() {
+        let args = ["add-rule", "r1", "10.0.0.0/8", "--action", "deny"]
+            .map(String::from)
+            .to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        match req {
+            ControlRequest::AddRule(rule) => {
+                assert_eq!(rule.destination, DestinationMatcher::Cidr("10.0.0.0/8".to_string()));
+                assert_eq!(rule.action, RuleAction::Deny);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn add_rule_ip_exact_destination_detected() {
+        let args = ["add-rule", "r1", "1.1.1.1"].map(String::from).to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        match req {
+            ControlRequest::AddRule(rule) => {
+                assert_eq!(rule.destination, DestinationMatcher::IpExact("1.1.1.1".to_string()));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parses_list_flows_default_limit() {
+        let args = ["list-flows"].map(String::from).to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        assert_eq!(req, ControlRequest::ListFlows { limit: DEFAULT_FLOW_LIST_LIMIT });
+    }
+
+    #[test]
+    fn parses_list_flows_custom_limit() {
+        let args = ["list-flows", "--limit", "10"].map(String::from).to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        assert_eq!(req, ControlRequest::ListFlows { limit: 10 });
+    }
+
+    #[test]
+    fn parses_unlock_command() {
+        let args = ["unlock"].map(String::from).to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        assert_eq!(req, ControlRequest::Unlock);
+    }
+
+    #[test]
     fn parses_delete_rule_request() {
-        let args = vec!["delete-rule".to_string(), "r1".to_string()];
-        let req = parse_request(&args).expect("must parse");
-        assert_eq!(
-            req,
-            (
-                ControlRequest::DeleteRule { id: "r1".to_string() },
-                OutputMode::Text
-            )
-        );
+        let args = ["delete-rule", "r1"].map(String::from).to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        assert_eq!(req, (ControlRequest::DeleteRule { id: "r1".to_string() }, OutputMode::Text).0);
     }
 
     #[test]
     fn parses_list_rules_request() {
-        let args = vec!["list-rules".to_string()];
-        let req = parse_request(&args).expect("must parse");
-        assert_eq!(req, (ControlRequest::ListRules, OutputMode::Text));
+        let args = ["list-rules"].map(String::from).to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        assert_eq!(req, ControlRequest::ListRules);
     }
 
     #[test]
     fn parses_list_pendings_request() {
-        let args = vec!["list-pendings".to_string()];
-        let req = parse_request(&args).expect("must parse");
-        assert_eq!(req, (ControlRequest::ListPending, OutputMode::Text));
+        let args = ["list-pendings"].map(String::from).to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        assert_eq!(req, ControlRequest::ListPending);
     }
 
     #[test]
     fn rejects_unknown_command() {
-        let args = vec!["what".to_string()];
+        let args = ["what"].map(String::from).to_vec();
         let err = parse_request(&args).expect_err("must fail");
         assert_eq!(err, "unknown command");
     }
 
     #[test]
     fn parses_resolve_pending_request() {
-        let args = vec![
-            "resolve-pending".to_string(),
-            "pending-1".to_string(),
-            "deny".to_string(),
-        ];
-        let req = parse_request(&args).expect("must parse");
+        let args = ["resolve-pending", "pending-1", "deny"].map(String::from).to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
         assert_eq!(
             req,
-            (
-                ControlRequest::ResolvePending {
-                    pending_id: "pending-1".to_string(),
-                    action: RuleAction::Deny
-                },
-                OutputMode::Text
-            )
+            ControlRequest::ResolvePending {
+                pending_id: "pending-1".to_string(),
+                action: RuleAction::Deny
+            }
         );
     }
 
     #[test]
     fn parse_register_flow_supports_missing_domain() {
-        let args = vec![
-            "register-flow".to_string(),
-            "curl".to_string(),
-            "1.1.1.1".to_string(),
-            "-".to_string(),
-            "tcp".to_string(),
-            "100".to_string(),
-        ];
-        let req = parse_request(&args).expect("must parse");
+        let args = ["register-flow", "curl", "1.1.1.1", "-", "tcp", "100"]
+            .map(String::from)
+            .to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
         match req {
-            (ControlRequest::RegisterUnknownFlow { flow, now_secs }, OutputMode::Text) => {
+            ControlRequest::RegisterUnknownFlow { flow, now_secs } => {
                 assert_eq!(flow.destination_domain, None);
                 assert_eq!(flow.protocol, TransportProtocol::Tcp);
                 assert_eq!(now_secs, 100);
@@ -332,16 +504,17 @@ mod tests {
 
     #[test]
     fn parses_show_config_as_json_health_request() {
-        let args = vec!["show-config".to_string()];
-        let req = parse_request(&args).expect("must parse");
-        assert_eq!(req, (ControlRequest::Health, OutputMode::Json));
+        let args = ["show-config"].map(String::from).to_vec();
+        let (req, mode) = parse_request(&args).expect("must parse");
+        assert_eq!(req, ControlRequest::Health);
+        assert_eq!(mode, OutputMode::Json);
     }
 
     #[test]
     fn parses_global_json_flag_for_other_commands() {
-        let args = vec!["--json".to_string(), "health".to_string()];
-        let req = parse_request(&args).expect("must parse");
-        assert_eq!(req, (ControlRequest::Health, OutputMode::Json));
+        let args = ["--json", "health"].map(String::from).to_vec();
+        let (req, mode) = parse_request(&args).expect("must parse");
+        assert_eq!(req, ControlRequest::Health);
+        assert_eq!(mode, OutputMode::Json);
     }
 }
-

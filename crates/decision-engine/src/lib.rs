@@ -123,6 +123,19 @@ impl DecisionEngine {
         items.sort_by(|a, b| a.created_at_secs.cmp(&b.created_at_secs).then(a.id.cmp(&b.id)));
         items
     }
+
+    /// Reload pending decisions from persistent storage (called at daemon startup).
+    /// Advances `next_id` past any restored ids so no collision occurs.
+    pub fn restore_pending(&mut self, decisions: Vec<PendingDecision>) {
+        for d in decisions {
+            if let Some(n) = d.id.strip_prefix("pending-").and_then(|s| s.parse::<u64>().ok()) {
+                if n >= self.next_id {
+                    self.next_id = n + 1;
+                }
+            }
+            self.pending.insert(d.id.clone(), d);
+        }
+    }
 }
 
 #[cfg(test)]

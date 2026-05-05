@@ -1,4 +1,4 @@
-use core_types::{FlowContext, PendingDecision, Rule, RuleAction, TransportProtocol};
+use core_types::{FlowContext, FlowEvent, PendingDecision, Rule, RuleAction, TransportProtocol};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7,10 +7,12 @@ pub enum ControlRequest {
     ListRules,
     DeleteRule { id: String },
     ListPending,
+    ListFlows { limit: usize },
     RegisterUnknownFlow { flow: FlowContext, now_secs: u64 },
     AwaitPendingDecision { pending_id: String },
     ResolvePending { pending_id: String, action: RuleAction },
     Health,
+    Unlock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +20,7 @@ pub enum ControlResponse {
     Ok,
     RuleList(Vec<Rule>),
     PendingList(Vec<PendingDecision>),
+    FlowList(Vec<FlowEvent>),
     PendingCreated {
         pending_id: String,
         created_at_secs: u64,
@@ -37,6 +40,7 @@ pub enum ControlResponse {
         quic_timeout_secs: u64,
         other_timeout_secs: u64,
     },
+    Unlocked,
     Error(String),
 }
 
@@ -50,6 +54,9 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
         }
         ControlRequest::AwaitPendingDecision { pending_id } if pending_id.trim().is_empty() => {
             Err("pending id cannot be empty".to_string())
+        }
+        ControlRequest::ListFlows { limit } if *limit == 0 => {
+            Err("flow list limit must be > 0".to_string())
         }
         _ => Ok(()),
     }
@@ -99,5 +106,10 @@ mod tests {
         };
         assert_eq!(validate_request(&req), Err("pending id cannot be empty".to_string()));
     }
-}
 
+    #[test]
+    fn rejects_zero_flow_list_limit() {
+        let req = ControlRequest::ListFlows { limit: 0 };
+        assert_eq!(validate_request(&req), Err("flow list limit must be > 0".to_string()));
+    }
+}

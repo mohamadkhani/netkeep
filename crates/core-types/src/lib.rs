@@ -56,3 +56,23 @@ pub enum TransportProtocol {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowState {
+    Pending,
+    Allowed,
+    Denied,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowEvent {
+    pub id: String,
+    pub process_name: Option<String>,
+    pub device_label: Option<String>,
+    pub destination_ip: String,
+    pub destination_domain: Option<String>,
+    pub protocol: TransportProtocol,
+    pub state: FlowState,
+    pub timestamp_secs: u64,
+}
+
