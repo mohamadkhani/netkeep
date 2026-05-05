@@ -9,6 +9,7 @@ members = [
   "apps/daemon",
   "apps/cli",
   "apps/gpui",
+  "apps/emulator",
 ]
 resolver = "2"
 

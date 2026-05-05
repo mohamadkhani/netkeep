@@ -33,7 +33,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
         };
 
     if cmd_args.is_empty() {
-        return Err("usage: add-rule <id> <domain> | list-rules | delete-rule <id> | register-flow <process> <ip> <domain|-> <tcp|udp|quic|other> <now-secs> | resolve-pending <id> <allow|deny|ask> | health | show-config".to_string());
+        return Err("usage: add-rule <id> <domain> | list-rules | list-pendings | delete-rule <id> | register-flow <process> <ip> <domain|-> <tcp|udp|quic|other> <now-secs> | resolve-pending <id> <allow|deny|ask> | health | show-config".to_string());
     }
 
     match cmd_args[0].as_str() {
@@ -47,6 +47,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
             ))
         }
         "list-rules" => Ok((ControlRequest::ListRules, output_mode)),
+        "list-pendings" => Ok((ControlRequest::ListPending, output_mode)),
         "delete-rule" => {
             if cmd_args.len() != 2 {
                 return Err("usage: delete-rule <id>".to_string());
@@ -136,6 +137,23 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
                 Ok(body)
             }
         }
+        ControlResponse::PendingList(items) => {
+            if items.is_empty() {
+                Ok("no pendings".to_string())
+            } else {
+                let body = items
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{} protocol={:?} created={} deadline={}",
+                            p.id, p.flow.protocol, p.created_at_secs, p.deadline_at_secs
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(body)
+            }
+        }
         ControlResponse::PendingCreated {
             pending_id,
             created_at_secs,
@@ -146,6 +164,9 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
         )),
         ControlResponse::ImmediateVerdict { action } => {
             Ok(format!("immediate verdict={action:?}"))
+        }
+        ControlResponse::PendingStillWaiting { pending_id } => {
+            Ok(format!("pending still waiting id={pending_id}"))
         }
         ControlResponse::PendingResolved { action } => Ok(format!("pending resolved action={action:?}")),
         ControlResponse::Health {
@@ -251,6 +272,13 @@ mod tests {
         let args = vec!["list-rules".to_string()];
         let req = parse_request(&args).expect("must parse");
         assert_eq!(req, (ControlRequest::ListRules, OutputMode::Text));
+    }
+
+    #[test]
+    fn parses_list_pendings_request() {
+        let args = vec!["list-pendings".to_string()];
+        let req = parse_request(&args).expect("must parse");
+        assert_eq!(req, (ControlRequest::ListPending, OutputMode::Text));
     }
 
     #[test]

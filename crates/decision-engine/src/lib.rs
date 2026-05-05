@@ -17,6 +17,7 @@ pub enum DecisionOutcome {
 #[derive(Debug)]
 pub struct DecisionEngine {
     pending: HashMap<String, PendingDecision>,
+    resolved: HashMap<String, RuleAction>,
     next_id: u64,
     pending_limit: usize,
     tcp_timeout_secs: u64,
@@ -30,6 +31,7 @@ impl DecisionEngine {
     pub fn new(pending_limit: usize, default_timeout_secs: u64, overflow_policy: OverflowPolicy) -> Self {
         Self {
             pending: HashMap::new(),
+            resolved: HashMap::new(),
             next_id: 1,
             pending_limit,
             tcp_timeout_secs: default_timeout_secs,
@@ -85,10 +87,19 @@ impl DecisionEngine {
 
     pub fn resolve_pending(&mut self, pending_id: &str, action: RuleAction) -> Option<RuleAction> {
         if self.pending.remove(pending_id).is_some() {
+            self.resolved.insert(pending_id.to_string(), action);
             Some(action)
         } else {
             None
         }
+    }
+
+    pub fn is_pending(&self, pending_id: &str) -> bool {
+        self.pending.contains_key(pending_id)
+    }
+
+    pub fn take_resolved(&mut self, pending_id: &str) -> Option<RuleAction> {
+        self.resolved.remove(pending_id)
     }
 
     pub fn expire_timeouts(&mut self, now_secs: u64) -> Vec<String> {
@@ -105,6 +116,12 @@ impl DecisionEngine {
 
     pub fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+
+    pub fn list_pending(&self) -> Vec<PendingDecision> {
+        let mut items = self.pending.values().cloned().collect::<Vec<_>>();
+        items.sort_by(|a, b| a.created_at_secs.cmp(&b.created_at_secs).then(a.id.cmp(&b.id)));
+        items
     }
 }
 
@@ -178,6 +195,36 @@ mod tests {
             DecisionOutcome::Pending(p) => assert_eq!(p.deadline_at_secs, 170),
             _ => panic!("expected pending"),
         }
+    }
+
+    #[test]
+    fn resolved_action_can_be_polled_once() {
+        let mut engine = DecisionEngine::new(10, 100, OverflowPolicy::DenyNew);
+        let out = engine.register_unknown_flow(mk_flow(), 5);
+        let id = match out {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+        assert!(engine.is_pending(&id));
+        let resolved = engine.resolve_pending(&id, RuleAction::Allow);
+        assert_eq!(resolved, Some(RuleAction::Allow));
+        assert!(!engine.is_pending(&id));
+        assert_eq!(engine.take_resolved(&id), Some(RuleAction::Allow));
+        assert_eq!(engine.take_resolved(&id), None);
+    }
+
+    #[test]
+    fn list_pending_returns_sorted_items() {
+        let mut engine = DecisionEngine::new(10, 100, OverflowPolicy::DenyNew);
+        let f1 = mk_flow();
+        let mut f2 = mk_flow();
+        f2.destination_ip = "2.2.2.2".to_string();
+        let _ = engine.register_unknown_flow(f1, 20);
+        let _ = engine.register_unknown_flow(f2, 10);
+        let list = engine.list_pending();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].created_at_secs, 10);
+        assert_eq!(list[1].created_at_secs, 20);
     }
 }
 

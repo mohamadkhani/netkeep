@@ -32,3 +32,6 @@ run-cli:
 run-gpui:
   cargo run -p logiguard-gpui
 
+run-emulator:
+  cargo run -p logiguard-emulator
+

@@ -47,6 +47,7 @@ dependencies = [
  "control-api",
  "core-types",
  "decision-engine",
+ "policy-engine",
  "state-store",
 ]
 
@@ -232,6 +233,16 @@ dependencies = [
  "decision-engine",
  "serde_json",
  "state-store",
+]
+
+[[package]]
+name = "logiguard-emulator"
+version = "0.1.0"
+dependencies = [
+ "control-api",
+ "core-types",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

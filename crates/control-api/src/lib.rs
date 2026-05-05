@@ -1,4 +1,4 @@
-use core_types::{FlowContext, Rule, RuleAction, TransportProtocol};
+use core_types::{FlowContext, PendingDecision, Rule, RuleAction, TransportProtocol};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6,7 +6,9 @@ pub enum ControlRequest {
     AddRule(Rule),
     ListRules,
     DeleteRule { id: String },
+    ListPending,
     RegisterUnknownFlow { flow: FlowContext, now_secs: u64 },
+    AwaitPendingDecision { pending_id: String },
     ResolvePending { pending_id: String, action: RuleAction },
     Health,
 }
@@ -15,6 +17,7 @@ pub enum ControlRequest {
 pub enum ControlResponse {
     Ok,
     RuleList(Vec<Rule>),
+    PendingList(Vec<PendingDecision>),
     PendingCreated {
         pending_id: String,
         created_at_secs: u64,
@@ -22,6 +25,7 @@ pub enum ControlResponse {
         protocol: TransportProtocol,
     },
     ImmediateVerdict { action: RuleAction },
+    PendingStillWaiting { pending_id: String },
     PendingResolved { action: RuleAction },
     Health {
         ready: bool,
@@ -42,6 +46,9 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
             Err("rule id cannot be empty".to_string())
         }
         ControlRequest::ResolvePending { pending_id, .. } if pending_id.trim().is_empty() => {
+            Err("pending id cannot be empty".to_string())
+        }
+        ControlRequest::AwaitPendingDecision { pending_id } if pending_id.trim().is_empty() => {
             Err("pending id cannot be empty".to_string())
         }
         _ => Ok(()),
@@ -81,6 +88,14 @@ mod tests {
         let req = ControlRequest::ResolvePending {
             pending_id: "".to_string(),
             action: RuleAction::Deny,
+        };
+        assert_eq!(validate_request(&req), Err("pending id cannot be empty".to_string()));
+    }
+
+    #[test]
+    fn rejects_empty_pending_id_for_await() {
+        let req = ControlRequest::AwaitPendingDecision {
+            pending_id: " ".to_string(),
         };
         assert_eq!(validate_request(&req), Err("pending id cannot be empty".to_string()));
     }

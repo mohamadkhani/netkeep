@@ -335,6 +335,7 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Extended health response to expose active pending/timeout runtime configuration
 - [x] Added `show-config` CLI command with JSON health/config output for scripting
 - [x] Added global `--json` CLI output mode for structured command responses
+- [x] Added SOCKS5 emulator app for proxy-based testing without system-wide interception
 
 ## 11) Definition of Done (MVP)
 

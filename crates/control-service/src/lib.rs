@@ -1,5 +1,7 @@
 use control_api::{validate_request, ControlRequest, ControlResponse};
+use core_types::RuleAction;
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
+use policy_engine::resolve_action;
 use state_store::RuleRepository;
 
 pub struct ControlService<R: RuleRepository> {
@@ -84,7 +86,20 @@ impl<R: RuleRepository> ControlService<R> {
                     ControlResponse::Error("rule not found".to_string())
                 }
             }
+            ControlRequest::ListPending => {
+                ControlResponse::PendingList(self.decision_engine.list_pending())
+            }
             ControlRequest::RegisterUnknownFlow { flow, now_secs } => {
+                if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
+                    match resolved.action {
+                        RuleAction::Allow | RuleAction::Deny => {
+                            return ControlResponse::ImmediateVerdict {
+                                action: resolved.action,
+                            };
+                        }
+                        RuleAction::Ask => {}
+                    }
+                }
                 match self.decision_engine.register_unknown_flow(flow, now_secs) {
                     DecisionOutcome::Immediate(action) => ControlResponse::ImmediateVerdict { action },
                     DecisionOutcome::Pending(p) => ControlResponse::PendingCreated {
@@ -93,6 +108,15 @@ impl<R: RuleRepository> ControlService<R> {
                         deadline_at_secs: p.deadline_at_secs,
                         protocol: p.flow.protocol,
                     },
+                }
+            }
+            ControlRequest::AwaitPendingDecision { pending_id } => {
+                if let Some(action) = self.decision_engine.take_resolved(&pending_id) {
+                    ControlResponse::PendingResolved { action }
+                } else if self.decision_engine.is_pending(&pending_id) {
+                    ControlResponse::PendingStillWaiting { pending_id }
+                } else {
+                    ControlResponse::Error("pending decision not found".to_string())
                 }
             }
             ControlRequest::ResolvePending { pending_id, action } => {
@@ -159,6 +183,20 @@ mod tests {
     }
 
     #[test]
+    fn list_pending_returns_created_pending_items() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let _ = service.handle(ControlRequest::RegisterUnknownFlow {
+            flow: mk_flow(),
+            now_secs: 10,
+        });
+        let out = service.handle(ControlRequest::ListPending);
+        match out {
+            ControlResponse::PendingList(items) => assert_eq!(items.len(), 1),
+            _ => panic!("expected pending list"),
+        }
+    }
+
+    #[test]
     fn register_and_resolve_pending_decision() {
         let mut service = ControlService::new(InMemoryRuleRepository::default());
         let register = service.handle(ControlRequest::RegisterUnknownFlow {
@@ -175,6 +213,54 @@ mod tests {
             action: RuleAction::Deny,
         });
         assert_eq!(resolved, ControlResponse::PendingResolved { action: RuleAction::Deny });
+    }
+
+    #[test]
+    fn await_pending_decision_transitions_waiting_to_resolved() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let register = service.handle(ControlRequest::RegisterUnknownFlow {
+            flow: mk_flow(),
+            now_secs: 10,
+        });
+        let pending_id = match register {
+            ControlResponse::PendingCreated { pending_id, .. } => pending_id,
+            _ => panic!("expected pending creation"),
+        };
+
+        let waiting = service.handle(ControlRequest::AwaitPendingDecision {
+            pending_id: pending_id.clone(),
+        });
+        assert_eq!(
+            waiting,
+            ControlResponse::PendingStillWaiting {
+                pending_id: pending_id.clone()
+            }
+        );
+
+        let _ = service.handle(ControlRequest::ResolvePending {
+            pending_id: pending_id.clone(),
+            action: RuleAction::Allow,
+        });
+        let resolved = service.handle(ControlRequest::AwaitPendingDecision {
+            pending_id: pending_id.clone(),
+        });
+        assert_eq!(resolved, ControlResponse::PendingResolved { action: RuleAction::Allow });
+    }
+
+    #[test]
+    fn matching_allow_rule_returns_immediate_verdict() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let _ = service.handle(ControlRequest::AddRule(mk_rule("allow-r1")));
+        let out = service.handle(ControlRequest::RegisterUnknownFlow {
+            flow: mk_flow(),
+            now_secs: 10,
+        });
+        assert_eq!(
+            out,
+            ControlResponse::ImmediateVerdict {
+                action: RuleAction::Allow
+            }
+        );
     }
 
     #[test]
