@@ -4,11 +4,21 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
 use control_api::{ControlRequest, ControlResponse};
-use control_service::ControlService;
+use control_service::{ControlService, HealthConfig};
+use decision_engine::{DecisionEngine, OverflowPolicy};
 use state_store::SqliteRuleRepository;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
 const DEFAULT_DB_PATH: &str = "/tmp/logiguard.db";
+const DEFAULT_TIMEOUT_SECS: u64 = 100;
+const DEFAULT_PENDING_LIMIT: usize = 100;
+
+fn parse_env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(default)
+}
 
 fn handle_client(
     stream: UnixStream,
@@ -37,6 +47,11 @@ fn main() {
     let socket_path =
         std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
     let db_path = std::env::var("LOGIGUARD_DB_PATH").unwrap_or_else(|_| DEFAULT_DB_PATH.to_string());
+    let default_timeout_secs = parse_env_u64("LOGIGUARD_DEFAULT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
+    let tcp_timeout_secs = parse_env_u64("LOGIGUARD_TCP_TIMEOUT_SECS", default_timeout_secs);
+    let udp_timeout_secs = parse_env_u64("LOGIGUARD_UDP_TIMEOUT_SECS", default_timeout_secs);
+    let quic_timeout_secs = parse_env_u64("LOGIGUARD_QUIC_TIMEOUT_SECS", default_timeout_secs);
+    let other_timeout_secs = parse_env_u64("LOGIGUARD_OTHER_TIMEOUT_SECS", default_timeout_secs);
     let _ = fs::remove_file(&socket_path);
     let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
@@ -53,12 +68,36 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let service = Arc::new(Mutex::new(ControlService::new(repo)));
+    let decision_engine = DecisionEngine::new(
+        DEFAULT_PENDING_LIMIT,
+        default_timeout_secs,
+        OverflowPolicy::DenyNew,
+    )
+    .with_protocol_timeouts(
+        tcp_timeout_secs,
+        udp_timeout_secs,
+        quic_timeout_secs,
+        other_timeout_secs,
+    );
+    let service = Arc::new(Mutex::new(ControlService::with_decision_engine_and_health(
+        repo,
+        decision_engine,
+        HealthConfig {
+            pending_limit: DEFAULT_PENDING_LIMIT,
+            default_timeout_secs,
+            tcp_timeout_secs,
+            udp_timeout_secs,
+            quic_timeout_secs,
+            other_timeout_secs,
+        },
+    )));
     let health = {
         let mut svc = service.lock().expect("service lock must work");
         svc.handle(ControlRequest::Health)
     };
-    println!("daemon listening on {socket_path}, db={db_path} {health:?}");
+    println!(
+        "daemon listening on {socket_path}, db={db_path}, timeouts(default={default_timeout_secs}, tcp={tcp_timeout_secs}, udp={udp_timeout_secs}, quic={quic_timeout_secs}, other={other_timeout_secs}) {health:?}"
+    );
 
     for stream in listener.incoming() {
         match stream {

@@ -131,6 +131,31 @@
   - discard domain inference
   - evaluate flow as IP-only
 
+## 4.1 In-Flight Hold Behavior (Ask Mode)
+
+- Goal:
+  - Keep new unmatched flows pending until user decision when feasible.
+- Default behavior:
+  - First packets of unknown flow enter pending state.
+  - User is prompted with countdown.
+  - No decision before deadline => auto-deny (default 100s, configurable).
+- Protocol expectations:
+  - TCP:
+    - Best support for pending decision on connection setup packets.
+    - Long waits can still fail if application-level timeout is shorter than decision window.
+  - UDP:
+    - Best-effort hold only; no connection state guarantees.
+    - Time-sensitive traffic may fail while pending.
+  - QUIC/HTTP3:
+    - Treated as UDP with best-effort hold.
+    - Domain attribution can be uncertain; fallback to IP/CIDR logic.
+- Queue safety:
+  - Maximum pending count: 100 (configurable).
+  - On queue overflow: default auto-deny for new unmatched flows (configurable).
+- Reliability constraints:
+  - "No breakage" is not guaranteed for all applications/protocols when user delays decisions.
+  - UX must emphasize countdown and default action to avoid silent stalls.
+
 ## 5) Testability Strategy (Non-Negotiable)
 
 - Every unit is testable in isolation
@@ -177,6 +202,8 @@
 - [ ] overflow policy configurable
 - [ ] until-restart decision expires on restart
 - [ ] permanent decision persists
+- [ ] protocol-specific pending behavior (TCP vs UDP/QUIC) follows configured policy
+- [ ] pending countdown/deadline metadata surfaced for UI/CLI
 
 ## 6.3 `flow-classifier`
 
@@ -228,6 +255,8 @@
 - [ ] flow with matching deny rule blocked
 - [ ] unknown flow prompts and pauses
 - [ ] unknown flow timeout denies
+- [ ] TCP pending flow accepted before deadline continues successfully
+- [ ] UDP/QUIC pending flow behavior follows best-effort policy and timeout fallback
 - [ ] rule creation from decision path works
 - [ ] restart preserves permanent rules only
 - [ ] conflict domain/IP behavior follows IP-only policy
@@ -300,6 +329,12 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Wired CLI through `control-service` and added `register-flow`/`resolve-pending` command parsing tests
 - [x] Added Unix socket JSON transport between daemon and CLI (`/tmp/logiguard.sock`)
 - [x] Added SQLite-backed `RuleRepository` and wired daemon persistence (`LOGIGUARD_DB_PATH`)
+- [x] Added protocol metadata (`TCP/UDP/QUIC/Other`) to flows and pending decision responses
+- [x] Added protocol-specific pending timeout policy support in `decision-engine`
+- [x] Wired daemon env-based protocol timeout configuration into `ControlService`
+- [x] Extended health response to expose active pending/timeout runtime configuration
+- [x] Added `show-config` CLI command with JSON health/config output for scripting
+- [x] Added global `--json` CLI output mode for structured command responses
 
 ## 11) Definition of Done (MVP)
 

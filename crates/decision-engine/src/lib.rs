@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use core_types::{FlowContext, PendingDecision, RuleAction};
+use core_types::{FlowContext, PendingDecision, RuleAction, TransportProtocol};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverflowPolicy {
@@ -19,7 +19,10 @@ pub struct DecisionEngine {
     pending: HashMap<String, PendingDecision>,
     next_id: u64,
     pending_limit: usize,
-    default_timeout_secs: u64,
+    tcp_timeout_secs: u64,
+    udp_timeout_secs: u64,
+    quic_timeout_secs: u64,
+    other_timeout_secs: u64,
     overflow_policy: OverflowPolicy,
 }
 
@@ -29,8 +32,34 @@ impl DecisionEngine {
             pending: HashMap::new(),
             next_id: 1,
             pending_limit,
-            default_timeout_secs,
+            tcp_timeout_secs: default_timeout_secs,
+            udp_timeout_secs: default_timeout_secs,
+            quic_timeout_secs: default_timeout_secs,
+            other_timeout_secs: default_timeout_secs,
             overflow_policy,
+        }
+    }
+
+    pub fn with_protocol_timeouts(
+        mut self,
+        tcp_timeout_secs: u64,
+        udp_timeout_secs: u64,
+        quic_timeout_secs: u64,
+        other_timeout_secs: u64,
+    ) -> Self {
+        self.tcp_timeout_secs = tcp_timeout_secs;
+        self.udp_timeout_secs = udp_timeout_secs;
+        self.quic_timeout_secs = quic_timeout_secs;
+        self.other_timeout_secs = other_timeout_secs;
+        self
+    }
+
+    fn timeout_for_protocol(&self, protocol: TransportProtocol) -> u64 {
+        match protocol {
+            TransportProtocol::Tcp => self.tcp_timeout_secs,
+            TransportProtocol::Udp => self.udp_timeout_secs,
+            TransportProtocol::Quic => self.quic_timeout_secs,
+            TransportProtocol::Other => self.other_timeout_secs,
         }
     }
 
@@ -46,9 +75,9 @@ impl DecisionEngine {
         self.next_id += 1;
         let decision = PendingDecision {
             id: id.clone(),
+            deadline_at_secs: now_secs + self.timeout_for_protocol(flow.protocol),
             flow,
             created_at_secs: now_secs,
-            deadline_at_secs: now_secs + self.default_timeout_secs,
         };
         self.pending.insert(id, decision.clone());
         DecisionOutcome::Pending(decision)
@@ -88,6 +117,7 @@ mod tests {
             process_name: Some("curl".to_string()),
             destination_ip: "1.1.1.1".to_string(),
             destination_domain: Some("example.com".to_string()),
+            protocol: TransportProtocol::Tcp,
         }
     }
 
@@ -124,6 +154,30 @@ mod tests {
         let expired = engine.expire_timeouts(105);
         assert_eq!(expired, vec![id]);
         assert_eq!(engine.pending_count(), 0);
+    }
+
+    #[test]
+    fn protocol_specific_timeout_is_applied_for_udp() {
+        let mut engine = DecisionEngine::new(10, 100, OverflowPolicy::DenyNew)
+            .with_protocol_timeouts(120, 15, 20, 30);
+        let mut flow = mk_flow();
+        flow.protocol = TransportProtocol::Udp;
+        let out = engine.register_unknown_flow(flow, 50);
+        match out {
+            DecisionOutcome::Pending(p) => assert_eq!(p.deadline_at_secs, 65),
+            _ => panic!("expected pending"),
+        }
+    }
+
+    #[test]
+    fn protocol_specific_timeout_is_applied_for_tcp() {
+        let mut engine = DecisionEngine::new(10, 100, OverflowPolicy::DenyNew)
+            .with_protocol_timeouts(120, 15, 20, 30);
+        let out = engine.register_unknown_flow(mk_flow(), 50);
+        match out {
+            DecisionOutcome::Pending(p) => assert_eq!(p.deadline_at_secs, 170),
+            _ => panic!("expected pending"),
+        }
     }
 }
 

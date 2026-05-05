@@ -229,6 +229,7 @@ version = "0.1.0"
 dependencies = [
  "control-api",
  "control-service",
+ "decision-engine",
  "serde_json",
  "state-store",
 ]

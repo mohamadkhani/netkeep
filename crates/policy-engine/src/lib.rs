@@ -69,7 +69,7 @@ pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{RuleDuration, Rule};
+    use core_types::{RuleDuration, Rule, TransportProtocol};
 
     fn mk_rule(
         id: &str,
@@ -93,11 +93,13 @@ mod tests {
             process_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_domain: Some("api.example.com".to_string()),
+            protocol: TransportProtocol::Tcp,
         };
         let flow_apex = FlowContext {
             process_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_domain: Some("example.com".to_string()),
+            protocol: TransportProtocol::Tcp,
         };
         let rule = mk_rule(
             "r1",
@@ -115,6 +117,7 @@ mod tests {
             process_name: Some("firefox".to_string()),
             destination_ip: "9.9.9.9".to_string(),
             destination_domain: Some("api.example.com".to_string()),
+            protocol: TransportProtocol::Tcp,
         };
         let general = mk_rule(
             "general",
@@ -139,6 +142,7 @@ mod tests {
             process_name: None,
             destination_ip: "8.8.8.8".to_string(),
             destination_domain: Some("example.com".to_string()),
+            protocol: TransportProtocol::Tcp,
         };
         let allow = mk_rule(
             "allow",

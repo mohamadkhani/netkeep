@@ -5,13 +5,60 @@ use state_store::RuleRepository;
 pub struct ControlService<R: RuleRepository> {
     repo: R,
     decision_engine: DecisionEngine,
+    health_config: HealthConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HealthConfig {
+    pub pending_limit: usize,
+    pub default_timeout_secs: u64,
+    pub tcp_timeout_secs: u64,
+    pub udp_timeout_secs: u64,
+    pub quic_timeout_secs: u64,
+    pub other_timeout_secs: u64,
 }
 
 impl<R: RuleRepository> ControlService<R> {
     pub fn new(repo: R) -> Self {
+        let default_timeout_secs = 100;
+        let pending_limit = 100;
+        let health_config = HealthConfig {
+            pending_limit,
+            default_timeout_secs,
+            tcp_timeout_secs: default_timeout_secs,
+            udp_timeout_secs: default_timeout_secs,
+            quic_timeout_secs: default_timeout_secs,
+            other_timeout_secs: default_timeout_secs,
+        };
+        Self::with_decision_engine_and_health(
+            repo,
+            DecisionEngine::new(pending_limit, default_timeout_secs, OverflowPolicy::DenyNew),
+            health_config,
+        )
+    }
+
+    pub fn with_decision_engine(repo: R, decision_engine: DecisionEngine) -> Self {
+        let default_timeout_secs = 100;
+        let health_config = HealthConfig {
+            pending_limit: 100,
+            default_timeout_secs,
+            tcp_timeout_secs: default_timeout_secs,
+            udp_timeout_secs: default_timeout_secs,
+            quic_timeout_secs: default_timeout_secs,
+            other_timeout_secs: default_timeout_secs,
+        };
+        Self::with_decision_engine_and_health(repo, decision_engine, health_config)
+    }
+
+    pub fn with_decision_engine_and_health(
+        repo: R,
+        decision_engine: DecisionEngine,
+        health_config: HealthConfig,
+    ) -> Self {
         Self {
             repo,
-            decision_engine: DecisionEngine::new(100, 100, OverflowPolicy::DenyNew),
+            decision_engine,
+            health_config,
         }
     }
 
@@ -42,7 +89,9 @@ impl<R: RuleRepository> ControlService<R> {
                     DecisionOutcome::Immediate(action) => ControlResponse::ImmediateVerdict { action },
                     DecisionOutcome::Pending(p) => ControlResponse::PendingCreated {
                         pending_id: p.id,
+                        created_at_secs: p.created_at_secs,
                         deadline_at_secs: p.deadline_at_secs,
+                        protocol: p.flow.protocol,
                     },
                 }
             }
@@ -56,6 +105,12 @@ impl<R: RuleRepository> ControlService<R> {
             ControlRequest::Health => ControlResponse::Health {
                 ready: true,
                 fail_close_active: true,
+                pending_limit: self.health_config.pending_limit,
+                default_timeout_secs: self.health_config.default_timeout_secs,
+                tcp_timeout_secs: self.health_config.tcp_timeout_secs,
+                udp_timeout_secs: self.health_config.udp_timeout_secs,
+                quic_timeout_secs: self.health_config.quic_timeout_secs,
+                other_timeout_secs: self.health_config.other_timeout_secs,
             },
         }
     }
@@ -64,10 +119,11 @@ impl<R: RuleRepository> ControlService<R> {
 #[cfg(test)]
 mod tests {
     use control_api::{ControlRequest, ControlResponse};
-    use core_types::{DestinationMatcher, FlowContext, Rule, RuleAction, RuleDuration};
+    use core_types::{DestinationMatcher, FlowContext, Rule, RuleAction, RuleDuration, TransportProtocol};
     use state_store::InMemoryRuleRepository;
 
-    use super::ControlService;
+    use super::{ControlService, HealthConfig};
+    use decision_engine::{DecisionEngine, OverflowPolicy};
 
     fn mk_rule(id: &str) -> Rule {
         Rule {
@@ -85,6 +141,7 @@ mod tests {
             process_name: Some("curl".to_string()),
             destination_ip: "1.1.1.1".to_string(),
             destination_domain: Some("example.com".to_string()),
+            protocol: TransportProtocol::Tcp,
         }
     }
 
@@ -128,6 +185,73 @@ mod tests {
             action: RuleAction::Allow,
         });
         assert_eq!(out, ControlResponse::Error("pending decision not found".to_string()));
+    }
+
+    #[test]
+    fn custom_protocol_timeouts_propagate_to_pending_response() {
+        let engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew)
+            .with_protocol_timeouts(120, 15, 20, 30);
+        let health = HealthConfig {
+            pending_limit: 100,
+            default_timeout_secs: 100,
+            tcp_timeout_secs: 120,
+            udp_timeout_secs: 15,
+            quic_timeout_secs: 20,
+            other_timeout_secs: 30,
+        };
+        let mut service =
+            ControlService::with_decision_engine_and_health(
+                InMemoryRuleRepository::default(),
+                engine,
+                health,
+            );
+
+        let mut flow = mk_flow();
+        flow.protocol = TransportProtocol::Udp;
+        let register = service.handle(ControlRequest::RegisterUnknownFlow {
+            flow,
+            now_secs: 50,
+        });
+        match register {
+            ControlResponse::PendingCreated {
+                deadline_at_secs, ..
+            } => assert_eq!(deadline_at_secs, 65),
+            _ => panic!("expected pending creation"),
+        }
+    }
+
+    #[test]
+    fn health_includes_runtime_timeout_configuration() {
+        let engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew)
+            .with_protocol_timeouts(120, 15, 20, 30);
+        let health = HealthConfig {
+            pending_limit: 100,
+            default_timeout_secs: 100,
+            tcp_timeout_secs: 120,
+            udp_timeout_secs: 15,
+            quic_timeout_secs: 20,
+            other_timeout_secs: 30,
+        };
+        let mut service =
+            ControlService::with_decision_engine_and_health(
+                InMemoryRuleRepository::default(),
+                engine,
+                health,
+            );
+        let out = service.handle(ControlRequest::Health);
+        assert_eq!(
+            out,
+            ControlResponse::Health {
+                ready: true,
+                fail_close_active: true,
+                pending_limit: 100,
+                default_timeout_secs: 100,
+                tcp_timeout_secs: 120,
+                udp_timeout_secs: 15,
+                quic_timeout_secs: 20,
+                other_timeout_secs: 30
+            }
+        );
     }
 }
 

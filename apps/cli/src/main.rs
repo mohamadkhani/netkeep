@@ -1,8 +1,9 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
-use core_types::{DestinationMatcher, FlowContext, Rule, RuleAction, RuleDuration};
+use core_types::{DestinationMatcher, FlowContext, Rule, RuleAction, RuleDuration, TransportProtocol};
 use control_api::{ControlRequest, ControlResponse};
+use serde_json::json;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
 
@@ -17,69 +18,110 @@ fn build_rule(id: &str, destination: &str) -> Rule {
     }
 }
 
-fn parse_request(args: &[String]) -> Result<ControlRequest, String> {
-    if args.is_empty() {
-        return Err("usage: add-rule <id> <domain> | list-rules | delete-rule <id> | register-flow <process> <ip> <domain|-] <now-secs> | resolve-pending <id> <allow|deny|ask> | health".to_string());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputMode {
+    Text,
+    Json,
+}
+
+fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String> {
+    let (output_mode, cmd_args): (OutputMode, &[String]) =
+        if args.first().map(|s| s.as_str()) == Some("--json") {
+            (OutputMode::Json, &args[1..])
+        } else {
+            (OutputMode::Text, args)
+        };
+
+    if cmd_args.is_empty() {
+        return Err("usage: add-rule <id> <domain> | list-rules | delete-rule <id> | register-flow <process> <ip> <domain|-> <tcp|udp|quic|other> <now-secs> | resolve-pending <id> <allow|deny|ask> | health | show-config".to_string());
     }
 
-    match args[0].as_str() {
+    match cmd_args[0].as_str() {
         "add-rule" => {
-            if args.len() != 3 {
+            if cmd_args.len() != 3 {
                 return Err("usage: add-rule <id> <domain>".to_string());
             }
-            Ok(ControlRequest::AddRule(build_rule(&args[1], &args[2])))
+            Ok((
+                ControlRequest::AddRule(build_rule(&cmd_args[1], &cmd_args[2])),
+                output_mode,
+            ))
         }
-        "list-rules" => Ok(ControlRequest::ListRules),
+        "list-rules" => Ok((ControlRequest::ListRules, output_mode)),
         "delete-rule" => {
-            if args.len() != 2 {
+            if cmd_args.len() != 2 {
                 return Err("usage: delete-rule <id>".to_string());
             }
-            Ok(ControlRequest::DeleteRule {
-                id: args[1].clone(),
-            })
+            Ok((
+                ControlRequest::DeleteRule {
+                    id: cmd_args[1].clone(),
+                },
+                output_mode,
+            ))
         }
         "register-flow" => {
-            if args.len() != 5 {
-                return Err("usage: register-flow <process> <ip> <domain|-> <now-secs>".to_string());
+            if cmd_args.len() != 6 {
+                return Err("usage: register-flow <process> <ip> <domain|-> <tcp|udp|quic|other> <now-secs>".to_string());
             }
-            let now_secs = args[4]
+            let now_secs = cmd_args[5]
                 .parse::<u64>()
                 .map_err(|_| "now-secs must be an unsigned integer".to_string())?;
-            let domain = if args[3] == "-" {
+            let protocol = match cmd_args[4].as_str() {
+                "tcp" => TransportProtocol::Tcp,
+                "udp" => TransportProtocol::Udp,
+                "quic" => TransportProtocol::Quic,
+                "other" => TransportProtocol::Other,
+                _ => return Err("protocol must be one of: tcp, udp, quic, other".to_string()),
+            };
+            let domain = if cmd_args[3] == "-" {
                 None
             } else {
-                Some(args[3].clone())
+                Some(cmd_args[3].clone())
             };
-            Ok(ControlRequest::RegisterUnknownFlow {
-                flow: FlowContext {
-                    process_name: Some(args[1].clone()),
-                    destination_ip: args[2].clone(),
-                    destination_domain: domain,
+            Ok((
+                ControlRequest::RegisterUnknownFlow {
+                    flow: FlowContext {
+                        process_name: Some(cmd_args[1].clone()),
+                        destination_ip: cmd_args[2].clone(),
+                        destination_domain: domain,
+                        protocol,
+                    },
+                    now_secs,
                 },
-                now_secs,
-            })
+                output_mode,
+            ))
         }
         "resolve-pending" => {
-            if args.len() != 3 {
+            if cmd_args.len() != 3 {
                 return Err("usage: resolve-pending <id> <allow|deny|ask>".to_string());
             }
-            let action = match args[2].as_str() {
+            let action = match cmd_args[2].as_str() {
                 "allow" => RuleAction::Allow,
                 "deny" => RuleAction::Deny,
                 "ask" => RuleAction::Ask,
                 _ => return Err("action must be one of: allow, deny, ask".to_string()),
             };
-            Ok(ControlRequest::ResolvePending {
-                pending_id: args[1].clone(),
-                action,
-            })
+            Ok((
+                ControlRequest::ResolvePending {
+                    pending_id: cmd_args[1].clone(),
+                    action,
+                },
+                output_mode,
+            ))
         }
-        "health" => Ok(ControlRequest::Health),
+        "health" => Ok((ControlRequest::Health, output_mode)),
+        "show-config" => Ok((ControlRequest::Health, OutputMode::Json)),
         _ => Err("unknown command".to_string()),
     }
 }
 
-fn render_response(response: ControlResponse) -> Result<String, String> {
+fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result<String, String> {
+    if output_mode == OutputMode::Json {
+        return match response {
+            ControlResponse::Error(err) => Err(json!({ "error": err }).to_string()),
+            other => serde_json::to_string(&other).map_err(|e| e.to_string()),
+        };
+    }
+
     match response {
         ControlResponse::Ok => Ok("ok".to_string()),
         ControlResponse::RuleList(rules) => {
@@ -96,9 +138,11 @@ fn render_response(response: ControlResponse) -> Result<String, String> {
         }
         ControlResponse::PendingCreated {
             pending_id,
+            created_at_secs,
             deadline_at_secs,
+            protocol,
         } => Ok(format!(
-            "pending created id={pending_id} deadline_at_secs={deadline_at_secs}"
+            "pending created id={pending_id} protocol={protocol:?} created_at_secs={created_at_secs} deadline_at_secs={deadline_at_secs}"
         )),
         ControlResponse::ImmediateVerdict { action } => {
             Ok(format!("immediate verdict={action:?}"))
@@ -107,8 +151,14 @@ fn render_response(response: ControlResponse) -> Result<String, String> {
         ControlResponse::Health {
             ready,
             fail_close_active,
+            pending_limit,
+            default_timeout_secs,
+            tcp_timeout_secs,
+            udp_timeout_secs,
+            quic_timeout_secs,
+            other_timeout_secs,
         } => Ok(format!(
-            "ready={ready} fail_close_active={fail_close_active}"
+            "ready={ready} fail_close_active={fail_close_active} pending_limit={pending_limit} default_timeout_secs={default_timeout_secs} tcp_timeout_secs={tcp_timeout_secs} udp_timeout_secs={udp_timeout_secs} quic_timeout_secs={quic_timeout_secs} other_timeout_secs={other_timeout_secs}"
         )),
         ControlResponse::Error(err) => Err(err),
     }
@@ -133,8 +183,8 @@ fn send_request(socket_path: &str, request: &ControlRequest) -> Result<ControlRe
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let request = match parse_request(&args) {
-        Ok(req) => req,
+    let (request, output_mode) = match parse_request(&args) {
+        Ok(parsed) => parsed,
         Err(err) => {
             eprintln!("{err}");
             std::process::exit(2);
@@ -150,7 +200,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    match render_response(response) {
+    match render_response(response, output_mode) {
         Ok(msg) => println!("{msg}"),
         Err(err) => {
             eprintln!("{err}");
@@ -172,7 +222,7 @@ mod tests {
         ];
         let req = parse_request(&args).expect("must parse");
         match req {
-            ControlRequest::AddRule(rule) => {
+            (ControlRequest::AddRule(rule), OutputMode::Text) => {
                 assert_eq!(rule.id, "r1");
                 assert_eq!(
                     rule.destination,
@@ -187,14 +237,20 @@ mod tests {
     fn parses_delete_rule_request() {
         let args = vec!["delete-rule".to_string(), "r1".to_string()];
         let req = parse_request(&args).expect("must parse");
-        assert_eq!(req, ControlRequest::DeleteRule { id: "r1".to_string() });
+        assert_eq!(
+            req,
+            (
+                ControlRequest::DeleteRule { id: "r1".to_string() },
+                OutputMode::Text
+            )
+        );
     }
 
     #[test]
     fn parses_list_rules_request() {
         let args = vec!["list-rules".to_string()];
         let req = parse_request(&args).expect("must parse");
-        assert_eq!(req, ControlRequest::ListRules);
+        assert_eq!(req, (ControlRequest::ListRules, OutputMode::Text));
     }
 
     #[test]
@@ -214,10 +270,13 @@ mod tests {
         let req = parse_request(&args).expect("must parse");
         assert_eq!(
             req,
-            ControlRequest::ResolvePending {
-                pending_id: "pending-1".to_string(),
-                action: RuleAction::Deny
-            }
+            (
+                ControlRequest::ResolvePending {
+                    pending_id: "pending-1".to_string(),
+                    action: RuleAction::Deny
+                },
+                OutputMode::Text
+            )
         );
     }
 
@@ -228,16 +287,32 @@ mod tests {
             "curl".to_string(),
             "1.1.1.1".to_string(),
             "-".to_string(),
+            "tcp".to_string(),
             "100".to_string(),
         ];
         let req = parse_request(&args).expect("must parse");
         match req {
-            ControlRequest::RegisterUnknownFlow { flow, now_secs } => {
+            (ControlRequest::RegisterUnknownFlow { flow, now_secs }, OutputMode::Text) => {
                 assert_eq!(flow.destination_domain, None);
+                assert_eq!(flow.protocol, TransportProtocol::Tcp);
                 assert_eq!(now_secs, 100);
             }
             _ => panic!("expected register-flow"),
         }
+    }
+
+    #[test]
+    fn parses_show_config_as_json_health_request() {
+        let args = vec!["show-config".to_string()];
+        let req = parse_request(&args).expect("must parse");
+        assert_eq!(req, (ControlRequest::Health, OutputMode::Json));
+    }
+
+    #[test]
+    fn parses_global_json_flag_for_other_commands() {
+        let args = vec!["--json".to_string(), "health".to_string()];
+        let req = parse_request(&args).expect("must parse");
+        assert_eq!(req, (ControlRequest::Health, OutputMode::Json));
     }
 }
 

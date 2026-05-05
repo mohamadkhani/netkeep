@@ -1,4 +1,4 @@
-use core_types::{FlowContext, Rule, RuleAction};
+use core_types::{FlowContext, Rule, RuleAction, TransportProtocol};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,10 +15,24 @@ pub enum ControlRequest {
 pub enum ControlResponse {
     Ok,
     RuleList(Vec<Rule>),
-    PendingCreated { pending_id: String, deadline_at_secs: u64 },
+    PendingCreated {
+        pending_id: String,
+        created_at_secs: u64,
+        deadline_at_secs: u64,
+        protocol: TransportProtocol,
+    },
     ImmediateVerdict { action: RuleAction },
     PendingResolved { action: RuleAction },
-    Health { ready: bool, fail_close_active: bool },
+    Health {
+        ready: bool,
+        fail_close_active: bool,
+        pending_limit: usize,
+        default_timeout_secs: u64,
+        tcp_timeout_secs: u64,
+        udp_timeout_secs: u64,
+        quic_timeout_secs: u64,
+        other_timeout_secs: u64,
+    },
     Error(String),
 }
 

@@ -36,6 +36,7 @@ pub struct FlowContext {
     pub process_name: Option<String>,
     pub destination_ip: String,
     pub destination_domain: Option<String>,
+    pub protocol: TransportProtocol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,5 +45,13 @@ pub struct PendingDecision {
     pub flow: FlowContext,
     pub created_at_secs: u64,
     pub deadline_at_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransportProtocol {
+    Tcp,
+    Udp,
+    Quic,
+    Other,
 }
 
