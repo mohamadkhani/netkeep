@@ -60,14 +60,22 @@
 
 - [x] New `logiguard-gpui` GPUI app
 - [x] Imported gpui 0.2.2 and gpui-component 0.5.1 from crates.io
-- [x] AppState entity (pending decisions, daemon connection, make_permanent flag)
-- [x] DecisionApp root view implementing Render trait
+- [x] Modular architecture with separate files:
+  - `colors.rs` — theme color constants
+  - `daemon.rs` — socket IPC helpers (send_request, unix_now)
+  - `state.rs` — AppState entity + ViewState derived enum
+  - `polling.rs` — background 1-second polling task
+  - `app.rs` — DecisionApp root view + Render impl
+  - `components/splash.rs` — connecting/empty splash screens with shared logo helper
+  - `components/header.rs` — warning header bar with countdown
+  - `components/flow_info.rs` — application & destination info rows
+  - `components/action_footer.rs` — deny/allow buttons + remember checkbox
+- [x] React-like optimizations applied:
+  - Derived state enum (`ViewState`) for view branching
+  - Pure function components (header, flow_info, splash)
+  - Prop drilling via `ActionFooterProps` struct
+  - Encapsulated async actions in action_footer
 - [x] Reactive rendering (observe AppState, notify on changes)
-- [x] Background polling task (ListPending every 1 second)
-- [x] Decision card UI with amber header, countdown, process/destination info
-- [x] "Remember this decision (permanent rule)" checkbox
-- [x] DENY (red/danger) and ALLOW (green/success) buttons
-- [x] Dark theme (Deep Slate: #0d1117 bg, amber warnings)
 - [x] Allow button flow with optional rule creation
 - [x] Async event handlers with weak entity references
 - [x] All 93 tests still passing with GPUI app added
@@ -288,6 +296,8 @@ Currently used (in order of precedence):
 6. **No Rate Limiting:** User can spam requests, pending queue could grow unchecked (mitigated by 100-item cap).
 
 7. **No Audit Syslog:** Flow decisions not logged to syslog. Only in-memory + SQLite.
+
+8. **CLI Missing SubscriptionAck Handler:** `logiguard-cli` does not handle `ControlResponse::SubscriptionAck` in its match statement, causing a compilation error when building with `cargo test --workspace`.
 
 ## Build and Run
 
