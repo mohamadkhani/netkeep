@@ -368,6 +368,17 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] `ControlService` now generic over `Repository` supertrait (Rule + Flow + Pending)
 - [x] 93 tests passing across workspace
 
+### 2026-05-06 (session 4)
+
+- [x] Added `logiguard-gpui` GPUI app with `gpui = "0.2"` + `gpui-component = "0.5"` from crates.io
+- [x] Implemented `AppState` entity holding pending decisions + daemon connection status + make-permanent checkbox
+- [x] Implemented `DecisionApp` root view with reactive re-render via `cx.observe()`
+- [x] Background polling task: `ListPending` every 1s via `cx.background_executor().spawn()` (non-blocking)
+- [x] Decision card: amber header with countdown, APPLICATION section, DESTINATION section, "Remember" checkbox, DENY/ALLOW footer
+- [x] Allow action optionally creates `Permanent` rule via `AddRule` when "Remember" checkbox is checked
+- [x] Deep Slate dark theme applied via `Theme::change(ThemeMode::Dark, None, cx)`
+- [x] 93 workspace tests still passing
+
 ## 11) Definition of Done (MVP)
 
 - [ ] Unknown flows are held, surfaced to user, and default-denied after timeout
