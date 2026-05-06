@@ -74,11 +74,13 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                                 let state_weak = state_weak_deny.clone();
                                 cx.spawn(async move |cx| {
                                     let pid2 = pid.clone();
+                                    let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
+                                        .unwrap_or_else(|_| SOCKET_PATH.to_string());
                                     let _ = cx
                                         .background_executor()
                                         .spawn(async move {
                                             daemon::send_request(
-                                                SOCKET_PATH,
+                                                &socket,
                                                 &ControlRequest::ResolvePending {
                                                     pending_id: pid2,
                                                     action: RuleAction::Deny,
@@ -88,11 +90,15 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                                         .await;
                                     if let Some(state) = state_weak.upgrade() {
                                         cx.update_entity(&state, |s, cx| {
-                                            s.pending.retain(|p| p.id != pid);
+                                            s.resolved = true;
                                             cx.notify();
                                         })
                                         .ok();
                                     }
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(500))
+                                        .await;
+                                    std::process::exit(0);
                                 })
                                 .detach();
                             }
@@ -111,11 +117,13 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                                 let flow = flow.clone();
                                 cx.spawn(async move |cx| {
                                     let pid2 = pid.clone();
+                                    let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
+                                        .unwrap_or_else(|_| SOCKET_PATH.to_string());
                                     let _ = cx
                                         .background_executor()
                                         .spawn(async move {
                                             daemon::send_request(
-                                                SOCKET_PATH,
+                                                &socket,
                                                 &ControlRequest::ResolvePending {
                                                     pending_id: pid2,
                                                     action: RuleAction::Allow,
@@ -139,11 +147,13 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                                             process_name: flow.process_name.clone(),
                                             destination: dest,
                                         };
+                                        let socket2 = std::env::var("LOGIGUARD_SOCKET_PATH")
+                                            .unwrap_or_else(|_| SOCKET_PATH.to_string());
                                         let _ = cx
                                             .background_executor()
                                             .spawn(async move {
                                                 daemon::send_request(
-                                                    SOCKET_PATH,
+                                                    &socket2,
                                                     &ControlRequest::AddRule(rule),
                                                 )
                                             })
@@ -151,12 +161,15 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                                     }
                                     if let Some(state) = state_weak.upgrade() {
                                         cx.update_entity(&state, |s, cx| {
-                                            s.pending.retain(|p| p.id != pid);
-                                            s.make_permanent = false;
+                                            s.resolved = true;
                                             cx.notify();
                                         })
                                         .ok();
                                     }
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(500))
+                                        .await;
+                                    std::process::exit(0);
                                 })
                                 .detach();
                             }

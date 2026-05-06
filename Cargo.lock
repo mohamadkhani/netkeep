@@ -3287,6 +3287,7 @@ dependencies = [
 name = "logiguard-gpui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "control-api",
  "core-types",
  "gpui",
