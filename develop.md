@@ -70,12 +70,60 @@
   - SQLite repositories, migrations, journaling
 - `crates/control-api`
   - Unix socket protocol + request/response schema
+  - Bidirectional push notifications via Tokio broadcast
 - `apps/daemon`
   - Systemd-ready daemon binary
 - `apps/cli`
   - Operator/user command-line interface
 - `apps/gpui`
-  - Desktop GUI
+  - Desktop GUI with real-time push subscription
+
+### 2.3 Daemon-UI Communication Protocol
+
+**Architecture:** Bidirectional Unix socket with Tokio broadcast channel for real-time push notifications.
+
+**Broadcast Channel:**
+- Buffer size: 500 notifications (holds pending decisions until timeout)
+- In-memory only (no persistence across restart needed)
+- Auto-drops messages when pending decisions expire (5-100s window)
+
+**Protocol Flow:**
+
+1. **Client Subscription (GPUI startup):**
+   ```
+   GPUI: send ControlRequest::SubscribeToPending
+   Daemon: respond with ControlResponse::SubscriptionAck
+   GPUI: receive buffered PushNotifications from channel
+   ```
+
+2. **Real-time Notifications (when pending changes):**
+   ```
+   Daemon: send PushNotification::PendingCreated { decision }
+   Daemon: send PushNotification::PendingResolved { pending_id, action }
+   Daemon: send PushNotification::PendingExpired { pending_id }
+   GPUI: receive immediately (or from buffer if reconnected)
+   ```
+
+3. **Request-Response (existing, unchanged):**
+   ```
+   GPUI: send ControlRequest::ListPending (fallback, optional periodic)
+   Daemon: respond with ControlResponse::PendingList
+   ```
+
+**Message Types (New):**
+```rust
+enum PushNotification {
+  PendingCreated { decision: PendingDecision },
+  PendingResolved { pending_id: String, action: RuleAction },
+  PendingExpired { pending_id: String },
+}
+```
+
+**Guarantees:**
+- Real-time delivery (<1ms latency when GPUI connected)
+- Buffered delivery (up to 500 notifications) if GPUI temporarily offline
+- No loss of pending notifications until timeout expires
+- No persistence across daemon restart (acceptable: pending decisions in SQLite as source of truth)
 
 ## 3) Data Model (MVP)
 
@@ -378,6 +426,43 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Allow action optionally creates `Permanent` rule via `AddRule` when "Remember" checkbox is checked
 - [x] Deep Slate dark theme applied via `Theme::change(ThemeMode::Dark, None, cx)`
 - [x] 93 workspace tests still passing
+
+### 2026-05-06 (session 5)
+
+- [x] Window lifecycle: Check if pending decisions exist before opening window
+- [x] Window closes (app exits cleanly) when decision queue becomes empty
+- [x] Initial check done synchronously before Application::new().run()
+- [x] Polling task monitors queue state and calls std::process::exit(0) when empty
+- [x] All 78 workspace tests passing with updated GPUI app
+- [x] Wrote comprehensive documentation: GPUI guide, gpui-component guide, Unix sockets, async patterns, architecture
+
+### 2026-05-06 (session 6)
+
+- [x] Refactored window lifecycle: App always runs, window shows/hides based on pending state
+- [x] Added `should_show_window` flag to AppState (default false)
+- [x] Window displays "Connecting..." until pending decisions arrive
+- [x] When first pending decision received → window shows with decision dialog
+- [x] When all decisions resolved → window returns to "Connecting..." state (stays open)
+- [x] Polling task automatically triggers window display on pending arrival
+- [x] No need to manually restart app when new decisions arrive
+- [x] All 78 tests still passing
+
+### 2026-05-06 (session 7)
+
+- [x] Analyzed OpenSnitch architecture and rules model for comparison
+- [x] Created comprehensive OPENSNITCH_COMPARISON.md document
+- [x] Compared GUI-to-daemon communication strategies
+- [x] Decided on bidirectional socket push using Tokio broadcast channel
+- [ ] Extend `ControlRequest` enum with `SubscribeToPending`
+- [ ] Add `PushNotification` enum to `core-types`
+- [ ] Extend `ControlResponse` with push variants (or separate type)
+- [ ] Add broadcast channel to `ControlService`
+- [ ] Implement subscriber tracking in daemon connection handler
+- [ ] Modify daemon socket reader to handle `tokio::select!` for requests + pushes
+- [ ] Modify GPUI to subscribe on startup and handle incoming push notifications
+- [ ] Remove 1-second polling loop from GPUI (use push instead)
+- [ ] Add tests for push notification lifecycle
+- [ ] Verify 93 tests still passing
 
 ## 11) Definition of Done (MVP)
 

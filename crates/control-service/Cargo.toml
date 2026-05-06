@@ -11,4 +11,5 @@ decision-engine = { path = "../decision-engine" }
 enforcer = { path = "../enforcer" }
 policy-engine = { path = "../policy-engine" }
 state-store = { path = "../state-store" }
+tokio = { version = "1", features = ["sync"] }
 

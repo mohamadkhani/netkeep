@@ -4,7 +4,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use control_api::{ControlRequest, ControlResponse};
+use control_api::{ControlRequest, ControlResponse, PushNotification};
 use control_service::{ControlService, HealthConfig, SharedService};
 use decision_engine::{DecisionEngine, OverflowPolicy};
 use enforcer::{NftablesBootstrap, SystemNftablesBootstrap};
@@ -13,6 +13,7 @@ use flow_classifier::{
     FlowClassifier, FakeProcessResolver, FakeDnsResolver, FakeDeviceLabelResolver,
 };
 use state_store::{PendingRepository, RuleRepository, SqliteRuleRepository};
+use tokio::sync::broadcast;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
 const DEFAULT_DB_PATH: &str = "/tmp/logiguard.db";
@@ -67,6 +68,7 @@ fn handle_client(
     stream: UnixStream,
     service: &Arc<Mutex<ControlService<SqliteRuleRepository>>>,
     bootstrap: Option<&dyn NftablesBootstrap>,
+    notification_tx: &broadcast::Sender<PushNotification>,
 ) -> Result<(), String> {
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
@@ -76,6 +78,8 @@ fn handle_client(
     }
     let request: ControlRequest =
         serde_json::from_str(line.trim_end()).map_err(|e| e.to_string())?;
+
+    let is_subscribe = matches!(request, ControlRequest::SubscribeToPending);
 
     let response = if matches!(request, ControlRequest::Unlock) {
         let on_console = peer_pid(&stream).map(is_physical_console).unwrap_or(false);
@@ -102,6 +106,36 @@ fn handle_client(
     writer
         .write_all(format!("{payload}\n").as_bytes())
         .map_err(|e| e.to_string())?;
+
+    // If client requested subscription, spawn a thread to push notifications.
+    if is_subscribe {
+        let stream_clone = stream.try_clone().map_err(|e| e.to_string())?;
+        let mut rx = notification_tx.subscribe();
+        std::thread::spawn(move || {
+            let mut writer = &stream_clone;
+            loop {
+                match rx.try_recv() {
+                    Ok(notif) => {
+                        if let Ok(payload) = serde_json::to_string(&notif) {
+                            let _ = writer.write_all(format!("{payload}\n").as_bytes());
+                        }
+                    }
+                    Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                        // Buffer full, skip this message
+                    }
+                    Err(broadcast::error::TryRecvError::Empty) => {
+                        // No message available, sleep briefly
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(broadcast::error::TryRecvError::Closed) => {
+                        // Broadcast channel closed, exit
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     Ok(())
 }
 
@@ -154,6 +188,9 @@ fn main() {
         other_timeout_secs,
     );
 
+    // NEW: Create broadcast channel for push notifications (buffer 500 messages)
+    let (notification_tx, _) = tokio::sync::broadcast::channel(500);
+
     let service = Arc::new(Mutex::new(ControlService::with_decision_engine_and_health(
         repo,
         decision_engine,
@@ -165,6 +202,7 @@ fn main() {
             quic_timeout_secs,
             other_timeout_secs,
         },
+        notification_tx.clone(),  // Pass sender to service
     )));
 
     {
@@ -233,7 +271,7 @@ fn main() {
         match stream {
             Ok(stream) => {
                 let bs_ref = bootstrap.as_deref();
-                if let Err(err) = handle_client(stream, &service, bs_ref) {
+                if let Err(err) = handle_client(stream, &service, bs_ref, &notification_tx) {
                     eprintln!("request handling error: {err}");
                 }
             }

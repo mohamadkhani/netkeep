@@ -1,5 +1,7 @@
 use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
@@ -80,6 +82,7 @@ struct AppState {
     now_secs: u64,
     daemon_connected: bool,
     make_permanent: bool,
+    should_show_window: bool,
 }
 
 impl Default for AppState {
@@ -89,6 +92,7 @@ impl Default for AppState {
             now_secs: unix_now(),
             daemon_connected: false,
             make_permanent: false,
+            should_show_window: false,
         }
     }
 }
@@ -415,10 +419,15 @@ impl DecisionApp {
 impl Render for DecisionApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
+        let should_show = state.should_show_window;
         let connected = state.daemon_connected;
         let has_pending = !state.pending.is_empty();
         let now = state.now_secs;
         let make_permanent = state.make_permanent;
+
+        if !should_show {
+            return self.render_connecting().into_any_element();
+        }
 
         if !connected {
             return self.render_connecting().into_any_element();
@@ -453,10 +462,17 @@ fn start_polling(state: Entity<AppState>, cx: &mut App) {
                 match result {
                     Ok(ControlResponse::PendingList(items)) => {
                         s.daemon_connected = true;
-                        // Sort by deadline so we show the most urgent first
                         let mut items = items;
                         items.sort_by_key(|p| p.deadline_at_secs);
+                        let has_items = !items.is_empty();
                         s.pending = items;
+                        // Show window when pending decisions arrive
+                        if has_items {
+                            s.should_show_window = true;
+                        } else {
+                            // Hide window when queue becomes empty
+                            s.should_show_window = false;
+                        }
                     }
                     _ => {
                         s.daemon_connected = false;

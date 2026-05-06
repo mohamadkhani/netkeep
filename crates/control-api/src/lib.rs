@@ -13,6 +13,7 @@ pub enum ControlRequest {
     ResolvePending { pending_id: String, action: RuleAction },
     Health,
     Unlock,
+    SubscribeToPending,  // NEW: Subscribe to push notifications
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +42,19 @@ pub enum ControlResponse {
         other_timeout_secs: u64,
     },
     Unlocked,
+    SubscriptionAck,  // NEW: Confirms subscription established
     Error(String),
+}
+
+// NEW: Push notifications sent from daemon to subscribers
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PushNotification {
+    PendingCreated { decision: PendingDecision },
+    PendingResolved {
+        pending_id: String,
+        action: RuleAction,
+    },
+    PendingExpired { pending_id: String },
 }
 
 pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
@@ -58,6 +71,7 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
         ControlRequest::ListFlows { limit } if *limit == 0 => {
             Err("flow list limit must be > 0".to_string())
         }
+        ControlRequest::SubscribeToPending => Ok(()),  // Always valid
         _ => Ok(()),
     }
 }
@@ -111,5 +125,58 @@ mod tests {
     fn rejects_zero_flow_list_limit() {
         let req = ControlRequest::ListFlows { limit: 0 };
         assert_eq!(validate_request(&req), Err("flow list limit must be > 0".to_string()));
+    }
+
+    #[test]
+    fn accepts_subscribe_to_pending_request() {
+        let req = ControlRequest::SubscribeToPending;
+        assert_eq!(validate_request(&req), Ok(()));
+    }
+
+    #[test]
+    fn subscription_ack_serializes() {
+        let resp = ControlResponse::SubscriptionAck;
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("SubscriptionAck"));
+    }
+
+    #[test]
+    fn push_notification_pending_created_serializes() {
+        let decision = PendingDecision {
+            id: "p1".to_string(),
+            flow: FlowContext {
+                process_name: Some("firefox".to_string()),
+                destination_ip: "8.8.8.8".to_string(),
+                destination_domain: Some("google.com".to_string()),
+                protocol: TransportProtocol::Tcp,
+                device_label: None,
+            },
+            created_at_secs: 1000,
+            deadline_at_secs: 1100,
+        };
+        let notif = PushNotification::PendingCreated { decision };
+        let json = serde_json::to_string(&notif).unwrap();
+        assert!(json.contains("PendingCreated"));
+        assert!(json.contains("firefox"));
+    }
+
+    #[test]
+    fn push_notification_pending_resolved_serializes() {
+        let notif = PushNotification::PendingResolved {
+            pending_id: "p1".to_string(),
+            action: RuleAction::Allow,
+        };
+        let json = serde_json::to_string(&notif).unwrap();
+        assert!(json.contains("PendingResolved"));
+        assert!(json.contains("Allow"));
+    }
+
+    #[test]
+    fn push_notification_pending_expired_serializes() {
+        let notif = PushNotification::PendingExpired {
+            pending_id: "p1".to_string(),
+        };
+        let json = serde_json::to_string(&notif).unwrap();
+        assert!(json.contains("PendingExpired"));
     }
 }
