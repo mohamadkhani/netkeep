@@ -1,4 +1,6 @@
-use core_types::{FlowContext, FlowEvent, PendingDecision, RouteTarget, Rule, RuleAction, TransportProtocol};
+use core_types::{
+    Egress, FlowContext, FlowEvent, PendingDecision, RouteTarget, Rule, RuleAction, TransportProtocol,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +21,9 @@ pub enum ControlRequest {
         port: u16,
         target: RouteTarget,
     },
+    ListEgresses,
+    UpsertEgress(Egress),
+    DeleteEgress { id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +57,7 @@ pub enum ControlResponse {
         listen_addr: String,
     },
     Error(String),
+    EgressList(Vec<Egress>),
 }
 
 // NEW: Push notifications sent from daemon to subscribers
@@ -80,6 +86,12 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
             Err("flow list limit must be > 0".to_string())
         }
         ControlRequest::SubscribeToPending => Ok(()),  // Always valid
+        ControlRequest::DeleteEgress { id } if id.trim().is_empty() => {
+            Err("egress id cannot be empty".to_string())
+        }
+        ControlRequest::UpsertEgress(eg) if eg.id.trim().is_empty() => {
+            Err("egress id cannot be empty".to_string())
+        }
         _ => Ok(()),
     }
 }
@@ -140,6 +152,14 @@ mod tests {
     fn accepts_subscribe_to_pending_request() {
         let req = ControlRequest::SubscribeToPending;
         assert_eq!(validate_request(&req), Ok(()));
+    }
+
+    #[test]
+    fn rejects_empty_delete_egress_id() {
+        let req = ControlRequest::DeleteEgress {
+            id: " ".to_string(),
+        };
+        assert_eq!(validate_request(&req), Err("egress id cannot be empty".to_string()));
     }
 
     #[test]

@@ -316,6 +316,33 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
         ControlResponse::RoutedTcpReady { listen_addr } => {
             Ok(format!("routed tcp relay ready at {listen_addr}"))
         }
+        ControlResponse::EgressList(egresses) => {
+            if egresses.is_empty() {
+                Ok("no egresses".to_string())
+            } else {
+                let body = egresses
+                    .iter()
+                    .map(|e| {
+                        let dns = if e.dns_servers.is_empty() {
+                            "(system DNS)".to_string()
+                        } else {
+                            e.dns_servers.join(", ")
+                        };
+                        format!(
+                            "{} name={} default={} available={} targets={:?} dns={}",
+                            e.id,
+                            e.name,
+                            e.is_system_default,
+                            e.is_available,
+                            e.targets,
+                            dns,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(body)
+            }
+        }
     }
 }
 

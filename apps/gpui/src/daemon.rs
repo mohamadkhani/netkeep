@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
 use control_api::{ControlRequest, ControlResponse};
-use core_types::PendingDecision;
+use core_types::{Egress, PendingDecision};
 
 pub const SOCKET_PATH: &str = "/tmp/logiguard.sock";
 
@@ -120,4 +121,17 @@ pub fn detect_egresses() -> Vec<core_types::Egress> {
     }
 
     egresses
+}
+
+/// Refresh `is_available` from a local interface scan; keeps daemon-persisted names, targets, and DNS.
+pub fn merge_egress_availability(mut stored: Vec<Egress>) -> Vec<Egress> {
+    let detected = detect_egresses();
+    let by_id: HashMap<String, bool> =
+        detected.into_iter().map(|e| (e.id.clone(), e.is_available)).collect();
+    for e in &mut stored {
+        if let Some(av) = by_id.get(&e.id) {
+            e.is_available = *av;
+        }
+    }
+    stored
 }

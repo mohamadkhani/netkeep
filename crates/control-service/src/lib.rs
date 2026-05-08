@@ -259,6 +259,29 @@ impl<R: Repository> ControlService<R> {
             ControlRequest::OpenRoutedTcp { .. } => {
                 ControlResponse::Error("OpenRoutedTcp is handled by daemon runtime".to_string())
             }
+            ControlRequest::ListEgresses => {
+                let mut egresses = self.repo.list_egresses();
+                egresses.sort_by(|a, b| a.id.cmp(&b.id));
+                ControlResponse::EgressList(egresses)
+            }
+            ControlRequest::UpsertEgress(egress) => {
+                self.repo.upsert_egress(&egress);
+                ControlResponse::Ok
+            }
+            ControlRequest::DeleteEgress { id } => {
+                if let Some(eg) = self.repo.get_egress(&id) {
+                    if eg.is_system_default {
+                        return ControlResponse::Error(
+                            "cannot delete the system default egress".to_string(),
+                        );
+                    }
+                }
+                if self.repo.delete_egress(&id) {
+                    ControlResponse::Ok
+                } else {
+                    ControlResponse::Error("egress not found".to_string())
+                }
+            }
         }
     }
 }
