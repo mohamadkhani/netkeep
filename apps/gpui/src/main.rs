@@ -1,6 +1,7 @@
 mod app;
 mod colors;
 mod components;
+mod fonts;
 mod daemon;
 mod management;
 mod monitor;
@@ -97,6 +98,7 @@ fn run_tray_monitor() {
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
+        fonts::apply_design_fonts(cx);
 
         let sp = socket_path.clone();
         let gc = gui_command.clone();
@@ -211,6 +213,7 @@ fn run_gui(pending_id: String) {
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
+        fonts::apply_design_fonts(cx);
 
         let egresses = daemon::detect_egresses();
         let state: Entity<AppState> = cx.new(|_| AppState {

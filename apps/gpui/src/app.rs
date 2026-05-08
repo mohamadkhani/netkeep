@@ -1,5 +1,5 @@
 use gpui::{AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, Window};
-use gpui_component::v_flex;
+use gpui_component::{Theme, v_flex};
 
 use crate::colors;
 use crate::components;
@@ -66,6 +66,7 @@ impl Render for DecisionApp {
         let pending_count = state.pending_count;
         let state_weak = self.state.downgrade();
         let item = state.item.clone();
+        let mono_font = Theme::global(cx).mono_font_family.clone();
 
         let remaining = item.deadline_at_secs.saturating_sub(now);
         let process = item
@@ -89,6 +90,7 @@ impl Render for DecisionApp {
                 &item.flow.destination_ip,
                 item.flow.direction,
                 &item.flow.device_label,
+                mono_font,
             ))
             .child(components::action_footer(
                 components::ActionFooterProps {

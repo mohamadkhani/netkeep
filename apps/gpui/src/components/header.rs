@@ -1,9 +1,11 @@
-use gpui::{FontWeight, IntoElement, ParentElement, Styled, div, px};
+use gpui::{FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px};
 use gpui_component::{h_flex, v_flex};
 
 use crate::colors;
 
 pub fn decision_header(remaining_secs: u64) -> gpui::AnyElement {
+    let ui_font: SharedString = "Inter Variable".into();
+
     v_flex()
         .w_full()
         .child(
@@ -29,6 +31,7 @@ pub fn decision_header(remaining_secs: u64) -> gpui::AnyElement {
                         )
                         .child(
                             div()
+                                .font_family(ui_font.clone())
                                 .text_color(colors::primary())
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(11.))
@@ -51,6 +54,7 @@ pub fn decision_header(remaining_secs: u64) -> gpui::AnyElement {
                                 .justify_center()
                                 .child(
                                     div()
+                                        .font_family(ui_font.clone())
                                         .text_color(colors::text())
                                         .font_weight(FontWeight::BOLD)
                                         .text_size(px(11.))
@@ -60,6 +64,7 @@ pub fn decision_header(remaining_secs: u64) -> gpui::AnyElement {
                         .child(
                             // AUTO-DENY label
                             div()
+                                .font_family(ui_font)
                                 .text_color(colors::error())
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(9.))

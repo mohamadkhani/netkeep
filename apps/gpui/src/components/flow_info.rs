@@ -12,6 +12,7 @@ pub fn flow_info_section(
     ip: &str,
     direction: FlowDirection,
     device_label: &Option<String>,
+    mono_font_family: SharedString,
 ) -> gpui::AnyElement {
     let destination = domain
         .as_deref()
@@ -21,6 +22,8 @@ pub fn flow_info_section(
         FlowDirection::Outbound => "OUTBOUND",
         FlowDirection::Inbound => "INBOUND",
     };
+
+    let ui_font: SharedString = "Inter Variable".into();
 
     let mut card = v_flex()
         .bg(colors::surface())
@@ -32,34 +35,34 @@ pub fn flow_info_section(
         .gap(px(12.))
         // Process row
         .child(grid_row(
-            "PROCESS",
-            process_value(process_name),
+            label_element("PROCESS", ui_font.clone()),
+            process_value(process_name, ui_font.clone()),
         ))
         // Destination row
         .child(grid_row(
-            "DESTINATION",
-            destination_value(destination),
+            label_element("DESTINATION", ui_font.clone()),
+            destination_value(destination, mono_font_family.clone()),
         ))
         // IP Address row
         .child(grid_row(
-            "IP ADDRESS",
-            ip_value(ip),
+            label_element("IP ADDRESS", ui_font.clone()),
+            ip_value(ip, mono_font_family.clone()),
         ))
         // Protocol row
         .child(grid_row(
-            "PROTOCOL",
-            protocol_value(protocol, port),
+            label_element("PROTOCOL", ui_font.clone()),
+            protocol_value(protocol, port, mono_font_family.clone()),
         ))
         // Direction row
         .child(grid_row(
-            "DIRECTION",
-            direction_value(direction_str),
+            label_element("DIRECTION", ui_font.clone()),
+            direction_value(direction_str, ui_font.clone()),
         ));
 
     if let Some(label) = device_label {
         card = card.child(grid_row(
-            "DEVICE",
-            device_value(label),
+            label_element("DEVICE", ui_font.clone()),
+            device_value(label, mono_font_family.clone()),
         ));
     }
 
@@ -70,17 +73,15 @@ pub fn flow_info_section(
         .into_any_element()
 }
 
-fn grid_row(label: &str, value: gpui::AnyElement) -> gpui::AnyElement {
+fn grid_row(label: gpui::AnyElement, value: gpui::AnyElement) -> gpui::AnyElement {
     h_flex()
         .w_full()
         .child(
-            // Label column (4/12)
             div()
                 .w(px(120.))
-                .child(label_element(label)),
+                .child(label),
         )
         .child(
-            // Value column (8/12)
             div()
                 .flex_1()
                 .child(value),
@@ -88,8 +89,9 @@ fn grid_row(label: &str, value: gpui::AnyElement) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn label_element(label: &str) -> gpui::AnyElement {
+fn label_element(label: &str, ui_font: SharedString) -> gpui::AnyElement {
     div()
+        .font_family(ui_font)
         .text_color(colors::muted())
         .font_weight(FontWeight::BOLD)
         .text_size(px(11.))
@@ -97,7 +99,7 @@ fn label_element(label: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn process_value(process_name: &str) -> gpui::AnyElement {
+fn process_value(process_name: &str, ui_font: SharedString) -> gpui::AnyElement {
     h_flex()
         .gap_2()
         .items_center()
@@ -109,6 +111,7 @@ fn process_value(process_name: &str) -> gpui::AnyElement {
         )
         .child(
             div()
+                .font_family(ui_font)
                 .text_color(colors::text())
                 .text_size(px(13.))
                 .child(SharedString::from(process_name.to_string())),
@@ -116,16 +119,18 @@ fn process_value(process_name: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn destination_value(destination: &str) -> gpui::AnyElement {
+fn destination_value(destination: &str, mono_font_family: SharedString) -> gpui::AnyElement {
     div()
+        .font_family(mono_font_family)
         .text_color(colors::primary())
         .text_size(px(13.))
         .child(SharedString::from(destination.to_string()))
         .into_any_element()
 }
 
-fn ip_value(ip: &str) -> gpui::AnyElement {
+fn ip_value(ip: &str, mono_font_family: SharedString) -> gpui::AnyElement {
     div()
+        .font_family(mono_font_family)
         .bg(colors::surface_container_highest())
         .px(px(8.))
         .py(px(2.))
@@ -138,8 +143,9 @@ fn ip_value(ip: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn protocol_value(protocol: &str, port: u16) -> gpui::AnyElement {
+fn protocol_value(protocol: &str, port: u16, mono_font_family: SharedString) -> gpui::AnyElement {
     div()
+        .font_family(mono_font_family)
         .bg(colors::teal_dim())
         .px(px(8.))
         .py(px(2.))
@@ -152,8 +158,9 @@ fn protocol_value(protocol: &str, port: u16) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn direction_value(direction: &str) -> gpui::AnyElement {
+fn direction_value(direction: &str, ui_font: SharedString) -> gpui::AnyElement {
     div()
+        .font_family(ui_font)
         .bg(colors::surface_container_highest())
         .px(px(8.))
         .py(px(2.))
@@ -167,7 +174,7 @@ fn direction_value(direction: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn device_value(label: &str) -> gpui::AnyElement {
+fn device_value(label: &str, mono_font_family: SharedString) -> gpui::AnyElement {
     h_flex()
         .gap_2()
         .items_center()
@@ -179,6 +186,7 @@ fn device_value(label: &str) -> gpui::AnyElement {
         )
         .child(
             div()
+                .font_family(mono_font_family)
                 .bg(colors::teal_dim())
                 .px(px(8.))
                 .py(px(2.))
