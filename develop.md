@@ -228,16 +228,16 @@ enum PushNotification {
 
 ## 6.1 `policy-engine`
 
-- [ ] exact IP match
-- [ ] CIDR match positive/negative cases
-- [ ] exact domain match
-- [ ] wildcard subdomain match
-- [ ] wildcard does not match apex
-- [ ] process + destination combined match
-- [ ] precedence: specific beats general
-- [ ] action precedence: deny beats allow for same specificity
-- [ ] disabled rule ignored
-- [ ] invalid rule rejected by validator
+- [x] exact IP match
+- [x] CIDR match positive/negative cases
+- [x] exact domain match
+- [x] wildcard subdomain match
+- [x] wildcard does not match apex
+- [x] process + destination combined match
+- [x] precedence: specific beats general
+- [x] action precedence: deny beats allow for same specificity
+- [x] disabled rule ignored
+- [x] invalid rule rejected by validator
 
 ## 6.2 `decision-engine`
 
@@ -286,17 +286,17 @@ enum PushNotification {
 ## 6.6 `control-api` and `cli`
 
 - [ ] local socket auth/permission checks
-- [ ] add/list/delete rules command flow
-- [ ] resolve pending decision command flow
-- [ ] health status command output contract
+- [x] add/list/delete rules command flow
+- [x] resolve pending decision command flow
+- [x] health status command output contract
 - [ ] malformed request handling
 
 ## 6.7 recovery and fail-close behavior
 
 - [ ] boot blocks network until daemon healthy
 - [ ] daemon crash keeps fail-close policy
-- [ ] physical-console unlock command path
-- [ ] unlock denied from non-console context
+- [x] physical-console unlock command path
+- [x] unlock denied from non-console context
 
 ## 7) Integration Test Matrix
 
@@ -325,17 +325,17 @@ enum PushNotification {
 
 ## Phase 0: Foundation
 
-- [ ] Create Rust workspace and crate skeleton
-- [ ] Define `core-types` schema
-- [ ] Add trait interfaces and test fakes
-- [ ] Add CI pipeline for fmt/clippy/test
+- [x] Create Rust workspace and crate skeleton
+- [x] Define `core-types` schema
+- [x] Add trait interfaces and test fakes
+- [x] Add CI pipeline for fmt/clippy/test
 
 ## Phase 1: Policy + Decision Core
 
-- [ ] Implement rule parser/validator
-- [ ] Implement matcher and precedence
-- [ ] Implement pending queue + timeout state machine
-- [ ] Pass full unit suite for policy/decision crates
+- [x] Implement rule parser/validator
+- [x] Implement matcher and precedence
+- [x] Implement pending queue + timeout state machine
+- [x] Pass full unit suite for policy/decision crates
 
 ## Phase 2: Enforcement Path
 
@@ -346,10 +346,10 @@ enum PushNotification {
 
 ## Phase 3: Persistence + CLI
 
-- [ ] SQLite migrations and repositories
-- [ ] CLI for rules and pending decisions
-- [ ] Recovery command (console-only)
-- [ ] Persistence and restart behavior tests
+- [x] SQLite migrations and repositories
+- [x] CLI for rules and pending decisions
+- [x] Recovery command (console-only)
+- [x] Persistence and restart behavior tests
 
 ## Phase 4: GPUI Interface
 
