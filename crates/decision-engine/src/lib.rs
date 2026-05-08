@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use core_types::{FlowContext, PendingDecision, RuleAction, TransportProtocol};
+use core_types::{FlowContext, FlowDirection, PendingDecision, RuleAction, TransportProtocol};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverflowPolicy {
@@ -87,7 +87,7 @@ impl DecisionEngine {
 
     pub fn resolve_pending(&mut self, pending_id: &str, action: RuleAction) -> Option<RuleAction> {
         if self.pending.remove(pending_id).is_some() {
-            self.resolved.insert(pending_id.to_string(), action);
+            self.resolved.insert(pending_id.to_string(), action.clone());
             Some(action)
         } else {
             None

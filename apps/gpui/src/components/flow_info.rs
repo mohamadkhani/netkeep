@@ -11,6 +11,7 @@ pub fn flow_info_section(
     domain: &Option<String>,
     ip: &str,
     direction: FlowDirection,
+    device_label: &Option<String>,
 ) -> gpui::AnyElement {
     let destination = domain
         .as_deref()
@@ -21,45 +22,51 @@ pub fn flow_info_section(
         FlowDirection::Inbound => "INBOUND",
     };
 
+    let mut card = v_flex()
+        .bg(colors::surface())
+        .border_1()
+        .border_color(colors::border())
+        .rounded(px(4.))
+        .px(px(16.))
+        .py(px(16.))
+        .gap(px(12.))
+        // Process row
+        .child(grid_row(
+            "PROCESS",
+            process_value(process_name),
+        ))
+        // Destination row
+        .child(grid_row(
+            "DESTINATION",
+            destination_value(destination),
+        ))
+        // IP Address row
+        .child(grid_row(
+            "IP ADDRESS",
+            ip_value(ip),
+        ))
+        // Protocol row
+        .child(grid_row(
+            "PROTOCOL",
+            protocol_value(protocol, port),
+        ))
+        // Direction row
+        .child(grid_row(
+            "DIRECTION",
+            direction_value(direction_str),
+        ));
+
+    if let Some(label) = device_label {
+        card = card.child(grid_row(
+            "DEVICE",
+            device_value(label),
+        ));
+    }
+
     v_flex()
         .px(px(16.))
         .py(px(16.))
-        .child(
-            // Bordered card with grid content
-            v_flex()
-                .bg(colors::surface())
-                .border_1()
-                .border_color(colors::border())
-                .rounded(px(4.))
-                .px(px(16.))
-                .py(px(16.))
-                .gap(px(12.))
-                // Process row
-                .child(grid_row(
-                    "PROCESS",
-                    process_value(process_name),
-                ))
-                // Destination row
-                .child(grid_row(
-                    "DESTINATION",
-                    destination_value(destination),
-                ))
-                // IP Address row
-                .child(grid_row(
-                    "IP ADDRESS",
-                    ip_value(ip),
-                ))
-                // Protocol row
-                .child(grid_row(
-                    "PROTOCOL",
-                    protocol_value(protocol, port),
-                ))
-                // Direction row
-                .child(grid_row(
-                    "DIRECTION",
-                    direction_value(direction_str),
-                )),
-        )
+        .child(card)
         .into_any_element()
 }
 
@@ -157,5 +164,30 @@ fn direction_value(direction: &str) -> gpui::AnyElement {
         .font_weight(FontWeight::BOLD)
         .text_size(px(11.))
         .child(SharedString::from(direction.to_string()))
+        .into_any_element()
+}
+
+fn device_value(label: &str) -> gpui::AnyElement {
+    h_flex()
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .text_color(colors::teal())
+                .text_size(px(14.))
+                .child("\u{1F5A7}"), // 🖧 network
+        )
+        .child(
+            div()
+                .bg(colors::teal_dim())
+                .px(px(8.))
+                .py(px(2.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(colors::teal_border())
+                .text_color(colors::teal())
+                .text_size(px(12.))
+                .child(SharedString::from(label.to_string())),
+        )
         .into_any_element()
 }

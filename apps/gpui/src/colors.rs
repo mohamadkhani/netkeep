@@ -1,22 +1,12 @@
 // Material Design 3 dark theme colors from the HTML design spec.
-//
-// Color mapping from CSS:
-//   background / surface-dim          = #081425
-//   surface / surface-container-low   = #111c2d
-//   surface-container                 = #152031
-//   surface-container-high            = #1f2a3c
-//   surface-container-highest         = #2a3548
-//   surface-variant                   = #2a3548
-//   surface-bright                    = #2f3a4c
-//   on-surface (text)                 = #d8e3fb
-//   on-surface-variant (muted text)   = #c2c6d6
-//   outline-variant (border)          = #424754
-//   outline                           = #8c909f
-//   primary                           = #adc6ff
-//   primary-container                 = #4d8eff
-//   error                             = #ffb4ab
-//   on-error                          = #690005
-//   on-primary                        = #002e6a
+
+/// Parse a hex color string like "#22c55e" or "#6b7280" into an Hsla value.
+/// Returns a fallback gray if parsing fails.
+pub fn hex_to_hsla(hex: &str) -> gpui::Hsla {
+    let hex = hex.trim_start_matches('#');
+    let parsed = u32::from_str_radix(hex, 16).unwrap_or(0x6b7280);
+    gpui::rgb(parsed).into()
+}
 
 pub fn bg() -> gpui::Hsla {
     gpui::rgb(0x081425).into() // background / surface-dim

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::Stdio;
 
-use core_types::{FlowContext, RuleAction};
+use core_types::{FlowContext, RouteTarget, RuleAction};
 use flow_classifier::{Classifier, RawPacket};
 
 // ---------------------------------------------------------------------------
@@ -20,12 +20,6 @@ pub struct PacketEvent {
 // ---------------------------------------------------------------------------
 // Verdict types
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RouteTarget {
-    Tun(String),
-    Device(String),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnforcementVerdict {
@@ -103,6 +97,9 @@ where
 
         let verdict = match &decision {
             FlowDecision::Immediate(RuleAction::Allow) => EnforcementVerdict::Allow,
+            FlowDecision::Immediate(RuleAction::Route { target }) => {
+                EnforcementVerdict::Route { target: target.clone() }
+            }
             // Deny rule, Ask without resolution, or pending queue overflow all result in a drop.
             FlowDecision::Immediate(RuleAction::Deny)
             | FlowDecision::Immediate(RuleAction::Ask)
@@ -224,6 +221,144 @@ fn run_nft_script(script: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("nft exited with {status}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Route manager — manages ip-rule/ip-route entries for marked packets
+// ---------------------------------------------------------------------------
+
+/// Manages policy routing rules so that packets marked with a specific fwmark
+/// are routed through the designated interface (TUN device or physical NIC).
+///
+/// For each `RouteTarget`, a unique fwmark is allocated via `MarkAllocator`,
+/// then:
+///   - `ip rule add fwmark <mark> table <table_id>`
+///   - `ip route add default dev <device> table <table_id>`
+///
+/// Table IDs start at 10000 + mark to avoid collisions with standard tables.
+pub trait RouteManager: Send + Sync {
+    /// Add a routing rule for the given target (idempotent).
+    fn add_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String>;
+    /// Remove a routing rule for the given target.
+    fn remove_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String>;
+    /// Remove all managed routes.
+    fn remove_all(&self) -> Result<(), String>;
+}
+
+pub struct SystemRouteManager {
+    /// Tracks which (target, fwmark) pairs have been installed.
+    installed: std::sync::Mutex<Vec<(RouteTarget, u32)>>,
+}
+
+impl SystemRouteManager {
+    pub fn new() -> Self {
+        Self { installed: std::sync::Mutex::new(Vec::new()) }
+    }
+}
+
+impl Default for SystemRouteManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn device_name(target: &RouteTarget) -> &str {
+    match target {
+        RouteTarget::Tun(name) | RouteTarget::Device(name) => name,
+    }
+}
+
+fn default_gateway_for_device(dev: &str) -> Option<String> {
+    let output = std::process::Command::new("ip")
+        .args(["-4", "route", "show", "default", "dev", dev])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(idx) = parts.iter().position(|p| *p == "via") {
+            if let Some(via) = parts.get(idx + 1) {
+                return Some((*via).to_string());
+            }
+        }
+    }
+    None
+}
+
+impl RouteManager for SystemRouteManager {
+    fn add_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String> {
+        let table_id = 10000 + fwmark as u32;
+        let dev = device_name(target);
+        // Keep this idempotent and avoid duplicate fwmark rules.
+        run_ip(&["rule", "del", "fwmark", &fwmark.to_string(), "lookup", &table_id.to_string()]).ok();
+        run_ip(&["rule", "add", "fwmark", &fwmark.to_string(), "lookup", &table_id.to_string()])?;
+
+        // Replace route in mark table every time to avoid stale/invalid entries.
+        match target {
+            RouteTarget::Device(_) => {
+                if let Some(gateway) = default_gateway_for_device(dev) {
+                    run_ip(&[
+                        "route",
+                        "replace",
+                        "default",
+                        "via",
+                        &gateway,
+                        "dev",
+                        dev,
+                        "table",
+                        &table_id.to_string(),
+                    ])?;
+                } else {
+                    run_ip(&["route", "replace", "default", "dev", dev, "table", &table_id.to_string()])?;
+                }
+            }
+            RouteTarget::Tun(_) => {
+                run_ip(&["route", "replace", "default", "dev", dev, "table", &table_id.to_string()])?;
+            }
+        }
+
+        let mut installed = self.installed.lock().map_err(|e| e.to_string())?;
+        if !installed.iter().any(|(t, m)| t == target && *m == fwmark) {
+            installed.push((target.clone(), fwmark));
+        }
+        Ok(())
+    }
+
+    fn remove_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String> {
+        let table_id = 10000 + fwmark as u32;
+        run_ip(&["route", "del", "default", "table", &table_id.to_string()]).ok();
+        run_ip(&["rule", "del", "fwmark", &fwmark.to_string(), "lookup", &table_id.to_string()]).ok();
+
+        let mut installed = self.installed.lock().map_err(|e| e.to_string())?;
+        installed.retain(|(t, m)| !(t == target && *m == fwmark));
+        Ok(())
+    }
+
+    fn remove_all(&self) -> Result<(), String> {
+        let pairs: Vec<(RouteTarget, u32)> = {
+            let installed = self.installed.lock().map_err(|e| e.to_string())?;
+            installed.clone()
+        };
+        for (target, fwmark) in &pairs {
+            self.remove_route(target, *fwmark)?;
+        }
+        Ok(())
+    }
+}
+
+fn run_ip(args: &[&str]) -> Result<(), String> {
+    let status = std::process::Command::new("ip")
+        .args(args)
+        .status()
+        .map_err(|e| format!("failed to run ip {:?}: {e}", args))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("ip {:?} exited with {status}", args))
     }
 }
 
@@ -461,5 +596,48 @@ mod tests {
         let b = FakeBootstrap { fail: true, ..Default::default() };
         assert!(b.setup(0).is_err());
         assert!(b.teardown().is_err());
+    }
+
+    #[test]
+    fn route_verdict_in_packet_processor() {
+        let target = RouteTarget::Tun("tun0".to_string());
+        let mut p = processor(
+            vec![event("f-route")],
+            vec![FlowDecision::Immediate(RuleAction::Route { target: target.clone() })],
+        );
+        let result = p.process_next(1000).expect("result");
+        assert_eq!(result.verdict, EnforcementVerdict::Route { target });
+        assert_eq!(result.flow_id, "f-route");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeRouteManager (for tests in downstream crates)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+pub struct FakeRouteManager {
+    pub routes: std::sync::Mutex<Vec<(RouteTarget, u32)>>,
+}
+
+impl RouteManager for FakeRouteManager {
+    fn add_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String> {
+        let mut routes = self.routes.lock().map_err(|e| e.to_string())?;
+        if !routes.iter().any(|(t, m)| t == target && *m == fwmark) {
+            routes.push((target.clone(), fwmark));
+        }
+        Ok(())
+    }
+
+    fn remove_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String> {
+        let mut routes = self.routes.lock().map_err(|e| e.to_string())?;
+        routes.retain(|(t, m)| !(t == target && *m == fwmark));
+        Ok(())
+    }
+
+    fn remove_all(&self) -> Result<(), String> {
+        let mut routes = self.routes.lock().map_err(|e| e.to_string())?;
+        routes.clear();
+        Ok(())
     }
 }

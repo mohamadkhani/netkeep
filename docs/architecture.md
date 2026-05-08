@@ -5,7 +5,7 @@ Network flow authorization system for Linux: intercept unknown flows, prompt use
 **Repository:** https://github.com/mohammadreza-khani/logiguard  
 **Language:** Rust  
 **Platforms:** Linux desktop first  
-**Status:** Phase 4 (GPUI UI, 93 tests passing)
+**Status:** Phase 4+ (GPUI UI + daemon-side routed relay + per-egress DNS)
 
 ## System Overview
 
@@ -41,6 +41,7 @@ Network flow authorization system for Linux: intercept unknown flows, prompt use
 │  │  - Request routing (AddRule, ListPending, etc.)        │ │
 │  │  - Response formatting                                 │ │
 │  │  - Health/config endpoint                              │ │
+│  │  - Routed TCP relay endpoint (OpenRoutedTcp)           │ │
 │  └──────────────────────────────────────────────────────────┘ │
 │  ┌──────────────────────────────────────────────────────────┐ │
 │  │ PacketProcessor (NFQUEUE)                               │ │
@@ -107,7 +108,9 @@ Shared data models, no dependencies on other crates.
 - `FlowContext` — network flow metadata (process, IPs, domain, protocol, direction, port)
 - `PendingDecision` — user decision queue item
 - `FlowEvent` — audit log entry
-- `RuleAction` — {Allow, Deny, Ask}
+- `RuleAction` — {Allow, Deny, Ask, Route{target}}
+- `RouteTarget` — {Tun(name), Device(name)}
+- `Egress` — named route destination with targets, availability, and optional `dns_servers`
 - `RuleDuration` — {UntilRestart, Permanent}
 - `DestinationMatcher` — {IpExact, Cidr, DomainExact, DomainWildcard}
 - `TransportProtocol` — {Tcp, Udp, Quic, Other}
@@ -119,15 +122,16 @@ Shared data models, no dependencies on other crates.
 Rule matching and precedence logic.
 
 **Key Functions:**
-- `resolve(rules: &[Rule], flow: &FlowContext) -> Option<RuleAction>` — find best matching rule
+- `resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule>` — pick best matching enabled rule
 - Specificity ranking: process + exact IP > process + wildcard > exact IP > wildcard > global
-- Action precedence: Deny > Allow > Ask (when specificity tied)
+- Action precedence: Deny > Allow > Ask (`Allow` and `Route { .. }` share action rank **2**). If two rules tie on both specificity and action rank, **greater** `rule.id` wins.
+- Tie-break: when specificity **and** action rank are equal, lexicographically greater `rule.id` wins (deterministic; avoids ambiguous SQLite row order)
 - Wildcard matching: `*.example.com` matches subdomains, not apex
 
 **Traits:**
 - `RuleRepository` — mock-friendly interface for rule lookups
 
-**Tests:** Exact match, CIDR, domain, wildcard, precedence, disabled rules.
+**Tests:** Exact match, CIDR, domain, wildcard, precedence, deny vs allow, overlapping Route tie-break, disabled rules.
 
 ### `decision-engine`
 
@@ -196,11 +200,15 @@ SQLite-backed persistence.
 - `RuleRepository` — CRUD rules, `purge_session_rules()` on startup
 - `FlowRepository` — append flow events, list with limit
 - `PendingRepository` — create/delete pending decisions, restore on startup
+- `EgressRepository` — CRUD egresses, targets, and per-egress DNS servers
 
 **Schema:**
 - `rules` table — id, enabled, action, duration, process_name, destination, created_at, updated_at
 - `flow_events` table — id, process_name, device_label, destination_ip, destination_domain, protocol, state, timestamp_secs
 - `pending_decisions` table — id, flow_id, created_at, deadline_at, default_action
+- `egresses` table — id, name, color, is_system_default
+- `egress_targets` table — target kind/value per egress
+- `egress_dns_servers` table — DNS resolver IPs per egress
 
 **Migrations:** Auto-run on startup via schema versioning.
 
@@ -220,6 +228,7 @@ AwaitPendingDecision { pending_id }
 ResolvePending { pending_id, action }
 Health
 Unlock
+OpenRoutedTcp { host, port, target }
 ```
 
 **Responses:**
@@ -234,6 +243,7 @@ PendingStillWaiting { pending_id }
 PendingResolved { action }
 Health { ready, fail_close_active, timeout_secs, ... }
 Unlocked
+RoutedTcpReady { listen_addr }
 Error(String)
 ```
 
@@ -354,6 +364,10 @@ Planned (Phase 2 onward):
 
 8. **Unix socket + JSON:** Local IPC, no network exposure. Simple text protocol for debugging.
 
+9. **Daemon-owned routed connect:** Emulator stays unprivileged; daemon accepts `OpenRoutedTcp`, installs **managed** policy-routing (`ip rule fwmark … table …`) via `SystemRouteManager`, sets **`SO_MARK`** on the outbound socket to hit that table, and relays bytes. **Tun:** `default dev <tun>` in the managed table only—do **not** reuse WireGuard’s existing fwmark when that mark means split-tunnel bypass (traffic would leave via `main`/LAN). **Device:** optional Linux **`SO_BINDTODEVICE`** on the iface plus source-IP bind + same fwmark pattern. Diagnostics log both unmarked `ip route get` (follows default route) and **`ip route get … mark …`** (shows the marked policy path).
+
+10. **Per-egress DNS resolution:** Daemon resolves hostnames with egress-specific DNS servers when configured, with fallback to system resolver.
+
 ## Systemd Integration
 
 **Daemon unit file** (planned):
@@ -376,13 +390,15 @@ WantedBy=multi-user.target
 
 ## Environment Variables
 
-- `LOGIGUARD_DB_PATH` — SQLite database file (default: `/var/lib/logiguard/db.sqlite`)
+- `LOGIGUARD_SOCKET_PATH` — Unix control socket (daemon default: `/tmp/logiguard.sock`)
+- `LOGIGUARD_DB_PATH` — SQLite database file (daemon default: `/tmp/logiguard.db`; override for production paths)
+- `LOGIGUARD_DEVICE_ROUTE_FALLBACK` — if `1`/`true`/`yes`, routed **device** connect may fall back to unmarked `connect` after failures (escape hatch; not fail-close strict)
 - `LOGIGUARD_NFQUEUE` — NFQUEUE number to listen on (default: 0)
-- `LOGIGUARD_DEFAULT_TIMEOUT` — default pending timeout in seconds (default: 100)
-- `LOGIGUARD_TCP_TIMEOUT` — TCP-specific timeout (default: 100)
-- `LOGIGUARD_UDP_TIMEOUT` — UDP-specific timeout (default: 5)
-- `LOGIGUARD_QUIC_TIMEOUT` — QUIC-specific timeout (default: 5)
-- `LOGIGUARD_OTHER_TIMEOUT` — Other protocols timeout (default: 3)
+- `LOGIGUARD_DEFAULT_TIMEOUT_SECS` — default pending timeout in seconds (default: 100)
+- `LOGIGUARD_TCP_TIMEOUT_SECS` — TCP-specific pending timeout (falls back to default when unset)
+- `LOGIGUARD_UDP_TIMEOUT_SECS` — UDP-specific pending timeout
+- `LOGIGUARD_QUIC_TIMEOUT_SECS` — QUIC-specific pending timeout
+- `LOGIGUARD_OTHER_TIMEOUT_SECS` — other protocols pending timeout
 
 ## Recovery
 
@@ -408,7 +424,7 @@ Prevents remote unlock attempts.
 - Real ProcessResolver (netstat, /proc/net integration)
 - SNI extraction from QUIC Initial packets
 - DNS query interception (collect domain hints)
-- Device routing targets (route to specific TUN/VPN)
+- Route rule conflict warnings in UI when multiple rules match the same flow
 - Rule templates and groups
 - Web UI (phase 5)
 - Integration with systemd user services

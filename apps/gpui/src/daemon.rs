@@ -45,3 +45,79 @@ pub fn fetch_pending(pending_id: &str) -> anyhow::Result<PendingDecision> {
         other => Err(anyhow::anyhow!("unexpected response: {other:?}")),
     }
 }
+
+/// Detect local network interfaces and return a list of default egress entries.
+/// Always includes a "Default Route" entry (system routing table).
+/// Interfaces whose operstate is "down" are marked as unavailable.
+pub fn detect_egresses() -> Vec<core_types::Egress> {
+    use core_types::{Egress, RouteTarget};
+
+    let mut egresses = vec![Egress {
+        id: "eg-default".to_string(),
+        name: "Default Route".to_string(),
+        color: "#6b7280".to_string(), // gray
+        targets: vec![],
+        dns_servers: vec![],
+        is_system_default: true,
+        is_available: true,
+    }];
+
+    // Read /sys/class/net/ to list interfaces
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net/") {
+        let mut ifaces: Vec<(String, u32, String)> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "lo" {
+                continue;
+            }
+            let if_type: u32 = std::fs::read_to_string(format!("/sys/class/net/{name}/type"))
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(1);
+            let operstate = std::fs::read_to_string(format!("/sys/class/net/{name}/operstate"))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            ifaces.push((name, if_type, operstate));
+        }
+
+        for (name, if_type, operstate) in &ifaces {
+            // "up" or "unknown" (TUN devices often report "unknown") = usable
+            let is_up = operstate == "up" || operstate == "unknown";
+
+            // type 65534 = ARPHRD_NONE (TUN/TAP device)
+            if *if_type == 65534 {
+                egresses.push(Egress {
+                    id: format!("eg-{name}"),
+                    name: format!("TUN: {name}"),
+                    color: "#22c55e".to_string(), // green
+                    targets: vec![RouteTarget::Tun(name.clone())],
+                    dns_servers: vec![],
+                    is_system_default: false,
+                    is_available: is_up,
+                });
+            }
+            // type 1 = Ethernet (physical NICs and bridges)
+            // Skip known virtual bridges
+            else if *if_type == 1 && !name.starts_with("docker") && !name.starts_with("virbr") && !name.starts_with("br-") {
+                let is_wireless = name.starts_with("wl") || name.starts_with("wlp");
+                let label = if is_wireless {
+                    format!("Wi-Fi: {name}")
+                } else {
+                    format!("LAN: {name}")
+                };
+                egresses.push(Egress {
+                    id: format!("eg-{name}"),
+                    name: label,
+                    color: "#3b82f6".to_string(), // blue
+                    targets: vec![RouteTarget::Device(name.clone())],
+                    dns_servers: vec![],
+                    is_system_default: false,
+                    is_available: is_up,
+                });
+            }
+        }
+    }
+
+    egresses
+}

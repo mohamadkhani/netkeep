@@ -88,12 +88,15 @@ impl Render for DecisionApp {
                 &item.flow.destination_domain,
                 &item.flow.destination_ip,
                 item.flow.direction,
+                &item.flow.device_label,
             ))
             .child(components::action_footer(
                 components::ActionFooterProps {
                     pending_id: item.id.clone(),
                     flow: item.flow.clone(),
                     make_permanent,
+                    egresses: state.egresses.clone(),
+                    selected_egress_index: state.selected_egress_index,
                     state: state_weak,
                 },
             ))

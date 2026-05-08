@@ -21,6 +21,7 @@
   - CIDR/netmask
   - Wildcard does not match apex by default (`*.example.com` != `example.com`)
   - Optional route target (e.g. specific TUN or network device)
+  - Optional per-egress DNS server list (resolver IPs)
 - Protocol coverage in v1:
   - TCP + UDP
   - Best-effort domain inference for QUIC/HTTP3
@@ -166,13 +167,14 @@ enum PushNotification {
 
 ## 4) Rule Resolution and Precedence
 
-- Action precedence: `Deny > Allow > Ask`
+- Action precedence: `Deny > Allow > Ask`; `Allow` and `Route { .. }` share the same action rank, so `Deny` still wins when specificity ties; two `Route` rules at the same specificity tie-break on `rule.id` (see below)
 - Specificity precedence (high -> low):
   1. process + exact IP/host
   2. process + CIDR/domain wildcard
   3. exact IP/host
   4. CIDR/domain wildcard
   5. global/default
+- Tie-break (same specificity **and** same action rank): lexicographically **greater** `rule.id` wins (deterministic; aligns with monotonic UI ids like `ui-<epoch>`). Avoid duplicate matchers for the same flow (e.g. two `Route` rules for one domain + process)—delete or merge conflicting rows.
 - Wildcard rule semantics:
   - `*.example.com` matches only subdomains
   - apex must be explicit `example.com`
@@ -236,6 +238,7 @@ enum PushNotification {
 - [x] process + destination combined match
 - [x] precedence: specific beats general
 - [x] action precedence: deny beats allow for same specificity
+- [x] tie-break: equal specificity + equal action rank → greater `rule.id` wins (see `policy-engine::resolve_action`)
 - [x] disabled rule ignored
 - [x] invalid rule rejected by validator
 
@@ -453,6 +456,28 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Updated docs: `architecture.md`, `implementation-status.md`, `gpui-components.md`, `gpui-api.md`
 - [x] Added `design/` folder with HTML design reference (`decision_dialog_window.html`)
 - [x] 93 workspace tests still passing
+
+### 2026-05-09 (routing hardening)
+
+- [x] Policy: `resolve_action` tie-break uses `(specificity, action_rank, rule.id)` so overlapping rules are deterministic (greater id wins when scores tie)
+- [x] SQLite `list_rules()` ordered by `id` for stable iteration
+- [x] Routed **Device** connects: Linux `SO_BINDTODEVICE` + `SO_MARK` + source bind (LAN egress when default route is VPN)
+- [x] Routed **Tun** connects: **always** use daemon-managed `ip rule` / fwmark tables (`ensure_route_mark`) — **do not** reuse WireGuard’s discovered fwmark (often split-tunnel **bypass**, which sent SOCKS upstream out LAN)
+- [x] Daemon logs: `ip route get` default vs `ip route get … mark …` probes to distinguish unmarked lookups from marked policy routing
+
+### 2026-05-08 (session 9)
+
+- [x] Added daemon-side routed TCP relay API (`OpenRoutedTcp`) so emulator remains unprivileged
+- [x] Daemon now owns privileged routed connect for `RouteTarget::Tun` (`SO_MARK`) and `RouteTarget::Device` (source-IP bind)
+- [x] Added routed connect timeout (8s) to avoid long kernel-level hangs
+- [x] Daemon now sets `/tmp/logiguard.sock` permissions to `0666` after bind
+- [x] Added `Egress.dns_servers: Vec<String>` to `core-types`
+- [x] Added SQLite table `egress_dns_servers` and repository persistence/load path
+- [x] Added daemon per-egress DNS resolution:
+  - resolve host via egress DNS list when configured
+  - fallback to system DNS when no egress DNS configured
+  - try all resolved addresses with timeout per address
+- [x] Added state-store test: `sqlite_egress_dns_servers_roundtrip`
 
 ### 2026-05-06 (session 5)
 

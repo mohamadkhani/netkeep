@@ -37,12 +37,15 @@ fn run_gui(pending_id: String) {
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
 
+        let egresses = daemon::detect_egresses();
         let state: Entity<AppState> = cx.new(|_| AppState {
             item,
             now_secs: daemon::unix_now(),
             make_permanent: false,
             resolved: false,
             pending_count: 0,
+            egresses,
+            selected_egress_index: 0,
         });
 
         cx.open_window(

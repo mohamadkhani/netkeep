@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use control_api::{ControlRequest, ControlResponse};
-use core_types::{FlowContext, FlowDirection, RuleAction, TransportProtocol};
+use core_types::{FlowContext, FlowDirection, RouteTarget, RuleAction, TransportProtocol};
 
 pub fn send_control_request(socket_path: &str, request: &ControlRequest) -> Result<ControlResponse, String> {
     let mut stream = UnixStream::connect(socket_path)
@@ -81,6 +81,13 @@ pub fn success_reply(stream: &mut TcpStream) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// SOCKS5 reply with a generic connection failure (reply code 0x05 = connection refused).
+pub fn fail_reply(stream: &mut TcpStream) -> Result<(), String> {
+    stream
+        .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .map_err(|e| e.to_string())
+}
+
 pub fn relay_bidirectional(client: TcpStream, upstream: TcpStream) -> Result<(), String> {
     let mut c_read = client.try_clone().map_err(|e| e.to_string())?;
     let mut c_write = client;
@@ -93,6 +100,42 @@ pub fn relay_bidirectional(client: TcpStream, upstream: TcpStream) -> Result<(),
     let _ = t1.join().map_err(|_| "relay thread join failed".to_string())??;
     let _ = t2.join().map_err(|_| "relay thread join failed".to_string())??;
     Ok(())
+}
+
+/// Emulator is intentionally unprivileged. It does not apply socket-level
+/// routing options (`SO_MARK` / `SO_BINDTODEVICE`) and always opens a normal
+/// upstream TCP connection.
+///
+/// Route decisions are still registered with daemon (RuleAction::Route), but
+/// actual privileged enforcement belongs to daemon/enforcer path.
+fn connect_upstream(
+    host: &str,
+    port: u16,
+    route_target: Option<&RouteTarget>,
+    socket_path: &str,
+) -> Result<TcpStream, String> {
+    match route_target {
+        Some(target) => {
+            let response = send_control_request(
+                socket_path,
+                &ControlRequest::OpenRoutedTcp {
+                    host: host.to_string(),
+                    port,
+                    target: target.clone(),
+                },
+            )?;
+            match response {
+                ControlResponse::RoutedTcpReady { listen_addr } => TcpStream::connect(&listen_addr)
+                    .map_err(|e| format!("failed to connect routed relay {listen_addr}: {e}")),
+                ControlResponse::Error(e) => Err(format!("daemon routed connect failed: {e}")),
+                other => Err(format!("unexpected OpenRoutedTcp response: {other:?}")),
+            }
+        }
+        None => {
+            let addr = format!("{host}:{port}");
+            TcpStream::connect(&addr).map_err(|e| format!("upstream connect to {addr} failed: {e}"))
+        }
+    }
 }
 
 pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), String> {
@@ -115,13 +158,29 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
             flow,
             now_secs: current_unix_secs(),
         },
-    )?;
+    )
+    .map_err(|e| {
+        let _ = fail_reply(&mut stream);
+        e
+    })?;
     match response {
         ControlResponse::ImmediateVerdict {
             action: RuleAction::Allow,
         } => {
-            let upstream =
-                TcpStream::connect(format!("{host}:{port}")).map_err(|e| format!("upstream connect failed: {e}"))?;
+            let upstream = connect_upstream(&host, port, None, socket_path).map_err(|e| {
+                let _ = fail_reply(&mut stream);
+                e
+            })?;
+            success_reply(&mut stream)?;
+            relay_bidirectional(stream, upstream)
+        }
+        ControlResponse::ImmediateVerdict {
+            action: RuleAction::Route { target },
+        } => {
+            let upstream = connect_upstream(&host, port, Some(&target), socket_path).map_err(|e| {
+                let _ = fail_reply(&mut stream);
+                e
+            })?;
             success_reply(&mut stream)?;
             relay_bidirectional(stream, upstream)
         }
@@ -160,7 +219,11 @@ fn wait_for_pending_and_continue(
             &ControlRequest::AwaitPendingDecision {
                 pending_id: pending_id.to_string(),
             },
-        )?;
+        )
+        .map_err(|e| {
+            let _ = fail_reply(&mut stream);
+            e
+        })?;
         match poll {
             ControlResponse::PendingStillWaiting { .. } => {
                 thread::sleep(Duration::from_millis(200));
@@ -171,8 +234,23 @@ fn wait_for_pending_and_continue(
             | ControlResponse::ImmediateVerdict {
                 action: RuleAction::Allow,
             } => {
-                let upstream = TcpStream::connect(format!("{host}:{port}"))
-                    .map_err(|e| format!("upstream connect failed: {e}"))?;
+                let upstream = connect_upstream(&host, port, None, socket_path).map_err(|e| {
+                    let _ = fail_reply(&mut stream);
+                    e
+                })?;
+                success_reply(&mut stream)?;
+                return relay_bidirectional(stream, upstream);
+            }
+            ControlResponse::PendingResolved {
+                action: RuleAction::Route { target },
+            }
+            | ControlResponse::ImmediateVerdict {
+                action: RuleAction::Route { target },
+            } => {
+                let upstream = connect_upstream(&host, port, Some(&target), socket_path).map_err(|e| {
+                    let _ = fail_reply(&mut stream);
+                    e
+                })?;
                 success_reply(&mut stream)?;
                 return relay_bidirectional(stream, upstream);
             }

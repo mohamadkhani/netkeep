@@ -173,12 +173,20 @@ impl<R: Repository> ControlService<R> {
             }
             ControlRequest::RegisterUnknownFlow { flow, now_secs } => {
                 if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
+                    eprintln!(
+                        "policy matched rule: id={} action={:?} process={:?} domain={:?} ip={}",
+                        resolved.rule_id,
+                        resolved.action,
+                        flow.process_name,
+                        flow.destination_domain,
+                        flow.destination_ip
+                    );
                     match resolved.action {
-                        RuleAction::Allow | RuleAction::Deny => {
-                            let state = if resolved.action == RuleAction::Allow {
-                                FlowState::Allowed
-                            } else {
-                                FlowState::Denied
+                        RuleAction::Allow | RuleAction::Deny | RuleAction::Route { .. } => {
+                            let state = match &resolved.action {
+                                RuleAction::Allow | RuleAction::Route { .. } => FlowState::Allowed,
+                                RuleAction::Deny => FlowState::Denied,
+                                RuleAction::Ask => unreachable!(),
                             };
                             self.record_event(&flow, state, now_secs);
                             return ControlResponse::ImmediateVerdict {
@@ -225,10 +233,9 @@ impl<R: Repository> ControlService<R> {
             ControlRequest::ResolvePending { pending_id, action } => {
                 if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action) {
                     self.repo.delete_pending(&pending_id);
-                    // NEW: Send push notification to subscribers
                     let _ = self.notification_tx.send(PushNotification::PendingResolved {
                         pending_id: pending_id.clone(),
-                        action: chosen,
+                        action: chosen.clone(),
                     });
                     ControlResponse::PendingResolved { action: chosen }
                 } else {
@@ -249,6 +256,9 @@ impl<R: Repository> ControlService<R> {
             // The service just acknowledges it; the daemon does the real work.
             ControlRequest::Unlock => ControlResponse::Unlocked,
             ControlRequest::SubscribeToPending => ControlResponse::SubscriptionAck,
+            ControlRequest::OpenRoutedTcp { .. } => {
+                ControlResponse::Error("OpenRoutedTcp is handled by daemon runtime".to_string())
+            }
         }
     }
 }
@@ -268,12 +278,20 @@ impl<R: Repository> FlowRegistrar for SharedService<R> {
 impl<R: Repository> FlowRegistrar for ControlService<R> {
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
         if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
+            eprintln!(
+                "policy matched rule: id={} action={:?} process={:?} domain={:?} ip={}",
+                resolved.rule_id,
+                resolved.action,
+                flow.process_name,
+                flow.destination_domain,
+                flow.destination_ip
+            );
             match resolved.action {
-                RuleAction::Allow | RuleAction::Deny => {
-                    let state = if resolved.action == RuleAction::Allow {
-                        FlowState::Allowed
-                    } else {
-                        FlowState::Denied
+                RuleAction::Allow | RuleAction::Deny | RuleAction::Route { .. } => {
+                    let state = match &resolved.action {
+                        RuleAction::Allow | RuleAction::Route { .. } => FlowState::Allowed,
+                        RuleAction::Deny => FlowState::Denied,
+                        RuleAction::Ask => unreachable!(),
                     };
                     self.record_event(&flow, state, now_secs);
                     return FlowDecision::Immediate(resolved.action);
@@ -283,10 +301,9 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
         }
         match self.decision_engine.register_unknown_flow(flow.clone(), now_secs) {
             DecisionOutcome::Immediate(action) => {
-                let state = if action == RuleAction::Allow {
-                    FlowState::Allowed
-                } else {
-                    FlowState::Denied
+                let state = match &action {
+                    RuleAction::Allow | RuleAction::Route { .. } => FlowState::Allowed,
+                    RuleAction::Deny | RuleAction::Ask => FlowState::Denied,
                 };
                 self.record_event(&flow, state, now_secs);
                 FlowDecision::Immediate(action)
@@ -320,6 +337,7 @@ mod tests {
             duration: RuleDuration::UntilRestart,
             process_name: None,
             destination: DestinationMatcher::DomainExact("example.com".to_string()),
+            route_target: None,
         }
     }
 

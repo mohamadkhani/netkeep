@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
-use core_types::{DestinationMatcher, FlowContext, FlowDirection, Rule, RuleAction, RuleDuration, TransportProtocol};
+use core_types::{DestinationMatcher, FlowContext, FlowDirection, RouteTarget, Rule, RuleAction, RuleDuration, TransportProtocol};
 use control_api::{ControlRequest, ControlResponse};
 use serde_json::json;
 
@@ -50,8 +50,8 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
 
     if cmd_args.is_empty() {
         return Err(
-            "usage: add-rule <id> <destination> [--action allow|deny|ask] \
-             [--duration until-restart|permanent] [--process <name>] | \
+            "usage: add-rule <id> <destination> [--action allow|deny|ask|route] \
+             [--duration until-restart|permanent] [--process <name>] [--route <device>] | \
              list-rules | list-pendings | list-flows [--limit N] | \
              delete-rule <id> | \
              register-flow <process> <ip> <domain|-> <tcp|udp|quic|other> <now-secs> | \
@@ -75,8 +75,8 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                 }
             }
             if positionals.len() < 2 {
-                return Err("usage: add-rule <id> <destination> [--action allow|deny|ask] \
-                            [--duration until-restart|permanent] [--process <name>]"
+                return Err("usage: add-rule <id> <destination> [--action allow|deny|ask|route] \
+                            [--duration until-restart|permanent] [--process <name>] [--route <device>]"
                     .to_string());
             }
             let id = positionals[0].to_string();
@@ -86,8 +86,13 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                 Some("allow") => RuleAction::Allow,
                 Some("deny") => RuleAction::Deny,
                 Some("ask") => RuleAction::Ask,
+                Some("route") => {
+                    let device = extract_flag(flags_rest, "--route")
+                        .unwrap_or("tun0");
+                    RuleAction::Route { target: RouteTarget::Tun(device.to_string()) }
+                }
                 Some(other) => {
-                    return Err(format!("unknown action: {other}; use allow, deny, or ask"))
+                    return Err(format!("unknown action: {other}; use allow, deny, ask, or route"))
                 }
                 None => RuleAction::Allow,
             };
@@ -103,6 +108,14 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
             };
             let process_name = extract_flag(flags_rest, "--process").map(|s| s.to_string());
 
+            let route_target = extract_flag(flags_rest, "--route").and_then(|v| {
+                if matches!(&action, RuleAction::Route { .. }) {
+                    None // already embedded in action
+                } else {
+                    Some(RouteTarget::Tun(v.to_string()))
+                }
+            });
+
             Ok((
                 ControlRequest::AddRule(Rule {
                     id,
@@ -111,6 +124,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                     duration,
                     process_name,
                     destination,
+                    route_target,
                 }),
                 output_mode,
             ))
@@ -208,8 +222,13 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
                 let body = rules
                     .iter()
                     .map(|r| {
+                        let route = match &r.route_target {
+                            Some(RouteTarget::Tun(d)) => format!(" route=tun:{d}"),
+                            Some(RouteTarget::Device(d)) => format!(" route=dev:{d}"),
+                            None => String::new(),
+                        };
                         format!(
-                            "{} {:?} action={:?} duration={:?} process={:?}",
+                            "{} {:?} action={:?} duration={:?} process={:?}{route}",
                             r.id, r.destination, r.action, r.duration, r.process_name
                         )
                     })
@@ -294,6 +313,9 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
         ControlResponse::Unlocked => Ok("unlocked: nftables rules removed".to_string()),
         ControlResponse::Error(err) => Err(err),
         ControlResponse::SubscriptionAck => Ok("subscription confirmed".to_string()),
+        ControlResponse::RoutedTcpReady { listen_addr } => {
+            Ok(format!("routed tcp relay ready at {listen_addr}"))
+        }
     }
 }
 
@@ -511,6 +533,26 @@ mod tests {
         let (req, mode) = parse_request(&args).expect("must parse");
         assert_eq!(req, ControlRequest::Health);
         assert_eq!(mode, OutputMode::Json);
+    }
+
+    #[test]
+    fn add_rule_route_action_with_device() {
+        let args = [
+            "add-rule", "r1", "example.com",
+            "--action", "route",
+            "--route", "wg0",
+            "--duration", "permanent",
+        ]
+        .map(String::from)
+        .to_vec();
+        let (req, _) = parse_request(&args).expect("must parse");
+        match req {
+            ControlRequest::AddRule(rule) => {
+                assert_eq!(rule.action, RuleAction::Route { target: RouteTarget::Tun("wg0".to_string()) });
+                assert_eq!(rule.duration, RuleDuration::Permanent);
+            }
+            _ => panic!("expected AddRule"),
+        }
     }
 
     #[test]

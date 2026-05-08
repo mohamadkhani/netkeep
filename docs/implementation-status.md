@@ -1,8 +1,8 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 93 tests passing across workspace  
-**Phase:** 4 / 5 (GPUI UI complete, Phase 2 enforcement path partially done)  
-**Last Updated:** 2026-05-08
+**Test Status:** workspace builds cleanly; run `cargo test --workspace` for full counts  
+**Phase:** 4 / 5 (GPUI UI complete, routed relay + per-egress DNS resolver added)  
+**Last Updated:** 2026-05-09
 
 ## Completed Work
 
@@ -54,6 +54,8 @@
 - [x] Daemon initialization of SQLite DB on startup
 - [x] ControlService handling all request types
 - [x] Health endpoint with timeout configuration
+- [x] Egress persistence with route targets
+- [x] Per-egress DNS persistence (`egress_dns_servers` table)
 - [ ] **Not done:** Migrations and schema versioning (manual for now)
 
 ### Phase 4: GPUI Interface ✓
@@ -80,6 +82,19 @@
 - [x] Async event handlers with weak entity references
 - [x] Monitor mode: polls daemon every 1s, spawns GUI window per new pending decision
 - [x] All 93 tests still passing with GPUI app added
+
+### Routed Relay + Per-Egress DNS (2026-05-08) ✓
+
+- [x] Added daemon runtime API: `OpenRoutedTcp { host, port, target }`
+- [x] Emulator now requests daemon-managed routed relay for `RuleAction::Route`
+- [x] Daemon owns privileged connect: **`SO_MARK`** + **`SystemRouteManager`** tables; **Tun** uses **daemon-allocated** fwmark only (never reuse WireGuard “bypass” fwmark—would egress LAN while default route is VPN). **Device** uses **`SO_BINDTODEVICE`** (Linux) + bind + mark where supported.
+- [x] Added routed connect timeout (`8s`) to avoid long hangs
+- [x] Added socket permission auto-fix (`/tmp/logiguard.sock` -> `0666`)
+- [x] Added per-egress DNS host resolution in daemon routed connect path
+- [x] Added fallback to system DNS when no egress DNS is configured
+- [x] Route probes in logs: unmarked `ip route get` vs `ip route get … mark …` for debugging policy vs default route
+- [x] Policy tie-break on `rule.id` when specificity and action rank tie (`policy-engine::resolve_action`)
+- [x] `RuleRepository::list_rules` returns stable **ORDER BY id**
 
 ## Bug Fixes (Session 3, 2026-05-06)
 
@@ -117,6 +132,16 @@
 
 **Bug 9:** Deny button does not create permanent rule when PERMANENTLY scope selected  
 - **Fix:** Added `make_permanent` and `flow` parameters to `deny_button()`, mirroring the allow button's `AddRule` logic with `RuleAction::Deny`.
+
+## Bug Fixes (routing, 2026-05-09)
+
+**Bug 10:** SOCKS `Route` → Tun exited via LAN (Digikala saw Iranian IP / HTTP 200 instead of VPN/geo edge). Daemon reused WireGuard’s discovered fwmark from `ip rule`; that mark often means **split-tunnel bypass**, so marked packets followed **`main`** → **`wlp`**, not the tunnel.
+
+- **Fix:** Tun upstream sockets use only **`ensure_route_mark(RouteTarget::Tun)`** (managed `default dev <tun>` table). Removed heuristic fwmark discovery for Tun connects.
+
+**Bug 11:** Two equally specific `Route` rules (e.g. demo tun + demo wifi rows) produced **non-deterministic** winners depending on SQLite iteration order.
+
+- **Fix:** `resolve_action` compares `(specificity, action_rank, rule.id)`; greater `id` wins when the first two tie.
 
 ## Critical Data Structures
 
@@ -246,15 +271,14 @@ logiguard unlock               # Console-only recovery
 
 ## Environment Variables
 
-Currently used (in order of precedence):
+Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 
-- `LOGIGUARD_DB_PATH` — SQLite DB location (default: `/tmp/logiguard.db` for testing)
-- `LOGIGUARD_NFQUEUE` — NFQUEUE number to listen on (default: 0)
-- `LOGIGUARD_DEFAULT_TIMEOUT` — Default pending timeout in seconds (default: 100)
-- `LOGIGUARD_TCP_TIMEOUT` — TCP-specific timeout (default: 100)
-- `LOGIGUARD_UDP_TIMEOUT` — UDP-specific timeout (default: 5)
-- `LOGIGUARD_QUIC_TIMEOUT` — QUIC-specific timeout (default: 5)
-- `LOGIGUARD_OTHER_TIMEOUT` — Other protocols timeout (default: 3)
+- `LOGIGUARD_SOCKET_PATH` — Unix socket path (default `/tmp/logiguard.sock`)
+- `LOGIGUARD_DB_PATH` — SQLite DB location (default `/tmp/logiguard.db`)
+- `LOGIGUARD_NFQUEUE` — NFQUEUE number when packet interception enabled (optional)
+- `LOGIGUARD_DEFAULT_TIMEOUT_SECS` — Default pending timeout (default 100)
+- `LOGIGUARD_TCP_TIMEOUT_SECS`, `LOGIGUARD_UDP_TIMEOUT_SECS`, `LOGIGUARD_QUIC_TIMEOUT_SECS`, `LOGIGUARD_OTHER_TIMEOUT_SECS` — protocol overrides (fall back to default timeout when unset)
+- `LOGIGUARD_DEVICE_ROUTE_FALLBACK` — set to `1`/`true`/`yes` to allow routed device path to fall back to plain connect after failure (diagnostics only; weakens strict routing)
 
 ## Next Steps (Priority Order)
 
@@ -317,7 +341,7 @@ Currently used (in order of precedence):
 
 7. **No Audit Syslog:** Flow decisions not logged to syslog. Only in-memory + SQLite.
 
-8. **CLI Missing SubscriptionAck Handler:** `logiguard-cli` does not handle `ControlResponse::SubscriptionAck` in its match statement, causing a compilation error when building with `cargo test --workspace`.
+8. **Per-egress DNS in UI:** DNS servers are persisted and can be edited manually in SQLite, but GPUI DNS management views are not yet implemented.
 
 ## Build and Run
 

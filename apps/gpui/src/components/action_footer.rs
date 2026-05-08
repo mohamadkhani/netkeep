@@ -4,7 +4,7 @@ use gpui::{
 };
 use gpui_component::h_flex;
 
-use core_types::{DestinationMatcher, FlowContext, Rule, RuleAction, RuleDuration};
+use core_types::{DestinationMatcher, Egress, FlowContext, Rule, RuleAction, RuleDuration};
 use control_api::ControlRequest;
 
 use crate::colors;
@@ -15,6 +15,8 @@ pub struct ActionFooterProps {
     pub pending_id: String,
     pub flow: FlowContext,
     pub make_permanent: bool,
+    pub egresses: Vec<Egress>,
+    pub selected_egress_index: usize,
     pub state: WeakEntity<AppState>,
 }
 
@@ -23,6 +25,8 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
         pending_id,
         flow,
         make_permanent,
+        egresses,
+        selected_egress_index,
         state: state_weak,
     } = props;
 
@@ -36,6 +40,16 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
     let permanent_selected = make_permanent;
     let state_weak_pill = state_weak.clone();
 
+    let selected_egress = egresses.get(selected_egress_index).cloned().unwrap_or_else(|| Egress {
+        id: "eg-default".to_string(),
+        name: "Default Route".to_string(),
+        color: "#6b7280".to_string(),
+        targets: vec![],
+        dns_servers: vec![],
+        is_system_default: true,
+        is_available: true,
+    });
+
     h_flex()
         .w_full()
         .flex_col()
@@ -47,13 +61,17 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
         .child(
             scope_toggle(state_weak_pill, session_selected, permanent_selected),
         )
-        // Main buttons row
+        // Egress selector row
+        .child(
+            egress_selector(state_weak.clone(), &egresses, selected_egress_index),
+        )
+        // Main buttons row: ALLOW + DENY
         .child(
             h_flex()
                 .w_full()
                 .gap(px(12.))
                 .child(
-                    allow_button(pid_allow, state_weak_allow, make_permanent, flow.clone()),
+                    allow_button(pid_allow, state_weak_allow, make_permanent, flow.clone(), selected_egress),
                 )
                 .child(
                     deny_button(pid_deny, state_weak_deny, make_permanent, flow.clone()),
@@ -170,12 +188,105 @@ fn pill_segment(
         .into_any_element()
 }
 
+fn egress_selector(
+    state_weak: WeakEntity<AppState>,
+    egresses: &[Egress],
+    selected_index: usize,
+) -> gpui::AnyElement {
+    let max_visible = 10;
+    let total = egresses.len();
+    let visible_count = total.min(max_visible);
+    let overflow = total.saturating_sub(max_visible);
+
+    h_flex()
+        .w_full()
+        .flex_wrap()
+        .gap(px(6.))
+        .max_h(px(56.))
+        .overflow_hidden()
+        .children(egresses.iter().enumerate().take(visible_count).map(|(i, eg)| {
+            let is_selected = i == selected_index;
+            let is_available = eg.is_available;
+            let state_w = state_weak.clone();
+            let label = if is_available {
+                gpui::SharedString::from(eg.name.clone())
+            } else {
+                gpui::SharedString::from(format!("{} (offline)", eg.name))
+            };
+            let color_str = eg.color.clone();
+
+            div()
+                .id(gpui::ElementId::Name(format!("egress-{i}").into()))
+                .px(px(10.))
+                .py(px(4.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .border_1()
+                .border_color(if !is_available {
+                    colors::border()
+                } else if is_selected {
+                    colors::hex_to_hsla(&color_str)
+                } else {
+                    colors::border()
+                })
+                .when(is_selected && is_available, |el| el.bg(colors::hex_to_hsla(&color_str)))
+                .when(!is_selected || !is_available, |el| el.bg(colors::surface()))
+                .on_click(move |_, _, cx| {
+                    if !is_available {
+                        return;
+                    }
+                    if let Some(state) = state_w.upgrade() {
+                        state.update(cx, |s, cx| {
+                            s.selected_egress_index = i;
+                            cx.notify();
+                        });
+                    }
+                })
+                .child(
+                    div()
+                        .text_color(if !is_available {
+                            gpui::hsla(0., 0., 0.40, 1.) // dim grey for offline
+                        } else if is_selected {
+                            colors::on_primary()
+                        } else {
+                            colors::muted()
+                        })
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_size(px(10.))
+                        .child(label),
+                )
+        }))
+        .when(overflow > 0, |el| {
+            el.child(
+                div()
+                    .px(px(10.))
+                    .py(px(4.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(colors::border())
+                    .bg(colors::surface())
+                    .child(
+                        div()
+                            .text_color(colors::muted())
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_size(px(10.))
+                            .child(format!("+{overflow} more")),
+                    ),
+            )
+        })
+        .into_any_element()
+}
+
 fn allow_button(
     pid: String,
     state_weak: WeakEntity<AppState>,
     make_permanent: bool,
     flow: FlowContext,
+    selected_egress: Egress,
 ) -> gpui::AnyElement {
+    let is_default = selected_egress.is_system_default;
+    let route_target = selected_egress.targets.first().cloned();
+
     div()
         .id("allow-btn")
         .flex_1()
@@ -196,7 +307,18 @@ fn allow_button(
                 let state_weak = state_weak.clone();
                 let flow = flow.clone();
                 let mk_perm = make_permanent;
+                let rt = route_target.clone();
                 cx.spawn(async move |cx| {
+                    let (resolve_action, rule_action, rule_target) = if rt.is_some() {
+                        let target = rt.clone().unwrap();
+                        (
+                            RuleAction::Route { target: target.clone() },
+                            RuleAction::Route { target: target.clone() },
+                            Some(target),
+                        )
+                    } else {
+                        (RuleAction::Allow, RuleAction::Allow, None)
+                    };
                     let pid2 = pid.clone();
                     let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
                         .unwrap_or_else(|_| SOCKET_PATH.to_string());
@@ -207,7 +329,7 @@ fn allow_button(
                                 &socket,
                                 &ControlRequest::ResolvePending {
                                     pending_id: pid2,
-                                    action: RuleAction::Allow,
+                                    action: resolve_action,
                                 },
                             )
                         })
@@ -222,7 +344,7 @@ fn allow_button(
                     let rule = Rule {
                         id: format!("ui-{}", daemon::unix_now()),
                         enabled: true,
-                        action: RuleAction::Allow,
+                        action: rule_action,
                         duration: if mk_perm {
                             RuleDuration::Permanent
                         } else {
@@ -230,6 +352,7 @@ fn allow_button(
                         },
                         process_name: flow.process_name.clone(),
                         destination: dest,
+                        route_target: rule_target,
                     };
                     let socket2 = std::env::var("LOGIGUARD_SOCKET_PATH")
                         .unwrap_or_else(|_| SOCKET_PATH.to_string());
@@ -261,14 +384,14 @@ fn allow_button(
             div()
                 .text_color(colors::green())
                 .text_size(px(18.))
-                .child("\u{1F6E1}"), // 🛡️ shield
+                .child(if is_default { "\u{1F6E1}" } else { "\u{1F5A7}" }), // shield or network icon
         )
         .child(
             div()
                 .text_color(colors::green())
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_size(px(11.))
-                .child("ALLOW"),
+                .child(if is_default { "ALLOW" } else { "ALLOW + ROUTE" }),
         )
         .into_any_element()
 }
@@ -333,6 +456,7 @@ fn deny_button(
                         },
                         process_name: flow.process_name.clone(),
                         destination: dest,
+                        route_target: None,
                     };
                     let socket2 = std::env::var("LOGIGUARD_SOCKET_PATH")
                         .unwrap_or_else(|_| SOCKET_PATH.to_string());

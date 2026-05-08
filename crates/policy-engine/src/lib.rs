@@ -46,10 +46,11 @@ fn specificity(rule: &Rule) -> u8 {
     }
 }
 
-fn action_rank(action: RuleAction) -> u8 {
+fn action_rank(action: &RuleAction) -> u8 {
     match action {
         RuleAction::Deny => 3,
         RuleAction::Allow => 2,
+        RuleAction::Route { .. } => 2,
         RuleAction::Ask => 1,
     }
 }
@@ -59,17 +60,23 @@ pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule
         .iter()
         .filter(|r| r.enabled)
         .filter(|r| process_matches(r, flow) && destination_matches(r, flow))
-        .max_by_key(|r| (specificity(r), action_rank(r.action)))
+        .max_by(|a, b| {
+            (specificity(a), action_rank(&a.action), &a.id).cmp(&(
+                specificity(b),
+                action_rank(&b.action),
+                &b.id,
+            ))
+        })
         .map(|r| ResolvedRule {
             rule_id: r.id.clone(),
-            action: r.action,
+            action: r.action.clone(),
         })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{FlowDirection, RuleDuration, Rule, TransportProtocol};
+    use core_types::{FlowDirection, RouteTarget, RuleDuration, Rule, TransportProtocol};
 
     fn mk_rule(
         id: &str,
@@ -84,6 +91,7 @@ mod tests {
             duration: RuleDuration::UntilRestart,
             process_name: process_name.map(str::to_string),
             destination,
+            route_target: None,
         }
     }
 
@@ -170,6 +178,37 @@ mod tests {
         );
         let resolved = resolve_action(&[allow, deny], &flow).expect("must resolve");
         assert_eq!(resolved.rule_id, "deny");
+    }
+
+    #[test]
+    fn tie_break_equal_route_rules_prefers_lexicographically_greater_id() {
+        let flow = FlowContext {
+            process_name: Some("socks-client".to_string()),
+            destination_ip: "0.0.0.0".to_string(),
+            destination_port: 443,
+            destination_domain: Some("www.digikala.com".to_string()),
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+        };
+        let tun = mk_rule(
+            "demo-digikala-tun",
+            RuleAction::Route {
+                target: RouteTarget::Tun("wg0".into()),
+            },
+            Some("socks-client"),
+            DestinationMatcher::DomainExact("www.digikala.com".to_string()),
+        );
+        let wifi = mk_rule(
+            "demo-digikala-wifi",
+            RuleAction::Route {
+                target: RouteTarget::Device("wlp0s20f3".into()),
+            },
+            Some("socks-client"),
+            DestinationMatcher::DomainExact("www.digikala.com".to_string()),
+        );
+        let resolved = resolve_action(&[tun, wifi], &flow).expect("must resolve");
+        assert_eq!(resolved.rule_id, "demo-digikala-wifi");
     }
 }
 

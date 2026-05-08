@@ -1,4 +1,4 @@
-use core_types::{FlowContext, FlowEvent, PendingDecision, Rule, RuleAction, TransportProtocol};
+use core_types::{FlowContext, FlowEvent, PendingDecision, RouteTarget, Rule, RuleAction, TransportProtocol};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +14,11 @@ pub enum ControlRequest {
     Health,
     Unlock,
     SubscribeToPending,  // NEW: Subscribe to push notifications
+    OpenRoutedTcp {
+        host: String,
+        port: u16,
+        target: RouteTarget,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +48,9 @@ pub enum ControlResponse {
     },
     Unlocked,
     SubscriptionAck,  // NEW: Confirms subscription established
+    RoutedTcpReady {
+        listen_addr: String,
+    },
     Error(String),
 }
 
@@ -89,6 +97,7 @@ mod tests {
             duration: RuleDuration::UntilRestart,
             process_name: None,
             destination: DestinationMatcher::IpExact("1.1.1.1".to_string()),
+            route_target: None,
         }
     }
 
