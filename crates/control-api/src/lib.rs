@@ -79,7 +79,7 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{DestinationMatcher, RuleDuration};
+    use core_types::{DestinationMatcher, FlowDirection, RuleDuration};
 
     fn mk_rule(id: &str) -> Rule {
         Rule {
@@ -147,8 +147,10 @@ mod tests {
             flow: FlowContext {
                 process_name: Some("firefox".to_string()),
                 destination_ip: "8.8.8.8".to_string(),
+                destination_port: 443,
                 destination_domain: Some("google.com".to_string()),
                 protocol: TransportProtocol::Tcp,
+                direction: FlowDirection::Outbound,
                 device_label: None,
             },
             created_at_secs: 1000,

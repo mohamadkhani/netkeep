@@ -1,36 +1,72 @@
-use gpui::{FontWeight, IntoElement, ParentElement, Styled, div};
-use gpui_component::h_flex;
+use gpui::{FontWeight, IntoElement, ParentElement, Styled, div, px};
+use gpui_component::{h_flex, v_flex};
 
 use crate::colors;
 
 pub fn decision_header(remaining_secs: u64) -> gpui::AnyElement {
-    h_flex()
+    v_flex()
         .w_full()
-        .items_center()
-        .justify_between()
-        .px_4()
-        .py_3()
-        .bg(colors::amber_dim())
-        .border_b_1()
-        .border_color(colors::amber())
         .child(
             h_flex()
-                .gap_2()
+                .w_full()
+                .px(px(16.))
+                .py(px(16.))
                 .items_center()
+                .justify_between()
+                .bg(colors::surface_container_high())
+                .border_b_1()
+                .border_color(colors::border())
                 .child(
-                    div()
-                        .text_color(colors::amber())
-                        .font_weight(FontWeight::BOLD)
-                        .text_sm()
-                        .child("\u{26A0}  CONNECTION INTERCEPTED"),
+                    // Left: security icon + title
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_color(colors::primary())
+                                .text_sm()
+                                .child("\u{1F6E1}"), // 🛡️ security shield
+                        )
+                        .child(
+                            div()
+                                .text_color(colors::primary())
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(11.))
+                                .child("CONNECTION INTERCEPTED"),
+                        ),
+                )
+                .child(
+                    // Right: circular countdown ring + auto-deny label
+                    v_flex()
+                        .items_center()
+                        .child(
+                            // Countdown number
+                            div()
+                                .size(px(32.))
+                                .rounded_full()
+                                .border_2()
+                                .border_color(colors::green())
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .text_color(colors::text())
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_size(px(11.))
+                                        .child(format!("{remaining_secs}s")),
+                                ),
+                        )
+                        .child(
+                            // AUTO-DENY label
+                            div()
+                                .text_color(colors::error())
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(9.))
+                                .mt(px(4.))
+                                .child("AUTO-DENY"),
+                        ),
                 ),
-        )
-        .child(
-            div()
-                .text_color(colors::amber())
-                .font_weight(FontWeight::BOLD)
-                .text_lg()
-                .child(format!("{remaining_secs}s")),
         )
         .into_any_element()
 }

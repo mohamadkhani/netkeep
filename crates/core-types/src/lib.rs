@@ -35,8 +35,10 @@ pub struct Rule {
 pub struct FlowContext {
     pub process_name: Option<String>,
     pub destination_ip: String,
+    pub destination_port: u16,
     pub destination_domain: Option<String>,
     pub protocol: TransportProtocol,
+    pub direction: FlowDirection,
     pub device_label: Option<String>,
 }
 
@@ -54,6 +56,12 @@ pub enum TransportProtocol {
     Udp,
     Quic,
     Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowDirection {
+    Inbound,
+    Outbound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

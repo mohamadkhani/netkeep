@@ -306,7 +306,7 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
 #[cfg(test)]
 mod tests {
     use control_api::{ControlRequest, ControlResponse};
-    use core_types::{DestinationMatcher, FlowContext, Rule, RuleAction, RuleDuration, TransportProtocol};
+    use core_types::{DestinationMatcher, FlowContext, FlowDirection, Rule, RuleAction, RuleDuration, TransportProtocol};
     use state_store::InMemoryRuleRepository;
 
     use super::{ControlService, HealthConfig};
@@ -327,8 +327,10 @@ mod tests {
         FlowContext {
             process_name: Some("curl".to_string()),
             destination_ip: "1.1.1.1".to_string(),
+            destination_port: 443,
             destination_domain: Some("example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
             device_label: None,
         }
     }

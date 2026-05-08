@@ -146,8 +146,10 @@ mod tests {
         FlowContext {
             process_name: Some("curl".to_string()),
             destination_ip: "1.1.1.1".to_string(),
+            destination_port: 443,
             destination_domain: Some("example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
             device_label: None,
         }
     }

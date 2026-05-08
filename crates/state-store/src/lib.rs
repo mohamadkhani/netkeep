@@ -457,7 +457,7 @@ impl PendingRepository for SqliteRuleRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{DestinationMatcher, FlowContext, FlowState, RuleAction, RuleDuration, TransportProtocol};
+    use core_types::{DestinationMatcher, FlowContext, FlowDirection, FlowState, RuleAction, RuleDuration, TransportProtocol};
     use tempfile::NamedTempFile;
 
     fn mk_rule(id: &str) -> Rule {
@@ -490,8 +490,10 @@ mod tests {
             flow: FlowContext {
                 process_name: Some("curl".to_string()),
                 destination_ip: "1.1.1.1".to_string(),
+                destination_port: 443,
                 destination_domain: Some("example.com".to_string()),
                 protocol: TransportProtocol::Tcp,
+                direction: FlowDirection::Outbound,
                 device_label: None,
             },
             created_at_secs: 100,

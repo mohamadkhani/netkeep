@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
-use core_types::{DestinationMatcher, FlowContext, Rule, RuleAction, RuleDuration, TransportProtocol};
+use core_types::{DestinationMatcher, FlowContext, FlowDirection, Rule, RuleAction, RuleDuration, TransportProtocol};
 use control_api::{ControlRequest, ControlResponse};
 use serde_json::json;
 
@@ -155,8 +155,10 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                     flow: FlowContext {
                         process_name: Some(cmd_args[1].clone()),
                         destination_ip: cmd_args[2].clone(),
+                        destination_port: 443,
                         destination_domain: domain,
                         protocol,
+                        direction: FlowDirection::Outbound,
                         device_label: None,
                     },
                     now_secs,
@@ -291,6 +293,7 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
         )),
         ControlResponse::Unlocked => Ok("unlocked: nftables rules removed".to_string()),
         ControlResponse::Error(err) => Err(err),
+        ControlResponse::SubscriptionAck => Ok("subscription confirmed".to_string()),
     }
 }
 

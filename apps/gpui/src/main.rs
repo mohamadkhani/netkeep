@@ -42,17 +42,19 @@ fn run_gui(pending_id: String) {
             now_secs: daemon::unix_now(),
             make_permanent: false,
             resolved: false,
+            pending_count: 0,
         });
 
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                     None,
-                    size(px(480.), px(580.)),
+
+                    size(px(420.), px(488.)),
                     cx,
                 ))),
                 titlebar: Some(gpui::TitlebarOptions {
-                    title: Some(SharedString::from("LogiGuard")),
+                    title: Some(SharedString::from("LogiGuard - Connection Decision")),
                     appears_transparent: false,
                     ..Default::default()
                 }),

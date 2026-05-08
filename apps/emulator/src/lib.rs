@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use control_api::{ControlRequest, ControlResponse};
-use core_types::{FlowContext, RuleAction, TransportProtocol};
+use core_types::{FlowContext, FlowDirection, RuleAction, TransportProtocol};
 
 pub fn send_control_request(socket_path: &str, request: &ControlRequest) -> Result<ControlResponse, String> {
     let mut stream = UnixStream::connect(socket_path)
@@ -103,8 +103,10 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
         destination_ip: parsed_ip
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| "0.0.0.0".to_string()),
+        destination_port: port,
         destination_domain: if parsed_ip.is_none() { Some(host.clone()) } else { None },
         protocol: TransportProtocol::Tcp,
+        direction: FlowDirection::Outbound,
         device_label: None,
     };
     let response = send_control_request(

@@ -69,7 +69,7 @@ pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{RuleDuration, Rule, TransportProtocol};
+    use core_types::{FlowDirection, RuleDuration, Rule, TransportProtocol};
 
     fn mk_rule(
         id: &str,
@@ -92,15 +92,19 @@ mod tests {
         let flow_sub = FlowContext {
             process_name: None,
             destination_ip: "1.1.1.1".to_string(),
+            destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
             device_label: None,
         };
         let flow_apex = FlowContext {
             process_name: None,
             destination_ip: "1.1.1.1".to_string(),
+            destination_port: 443,
             destination_domain: Some("example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
             device_label: None,
         };
         let rule = mk_rule(
@@ -118,8 +122,10 @@ mod tests {
         let flow = FlowContext {
             process_name: Some("firefox".to_string()),
             destination_ip: "9.9.9.9".to_string(),
+            destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
             device_label: None,
         };
         let general = mk_rule(
@@ -144,8 +150,10 @@ mod tests {
         let flow = FlowContext {
             process_name: None,
             destination_ip: "8.8.8.8".to_string(),
+            destination_port: 443,
             destination_domain: Some("example.com".to_string()),
             protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
             device_label: None,
         };
         let allow = mk_rule(

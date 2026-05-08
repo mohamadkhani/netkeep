@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>LogiGuard - Connection Decision</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&amp;family=Space+Grotesk:wght@400;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-tertiary-fixed-variant": "#3f465c",
+                        "on-secondary-fixed-variant": "#38485d",
+                        "surface-variant": "#2a3548",
+                        "surface-container-low": "#111c2d",
+                        "on-primary-fixed-variant": "#004395",
+                        "on-error": "#690005",
+                        "outline-variant": "#424754",
+                        "inverse-on-surface": "#263143",
+                        "on-primary": "#002e6a",
+                        "on-tertiary": "#283044",
+                        "error-container": "#93000a",
+                        "tertiary-fixed-dim": "#bec6e0",
+                        "primary": "#adc6ff",
+                        "primary-container": "#4d8eff",
+                        "secondary-fixed-dim": "#b7c8e1",
+                        "on-primary-container": "#00285d",
+                        "on-background": "#d8e3fb",
+                        "inverse-surface": "#d8e3fb",
+                        "secondary": "#b7c8e1",
+                        "on-error-container": "#ffdad6",
+                        "inverse-primary": "#005ac2",
+                        "surface-container-highest": "#2a3548",
+                        "surface-container": "#152031",
+                        "tertiary": "#bec6e0",
+                        "primary-fixed": "#d8e2ff",
+                        "on-surface": "#d8e3fb",
+                        "surface-container-lowest": "#040e1f",
+                        "on-secondary-fixed": "#0b1c30",
+                        "surface-tint": "#adc6ff",
+                        "error": "#ffb4ab",
+                        "surface-bright": "#2f3a4c",
+                        "on-secondary-container": "#a9bad3",
+                        "on-tertiary-fixed": "#131b2e",
+                        "outline": "#8c909f",
+                        "tertiary-container": "#8990a8",
+                        "primary-fixed-dim": "#adc6ff",
+                        "surface-container-high": "#1f2a3c",
+                        "secondary-fixed": "#d3e4fe",
+                        "tertiary-fixed": "#dae2fd",
+                        "surface": "#081425",
+                        "on-tertiary-container": "#22293d",
+                        "secondary-container": "#3a4a5f",
+                        "on-surface-variant": "#c2c6d6",
+                        "on-primary-fixed": "#001a42",
+                        "surface-dim": "#081425",
+                        "on-secondary": "#213145",
+                        "background": "#081425"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "spacing": {
+                        "gutter": "16px",
+                        "unit": "4px",
+                        "margin": "24px",
+                        "density-comfortable": "16px",
+                        "density-compact": "8px"
+                    },
+                    "fontFamily": {
+                        "headline-md": ["Inter"],
+                        "body-sm": ["Inter"],
+                        "body-md": ["Inter"],
+                        "headline-lg": ["Inter"],
+                        "label-caps": ["Inter"],
+                        "data-mono": ["Space Grotesk"]
+                    },
+                    "fontSize": {
+                        "headline-md": ["18px", {"lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+                        "body-sm": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                        "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                        "headline-lg": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.02em", "fontWeight": "600"}],
+                        "label-caps": ["11px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "700"}],
+                        "data-mono": ["13px", {"lineHeight": "18px", "letterSpacing": "0.02em", "fontWeight": "400"}]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-surface h-screen w-screen flex items-center justify-center font-body-md overflow-hidden">
+<!-- Scrim -->
+<div class="fixed inset-0 bg-black/60 z-40 backdrop-blur-sm"></div>
+<!-- Modal Container -->
+<div class="relative z-50 w-full max-w-lg bg-surface-container border border-outline-variant rounded-lg flex flex-col mx-gutter">
+<!-- 1. Header Bar -->
+<div class="flex items-center justify-between p-density-comfortable border-b border-outline-variant bg-surface-container-high rounded-t-lg">
+<div class="flex items-center gap-2 text-primary">
+<span class="material-symbols-outlined text-[16px]">security</span>
+<h1 class="font-label-caps text-label-caps">CONNECTION INTERCEPTED</h1>
+</div>
+<div class="flex flex-col items-center">
+<!-- Circular Countdown Ring -->
+<div class="relative w-8 h-8 flex items-center justify-center">
+<svg class="absolute inset-0 w-full h-full transform -rotate-90" viewbox="0 0 36 36">
+<path class="text-surface-variant" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" stroke-width="3"></path>
+<path class="text-[#22c55e]" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" stroke-dasharray="100, 100" stroke-width="3" style="stroke-dashoffset: 13;"></path>
+</svg>
+<span class="font-data-mono text-[11px] font-bold text-on-surface">87s</span>
+</div>
+<span class="font-label-caps text-[9px] text-error mt-1 tracking-wider">AUTO-DENY</span>
+</div>
+</div>
+<!-- 2. Flow Details Section -->
+<div class="p-density-comfortable flex flex-col gap-unit">
+<div class="grid grid-cols-12 gap-x-gutter gap-y-3 bg-surface border border-outline-variant rounded p-density-comfortable">
+<!-- Process -->
+<div class="col-span-4 flex flex-col gap-1">
+<span class="font-label-caps text-label-caps text-on-surface-variant">PROCESS</span>
+</div>
+<div class="col-span-8 flex items-center gap-2">
+<span class="material-symbols-outlined text-[#f97316] text-[16px]">local_fire_department</span>
+<span class="font-data-mono text-data-mono text-on-surface">firefox</span>
+</div>
+<!-- Destination -->
+<div class="col-span-4 flex flex-col gap-1">
+<span class="font-label-caps text-label-caps text-on-surface-variant">DESTINATION</span>
+</div>
+<div class="col-span-8 flex items-center">
+<a class="font-data-mono text-data-mono text-primary hover:underline cursor-pointer" href="#">accounts.google.com</a>
+</div>
+<!-- IP Address -->
+<div class="col-span-4 flex flex-col gap-1">
+<span class="font-label-caps text-label-caps text-on-surface-variant">IP ADDRESS</span>
+</div>
+<div class="col-span-8 flex items-center">
+<span class="font-data-mono text-data-mono text-on-surface bg-surface-variant px-2 py-0.5 rounded text-[12px] border border-outline-variant">142.250.80.100</span>
+</div>
+<!-- Protocol -->
+<div class="col-span-4 flex flex-col gap-1">
+<span class="font-label-caps text-label-caps text-on-surface-variant">PROTOCOL</span>
+</div>
+<div class="col-span-8 flex items-center">
+<span class="font-data-mono text-data-mono text-[#14b8a6] bg-[#14b8a6]/10 px-2 py-0.5 rounded border border-[#14b8a6]/30 text-[12px]">TCP : 443</span>
+</div>
+<!-- Direction -->
+<div class="col-span-4 flex flex-col gap-1">
+<span class="font-label-caps text-label-caps text-on-surface-variant">DIRECTION</span>
+</div>
+<div class="col-span-8 flex items-center">
+<span class="font-label-caps text-label-caps text-on-surface-variant bg-surface-variant px-2 py-0.5 rounded border border-outline-variant">OUTBOUND</span>
+</div>
+</div>
+</div>
+<!-- 3. Action Section -->
+<div class="p-density-comfortable pt-0 flex flex-col gap-4">
+<!-- Scope Toggle -->
+<div class="flex items-center justify-between bg-surface p-2 rounded border border-outline-variant">
+<span class="font-label-caps text-label-caps text-on-surface-variant mr-4">APPLY RULE FOR:</span>
+<div class="flex bg-surface-container-high rounded p-1 border border-outline-variant">
+<button class="font-label-caps text-[10px] px-3 py-1 rounded bg-primary text-on-primary font-bold">THIS SESSION</button>
+<button class="font-label-caps text-[10px] px-3 py-1 rounded text-on-surface-variant hover:text-on-surface transition-colors">PERMANENTLY</button>
+</div>
+</div>
+<!-- Main Buttons -->
+<div class="grid grid-cols-2 gap-3">
+<button class="flex items-center justify-center gap-2 bg-surface-variant hover:bg-surface-bright border border-[#22c55e]/50 text-[#22c55e] py-2 px-4 rounded transition-colors group">
+<span class="material-symbols-outlined text-[18px] group-hover:scale-110 transition-transform">gpp_good</span>
+<span class="font-label-caps text-label-caps">ALLOW</span>
+</button>
+<button class="flex items-center justify-center gap-2 bg-surface-variant hover:bg-surface-bright border border-error/50 text-error py-2 px-4 rounded transition-colors group">
+<span class="material-symbols-outlined text-[18px] group-hover:scale-110 transition-transform">gpp_bad</span>
+<span class="font-label-caps text-label-caps">DENY</span>
+</button>
+</div>
+<!-- Link -->
+<div class="flex justify-center mt-1">
+<a class="font-body-sm text-body-sm text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1" href="#">
+                    Always ask for this process <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
+</a>
+</div>
+</div>
+<!-- 4. Footer -->
+<div class="p-density-compact border-t border-outline-variant bg-surface-container-high rounded-b-lg flex justify-center">
+<span class="font-data-mono text-[10px] text-on-surface-variant opacity-70">
+                LogiGuard · Fail-close active · Queue: 3 pending
+            </span>
+</div>
+</div>
+</body></html>

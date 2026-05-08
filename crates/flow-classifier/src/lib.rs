@@ -1,4 +1,4 @@
-use core_types::{FlowContext, TransportProtocol};
+use core_types::{FlowContext, FlowDirection, TransportProtocol};
 
 /// Raw packet information from the network layer before classification.
 #[derive(Debug, Clone)]
@@ -65,8 +65,10 @@ where
         FlowContext {
             process_name,
             destination_ip: packet.dst_ip.clone(),
+            destination_port: packet.dst_port,
             destination_domain,
             protocol: packet.protocol,
+            direction: FlowDirection::Outbound,
             device_label,
         }
     }

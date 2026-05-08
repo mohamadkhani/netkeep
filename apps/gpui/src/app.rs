@@ -1,8 +1,9 @@
-use gpui::{Context, Entity, IntoElement, ParentElement, Render, Styled, Window};
+use gpui::{AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, Window};
 use gpui_component::v_flex;
 
 use crate::colors;
 use crate::components;
+use crate::daemon;
 use crate::state::AppState;
 
 pub struct DecisionApp {
@@ -12,6 +13,31 @@ pub struct DecisionApp {
 impl DecisionApp {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
+
+        // Start a 1-second countdown ticker
+        let state_weak = state.downgrade();
+        cx.spawn(async move |_this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if let Some(state) = state_weak.upgrade() {
+                    let expired = cx.update_entity(&state, |s, cx| {
+                        s.now_secs = daemon::unix_now();
+                        let remaining = s.item.deadline_at_secs.saturating_sub(s.now_secs);
+                        cx.notify();
+                        remaining == 0
+                    }).unwrap_or(false);
+                    if expired {
+                        std::process::exit(0);
+                    }
+                } else {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         Self { state }
     }
 }
@@ -25,7 +51,7 @@ impl Render for DecisionApp {
                 .size_full()
                 .items_center()
                 .justify_center()
-                .bg(colors::bg())
+                .bg(colors::surface_container())
                 .child(
                     gpui::div()
                         .text_color(colors::text())
@@ -37,6 +63,7 @@ impl Render for DecisionApp {
 
         let now = state.now_secs;
         let make_permanent = state.make_permanent;
+        let pending_count = state.pending_count;
         let state_weak = self.state.downgrade();
         let item = state.item.clone();
 
@@ -49,14 +76,18 @@ impl Render for DecisionApp {
         let proto = format!("{:?}", item.flow.protocol).to_uppercase();
 
         v_flex()
-            .size_full()
-            .bg(colors::bg())
+            .w_full()
+            .bg(colors::surface_container())
+            .border_1()
+            .border_color(colors::border())
             .child(components::decision_header(remaining))
             .child(components::flow_info_section(
                 &process,
                 &proto,
+                item.flow.destination_port,
                 &item.flow.destination_domain,
                 &item.flow.destination_ip,
+                item.flow.direction,
             ))
             .child(components::action_footer(
                 components::ActionFooterProps {
@@ -66,6 +97,7 @@ impl Render for DecisionApp {
                     state: state_weak,
                 },
             ))
+            .child(components::status_bar(pending_count))
             .into_any_element()
     }
 }
