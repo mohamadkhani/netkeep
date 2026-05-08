@@ -309,5 +309,30 @@ use gpui::{
 
 - `.font_bold()` — use `.font_weight(FontWeight::BOLD)` instead
 - `.tracking_widest()` — no letter-spacing in 0.2.2
+- `.tracking_wide()` — no letter-spacing in 0.2.2
 - `gpui_platform::application()` — use `Application::new()` instead
 - `.when_some()` without `FluentBuilder` import — must import from prelude
+
+## cx.spawn Signatures
+
+The `cx.spawn()` signature differs depending on context:
+
+**On `Context<T>` (inside `Render` or view methods):**
+```rust
+// Takes 2 arguments: View<Self> and AsyncWindowContext
+cx.spawn(async move |_this: View<Self>, cx: AsyncWindowContext| {
+    // async work
+})
+.detach();
+```
+
+**Inside `on_click` callbacks (from `InteractiveElement`):**
+```rust
+// Takes 1 argument: AsyncWindowContext
+.on_click(move |_, _, cx| {
+    cx.spawn(async move |cx: AsyncWindowContext| {
+        // async work
+    })
+    .detach();
+})
+```

@@ -15,9 +15,9 @@ Network flow authorization system for Linux: intercept unknown flows, prompt use
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │ logiguard-gpui (GPUI app)                              │  │
 │  │  - Displays pending decisions                          │  │
-│  │  - Countdown timer                                     │  │
-│  │  - Allow/Deny buttons                                  │  │
-│  │  - Optional "Remember" checkbox                        │  │
+│  │  - Countdown timer with auto-deny                     │  │
+│  │  - Allow/Deny buttons with scope toggle               │  │
+│  │  - Segmented pill: THIS SESSION / PERMANENTLY         │  │
 │  └────────────────────────────────────────────────────────┘  │
 │             ▲                                                 │
 │             │ Unix socket JSON RPC                           │
@@ -88,6 +88,8 @@ logiguard/
 │   ├── daemon/                # logiguardd (root systemd service)
 │   ├── cli/                   # logiguard-cli (operator interface)
 │   └── gpui/                  # logiguard-gpui (GPUI decision UI)
+├── design/                    # HTML design reference files
+├── docs/                      # Architecture and API documentation
 ├── Cargo.toml                 # Workspace root
 ├── rust-toolchain.toml        # Pinned Rust version + components
 ├── justfile                   # Task runner
@@ -102,7 +104,7 @@ Shared data models, no dependencies on other crates.
 
 **Key Types:**
 - `Rule` — policy rule with action, scope, duration
-- `FlowContext` — network flow metadata (process, IPs, domain, protocol)
+- `FlowContext` — network flow metadata (process, IPs, domain, protocol, direction, port)
 - `PendingDecision` — user decision queue item
 - `FlowEvent` — audit log entry
 - `RuleAction` — {Allow, Deny, Ask}
@@ -283,13 +285,13 @@ GPUI polls ListPending every 1s
         └─→ return PendingList
             │
             └─→ GPUI renders decision cards with countdown
-                  │ User clicks Allow
-                  └─→ ControlRequest::ResolvePending { pending_id, Allow }
+                  │ User clicks Allow or Deny
+                  └─→ ControlRequest::ResolvePending { pending_id, action }
                         │
                         └─→ ControlService::resolve_pending()
                               │ update PendingRepository
-                              │ if make_permanent: add permanent rule
-                              └─→ return PendingResolved { Allow }
+                              │ if scope == PERMANENTLY: add permanent rule
+                              └─→ return PendingResolved { action }
 ```
 
 ## Testing Strategy
@@ -346,7 +348,7 @@ Planned (Phase 2 onward):
 
 5. **UntilRestart expiry:** Automatic cleanup on daemon startup. Prevents leaking session rules across boots.
 
-6. **Permanent rule on UI "Remember":** User decision + checkbox → new Permanent rule with inferred destination.
+6. **Permanent rule on scope toggle:** User decision + "PERMANENTLY" scope → new Permanent rule with inferred destination. Applies to both Allow and Deny.
 
 7. **SQLite for state:** ACID transactions, journaling, simple schema. No external DB dependency.
 

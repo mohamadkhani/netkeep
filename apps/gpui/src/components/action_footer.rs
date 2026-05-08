@@ -56,7 +56,7 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                     allow_button(pid_allow, state_weak_allow, make_permanent, flow.clone()),
                 )
                 .child(
-                    deny_button(pid_deny, state_weak_deny),
+                    deny_button(pid_deny, state_weak_deny, make_permanent, flow.clone()),
                 ),
         )
         // Centered link
@@ -212,34 +212,36 @@ fn allow_button(
                             )
                         })
                         .await;
-                    if mk_perm {
-                        let dest = if let Some(d) = &flow.destination_domain {
-                            DestinationMatcher::DomainExact(d.clone())
+                    let dest = if let Some(d) = &flow.destination_domain {
+                        DestinationMatcher::DomainExact(d.clone())
+                    } else {
+                        DestinationMatcher::IpExact(
+                            flow.destination_ip.clone(),
+                        )
+                    };
+                    let rule = Rule {
+                        id: format!("ui-{}", daemon::unix_now()),
+                        enabled: true,
+                        action: RuleAction::Allow,
+                        duration: if mk_perm {
+                            RuleDuration::Permanent
                         } else {
-                            DestinationMatcher::IpExact(
-                                flow.destination_ip.clone(),
+                            RuleDuration::UntilRestart
+                        },
+                        process_name: flow.process_name.clone(),
+                        destination: dest,
+                    };
+                    let socket2 = std::env::var("LOGIGUARD_SOCKET_PATH")
+                        .unwrap_or_else(|_| SOCKET_PATH.to_string());
+                    let _ = cx
+                        .background_executor()
+                        .spawn(async move {
+                            daemon::send_request(
+                                &socket2,
+                                &ControlRequest::AddRule(rule),
                             )
-                        };
-                        let rule = Rule {
-                            id: format!("ui-{}", daemon::unix_now()),
-                            enabled: true,
-                            action: RuleAction::Allow,
-                            duration: RuleDuration::Permanent,
-                            process_name: flow.process_name.clone(),
-                            destination: dest,
-                        };
-                        let socket2 = std::env::var("LOGIGUARD_SOCKET_PATH")
-                            .unwrap_or_else(|_| SOCKET_PATH.to_string());
-                        let _ = cx
-                            .background_executor()
-                            .spawn(async move {
-                                daemon::send_request(
-                                    &socket2,
-                                    &ControlRequest::AddRule(rule),
-                                )
-                            })
-                            .await;
-                    }
+                        })
+                        .await;
                     if let Some(state) = state_weak.upgrade() {
                         cx.update_entity(&state, |s, cx| {
                             s.resolved = true;
@@ -274,6 +276,8 @@ fn allow_button(
 fn deny_button(
     pid: String,
     state_weak: WeakEntity<AppState>,
+    make_permanent: bool,
+    flow: FlowContext,
 ) -> gpui::AnyElement {
     div()
         .id("deny-btn")
@@ -293,6 +297,8 @@ fn deny_button(
             move |_, _, cx| {
                 let pid = pid.clone();
                 let state_weak = state_weak.clone();
+                let flow = flow.clone();
+                let mk_perm = make_permanent;
                 cx.spawn(async move |cx| {
                     let pid2 = pid.clone();
                     let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
@@ -306,6 +312,36 @@ fn deny_button(
                                     pending_id: pid2,
                                     action: RuleAction::Deny,
                                 },
+                            )
+                        })
+                        .await;
+                    let dest = if let Some(d) = &flow.destination_domain {
+                        DestinationMatcher::DomainExact(d.clone())
+                    } else {
+                        DestinationMatcher::IpExact(
+                            flow.destination_ip.clone(),
+                        )
+                    };
+                    let rule = Rule {
+                        id: format!("ui-{}", daemon::unix_now()),
+                        enabled: true,
+                        action: RuleAction::Deny,
+                        duration: if mk_perm {
+                            RuleDuration::Permanent
+                        } else {
+                            RuleDuration::UntilRestart
+                        },
+                        process_name: flow.process_name.clone(),
+                        destination: dest,
+                    };
+                    let socket2 = std::env::var("LOGIGUARD_SOCKET_PATH")
+                        .unwrap_or_else(|_| SOCKET_PATH.to_string());
+                    let _ = cx
+                        .background_executor()
+                        .spawn(async move {
+                            daemon::send_request(
+                                &socket2,
+                                &ControlRequest::AddRule(rule),
                             )
                         })
                         .await;

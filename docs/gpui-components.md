@@ -169,7 +169,12 @@ cx.open_window(
 
 ## Combining Layout and Components
 
-### Example: Decision Dialog
+### Example: Decision Dialog (Legacy — Pre-MD3 Redesign)
+
+> **Note:** The actual LogiGuard GPUI app now uses custom GPUI elements instead of
+> gpui-component `Button` and `Checkbox` to match the Material Design 3 design spec.
+> The segmented pill toggle, outlined action buttons, and grid layout are all built
+> with raw `div()` + `h_flex()`/`v_flex()`. This example shows the general pattern.
 
 ```rust
 v_flex()

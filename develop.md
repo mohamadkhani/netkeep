@@ -49,10 +49,11 @@
   - Rule CRUD
   - Pending decision actions
   - Health/recovery commands
-- `logiguard-ui` (GPUI app, phase 2)
-  - Rich decision dialog
-  - Rule editor
-  - Pending queue and history views
+- `logiguard-gpui` (GPUI app, phase 4)
+  - Decision dialog with Material Design 3 dark theme
+  - Segmented pill scope toggle (THIS SESSION / PERMANENTLY)
+  - Countdown timer with auto-deny
+  - Monitor mode: polls daemon, spawns dialog per pending
 
 ### 2.2 Suggested Rust Workspace
 
@@ -352,10 +353,17 @@ enum PushNotification {
 
 ## Phase 4: GPUI Interface
 
-- [ ] Build pending decisions view
-- [ ] Build decision dialog with scope options
-- [ ] Build rule management views
-- [ ] Connect UI to local control API
+- [x] Build pending decisions view
+- [x] Build decision dialog with scope options (segmented pill: THIS SESSION / PERMANENTLY)
+- [x] Material Design 3 dark theme matching HTML design spec
+- [x] Grid layout flow info with colored badges
+- [x] Custom outlined action buttons (ALLOW/DENY) with icons
+- [x] Circular countdown ring with auto-deny label
+- [x] Status bar footer
+- [x] 1-second countdown ticker with auto-exit
+- [x] Monitor mode: polls daemon, spawns GUI per pending
+- [x] Connect UI to local control API via Unix socket
+- [ ] Build rule management views (future)
 
 ## 10) Progress Log
 
@@ -425,6 +433,25 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Decision card: amber header with countdown, APPLICATION section, DESTINATION section, "Remember" checkbox, DENY/ALLOW footer
 - [x] Allow action optionally creates `Permanent` rule via `AddRule` when "Remember" checkbox is checked
 - [x] Deep Slate dark theme applied via `Theme::change(ThemeMode::Dark, None, cx)`
+- [x] 93 workspace tests still passing
+
+### 2026-05-07/08 (session 8)
+
+- [x] Redesigned GPUI decision dialog to match Material Design 3 dark theme from `design/decision_dialog_window.html`
+- [x] Replaced ad-hoc color palette with Material Design 3 dark theme colors (`#081425` bg, `#adc6ff` primary, etc.)
+- [x] Redesigned header: security shield icon, "CONNECTION INTERCEPTED" title, circular countdown ring, red "AUTO-DENY" label on `surface-container-high` background
+- [x] Redesigned flow info: grid layout (label/value columns) with colored badges (teal protocol chip, bordered IP/direction chips)
+- [x] Replaced "Remember" checkbox with segmented pill toggle for scope selection (THIS SESSION / PERMANENTLY)
+- [x] Replaced filled `gpui-component` buttons with custom outlined buttons (green border ALLOW, error border DENY) with shield/prohibited icons
+- [x] Added status bar footer with centered LogiGuard branding and queue status
+- [x] Added 1-second countdown ticker in `DecisionApp::new()` using `cx.spawn()` with `AsyncWindowContext`; auto-exits on timeout
+- [x] Reduced window size to 420x488 to fit content without excess space
+- [x] Added monitor mode: polls daemon every 1s, spawns GUI window per new pending decision (`--pending-id` for single-decision mode)
+- [x] Fixed deny button: now creates permanent rule when PERMANENTLY scope selected (was missing `AddRule` call)
+- [x] Fixed session scope: both THIS SESSION and PERMANENTLY now create rules; THIS SESSION uses `UntilRestart` duration, PERMANENTLY uses `Permanent`
+- [x] Added `components/status_bar.rs` module
+- [x] Updated docs: `architecture.md`, `implementation-status.md`, `gpui-components.md`, `gpui-api.md`
+- [x] Added `design/` folder with HTML design reference (`decision_dialog_window.html`)
 - [x] 93 workspace tests still passing
 
 ### 2026-05-06 (session 5)

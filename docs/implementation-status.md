@@ -2,7 +2,7 @@
 
 **Test Status:** 93 tests passing across workspace  
 **Phase:** 4 / 5 (GPUI UI complete, Phase 2 enforcement path partially done)  
-**Last Updated:** 2026-05-06
+**Last Updated:** 2026-05-08
 
 ## Completed Work
 
@@ -61,23 +61,24 @@
 - [x] New `logiguard-gpui` GPUI app
 - [x] Imported gpui 0.2.2 and gpui-component 0.5.1 from crates.io
 - [x] Modular architecture with separate files:
-  - `colors.rs` — theme color constants
+  - `colors.rs` — Material Design 3 dark theme color constants (from HTML design spec)
   - `daemon.rs` — socket IPC helpers (send_request, unix_now)
-  - `state.rs` — AppState entity + ViewState derived enum
-  - `polling.rs` — background 1-second polling task
-  - `app.rs` — DecisionApp root view + Render impl
-  - `components/splash.rs` — connecting/empty splash screens with shared logo helper
-  - `components/header.rs` — warning header bar with countdown
-  - `components/flow_info.rs` — application & destination info rows
-  - `components/action_footer.rs` — deny/allow buttons + remember checkbox
-- [x] React-like optimizations applied:
-  - Derived state enum (`ViewState`) for view branching
-  - Pure function components (header, flow_info, splash)
-  - Prop drilling via `ActionFooterProps` struct
-  - Encapsulated async actions in action_footer
+  - `monitor.rs` — background monitor mode (polls daemon, spawns GUI per pending)
+  - `state.rs` — AppState entity (item, now_secs, make_permanent, resolved, pending_count)
+  - `app.rs` — DecisionApp root view + Render impl + 1-second countdown ticker
+  - `components/header.rs` — security icon, CONNECTION INTERCEPTED title, circular countdown ring, AUTO-DENY label
+  - `components/flow_info.rs` — grid layout with colored badges (teal protocol, IP/direction chips)
+  - `components/action_footer.rs` — segmented pill scope toggle, outlined Allow/Deny buttons with icons
+  - `components/status_bar.rs` — centered footer with LogiGuard branding and queue status
+- [x] Material Design 3 dark theme matching HTML design spec (`design/decision_dialog_window.html`)
+- [x] Segmented pill toggle for scope selection (THIS SESSION / PERMANENTLY)
+- [x] Custom outlined buttons (green border ALLOW, error border DENY) replacing gpui-component buttons
+- [x] Grid layout flow info with colored badges for protocol/IP/direction
 - [x] Reactive rendering (observe AppState, notify on changes)
-- [x] Allow button flow with optional rule creation
+- [x] Allow and Deny button flows with optional permanent rule creation
+- [x] 1-second countdown ticker with auto-exit on timeout
 - [x] Async event handlers with weak entity references
+- [x] Monitor mode: polls daemon every 1s, spawns GUI window per new pending decision
 - [x] All 93 tests still passing with GPUI app added
 
 ## Bug Fixes (Session 3, 2026-05-06)
@@ -99,6 +100,23 @@
 
 **Bug 6:** Unlock command acceptable from any context  
 - **Fix:** Added SO_PEERCRED check + /proc/<pid>/fd/0 console validation
+
+## Bug Fixes (Session 4-5, 2026-05-07/08)
+
+**Bug 7:** GPUI UI did not match design spec  
+- **Fix:** Redesigned all components to match Material Design 3 dark theme from `design/decision_dialog_window.html`
+  - Replaced ad-hoc colors with Material Design 3 palette
+  - Replaced checkbox with segmented pill scope toggle
+  - Replaced filled buttons with custom outlined buttons with icons
+  - Added grid layout flow info with colored badges
+  - Added status bar footer
+  - Reduced window size to 420x488
+
+**Bug 8:** Countdown timer frozen (never ticking)  
+- **Fix:** Added 1-second async timer loop in `DecisionApp::new()` that updates `now_secs` and calls `cx.notify()` each tick. Auto-exits when countdown reaches 0.
+
+**Bug 9:** Deny button does not create permanent rule when PERMANENTLY scope selected  
+- **Fix:** Added `make_permanent` and `flow` parameters to `deny_button()`, mirroring the allow button's `AddRule` logic with `RuleAction::Deny`.
 
 ## Critical Data Structures
 
@@ -132,8 +150,10 @@ struct PendingDecision {
 struct FlowContext {
     pub process_name: Option<String>,      // e.g., "firefox"
     pub destination_ip: String,            // e.g., "142.251.33.46"
+    pub destination_port: u16,             // e.g., 443
     pub destination_domain: Option<String>, // e.g., "google.com" (from DNS or SNI)
     pub protocol: TransportProtocol,       // Tcp | Udp | Quic | Other
+    pub direction: FlowDirection,          // Outbound | Inbound
     pub device_label: Option<String>,      // e.g., "vpn-work" (gateway device label)
 }
 ```
@@ -332,8 +352,11 @@ LOGIGUARD_NFQUEUE=0 \
 ### Run GPUI App
 
 ```bash
+# Monitor mode (default): polls daemon, spawns dialog per pending
 ./target/debug/logiguard-gpui
-# Connects to daemon via /tmp/logiguard.sock, polls every 1 second
+
+# Single decision mode: show one pending and exit
+./target/debug/logiguard-gpui --pending-id <pending-id>
 ```
 
 ## CI/CD Status
