@@ -3,10 +3,12 @@ mod colors;
 mod components;
 mod fonts;
 mod daemon;
-mod management;
+mod settings;
 mod monitor;
 mod state;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
@@ -21,7 +23,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, MenuId};
 use tray_icon::{Icon, TrayIconBuilder};
 
 use app::DecisionApp;
-use management::{ManagementApp, ManagementState};
+use settings::{SettingsApp, SettingsState};
 use state::AppState;
 
 fn tray_pixel_icon() -> Icon {
@@ -59,6 +61,10 @@ fn main() {
     if let Some(idx) = args.iter().position(|a| a == "--pending-id") {
         let pending_id = args.get(idx + 1).expect("--pending-id requires a value");
         run_gui(pending_id.to_string());
+    } else if args.iter().any(|a| a == "--settings") {
+        // Settings window runs as a separate process so closing it
+        // does not kill the tray monitor.
+        run_settings();
     } else if args.iter().any(|a| a == "--headless-monitor") {
         // Legacy: poll only (no tray). Useful for automated tests.
         let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
@@ -147,6 +153,8 @@ fn run_tray_monitor() {
         gtk_drain_events();
 
         let sock_mgmt = socket_path.clone();
+        let gui_cmd = gui_command.clone();
+        let settings_open = Arc::new(AtomicBool::new(false));
         cx.spawn(async move |app| {
             let manage_id = MenuId::new("logiguard-manage");
             let quit_id = MenuId::new("logiguard-quit");
@@ -159,30 +167,23 @@ fn run_tray_monitor() {
                     .await;
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
                     if event.id == manage_id {
+                        // Only one settings window at a time.
+                        if settings_open.load(Ordering::Relaxed) {
+                            continue;
+                        }
+                        settings_open.store(true, Ordering::Relaxed);
+
+                        let exe = gui_cmd.clone();
                         let sock = sock_mgmt.clone();
-                        let _ = app.open_window(
-                            WindowOptions {
-                                window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
-                                    origin: gpui::point(px(120.), px(80.)),
-                                    size: size(px(720.), px(560.)),
-                                })),
-                                titlebar: Some(gpui::TitlebarOptions {
-                                    title: Some(SharedString::from(
-                                        "LogiGuard - Settings",
-                                    )),
-                                    appears_transparent: false,
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            },
-                            move |window, cx| {
-                                let state =
-                                    cx.new(|_| ManagementState::new(sock.clone()));
-                                let view =
-                                    cx.new(|cx| ManagementApp::new(state.clone(), cx));
-                                cx.new(|cx| Root::new(view, window, cx))
-                            },
-                        );
+                        let flag = settings_open.clone();
+                        std::thread::spawn(move || {
+                            let _ = std::process::Command::new(&exe)
+                                .arg("--settings")
+                                .env("LOGIGUARD_SOCKET_PATH", &sock)
+                                .spawn()
+                                .and_then(|mut c| c.wait());
+                            flag.store(false, Ordering::Relaxed);
+                        });
                     } else if event.id == quit_id {
                         let _ = app.update(|cx| cx.quit());
                     }
@@ -246,6 +247,38 @@ fn run_gui(pending_id: String) {
             },
         )
         .expect("failed to open window");
+
+        cx.activate(true);
+    });
+}
+
+fn run_settings() {
+    let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
+        .unwrap_or_else(|_| daemon::SOCKET_PATH.to_string());
+
+    Application::new().run(move |cx: &mut App| {
+        gpui_component::init(cx);
+        Theme::change(ThemeMode::Dark, None, cx);
+        fonts::apply_design_fonts(cx);
+
+        let state: Entity<SettingsState> =
+            cx.new(|_| SettingsState::new(socket_path.clone()));
+
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
+                    origin: gpui::point(px(120.), px(80.)),
+                    size: size(px(720.), px(560.)),
+                })),
+                titlebar: Some(gpui_component::TitleBar::title_bar_options()),
+                ..Default::default()
+            },
+            |window, cx| {
+                let view = cx.new(|cx| SettingsApp::new(state, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        )
+        .expect("failed to open settings window");
 
         cx.activate(true);
     });
