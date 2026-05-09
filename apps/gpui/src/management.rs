@@ -1,4 +1,4 @@
-//! Rules and egress management window (opened from the tray menu).
+//! Settings window (opened from the tray menu).
 
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{Egress, RouteTarget, Rule};
@@ -168,7 +168,7 @@ impl Render for ManagementApp {
                         div()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_size(px(14.))
-                            .child("Rules & egresses"),
+                            .child("Settings"),
                     )
                     .child(
                         div()

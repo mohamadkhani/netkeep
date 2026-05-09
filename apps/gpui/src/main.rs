@@ -110,7 +110,7 @@ fn run_tray_monitor() {
         menu
             .append(&MenuItem::with_id(
                 MenuId::new("logiguard-manage"),
-                "Rules and egresses…",
+                "Settings…",
                 true,
                 None,
             ))
@@ -168,7 +168,7 @@ fn run_tray_monitor() {
                                 })),
                                 titlebar: Some(gpui::TitlebarOptions {
                                     title: Some(SharedString::from(
-                                        "LogiGuard - Rules && egresses",
+                                        "LogiGuard - Settings",
                                     )),
                                     appears_transparent: false,
                                     ..Default::default()
