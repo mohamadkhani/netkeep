@@ -71,7 +71,11 @@ apps/gpui/src/settings/
 ├── rules_tab.rs     # RulesDelegate (TableDelegate for firewall rules)
 ├── egress_tab.rs    # EgressDelegate (TableDelegate for egress routes)
 ├── proxies_tab.rs   # ProxiesDelegate (TableDelegate for proxy configs)
-└── helpers.rs       # fetch_and_apply(), parse_dns_csv(), route_summary()
+└── helpers.rs       # fetch_and_apply(), parse_dns_csv(), parse_targets_csv(), route_summary()
+
+apps/gpui/src/components/
+├── mod.rs           # re-exports all design-system primitives
+└── modal.rs         # modal_header, modal_footer, field_label, table_badge, action_btn, proto_btn
 ```
 
 ## Key Types
@@ -89,6 +93,10 @@ pub struct SettingsState {
     pub load_generation: u64,
     pub socket_path: String,
     pub active_tab: SettingsTab,
+    /// Set by Edit button in proxy table rows; drained by SettingsApp observer.
+    pub proxy_edit_request: Option<ProxyConfig>,
+    /// Set by Edit button in egress table rows; drained by SettingsApp observer.
+    pub egress_edit_request: Option<Egress>,
 }
 ```
 
@@ -121,100 +129,213 @@ pub struct SettingsApp {
 
 ### EgressDelegate
 
-**Columns:** Name (140px) | Type (80px) | Targets (200px) | DNS (140px) | Status (80px) | Controls (80px)
+**Columns:** Name (140px) | Type (80px) | Targets (200px) | DNS (140px) | Status (80px) | Controls (160px, not resizable)
 
 **Cell rendering:**
-- Col 0: Egress name + ID
-- Col 1: Type badge (SYSTEM/PROXY/VPN/DIRECT)
-- Col 2: Comma-separated target list
-- Col 3: DNS servers
-- Col 4: Active/Inactive status badge
-- Col 5: Delete button
+- Col 0: Egress name (bold) + ID in parentheses (muted, 10px)
+- Col 1: `table_badge` — SYSTEM/PROXY/VPN/DIRECT
+- Col 2: Comma-separated target list (via `route_summary`)
+- Col 3: DNS servers (or `—`)
+- Col 4: `table_badge` — ACTIVE/INACTIVE
+- Col 5: Edit button + Delete button (`action_btn`); hidden for system-default egress
 
 ### ProxiesDelegate
 
-**Columns:** Name (140px) | Protocol (80px) | Address (160px) | Auth (120px) | Status (80px) | Controls (140px)
+**Columns:** Name (140px) | Protocol (80px) | Address (160px) | Auth (120px) | Status (80px) | Controls (180px, not resizable)
 
 **Cell rendering:**
 - Col 0: Proxy name
-- Col 1: Protocol badge (SOCKS5=green, HTTP=primary, Shadowsocks=teal)
+- Col 1: `table_badge` — SOCKS5=green, HTTP=primary, SS=teal
 - Col 2: host:port
-- Col 3: Auth summary (None / user:*** / method)
-- Col 4: Active/Inactive status badge
-- Col 5: Toggle button + Delete button
+- Col 3: Auth summary (None / user:*** / cipher-method)
+- Col 4: `table_badge` — ACTIVE/INACTIVE
+- Col 5: Edit button + Toggle button (`.border_color` override for toggle state) + Delete button (`action_btn`)
 
 ## Dialog Usage
 
-### Opening a Dialog on Double-Click
+### ⚠ render_dialog_layer — Required in Your Render Impl
+
+**This is the most common mistake.** `window.open_dialog(...)` registers a dialog in `Root::active_dialogs`, but `Root::render` does **not** display it. You must call `Root::render_dialog_layer` at the end of your own `render()`:
 
 ```rust
-// Subscribe to table events in SettingsApp::new()
-let sub = cx.subscribe_in(
-    &egress_table,
-    window,
-    Self::on_egress_table_event,
-);
-subscriptions.push(sub);  // IMPORTANT: subscribe_in returns Subscription
+impl Render for SettingsApp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .child(/* title bar, tabs, table ... */)
+            .children(footer_el)
+            // ← REQUIRED or all open_dialog() calls are silent no-ops
+            .children(Root::render_dialog_layer(window, &mut **cx))
+            .into_any_element()
+    }
+}
+```
 
-// Handler
-fn on_egress_table_event(
+`&mut **cx` is needed because `render_dialog_layer` expects `&mut App` but `cx` is `&mut Context<Self>`. Rust's auto-coercion works for method calls but not free-function call position — explicit double-deref is required.
+
+### ⚠ `.confirm()` Is Required for Buttons to Appear
+
+`on_ok` sets a callback but renders **no buttons**. You must call `.confirm()` (OK + Cancel) or `.alert()` (OK only):
+
+```rust
+// ❌ Dialog opens but has no buttons — can never be confirmed
+dialog.on_ok(|_, _, _| true)
+
+// ✅ Correct — footer with OK + Cancel
+dialog
+    .button_props(DialogButtonProps::default().ok_text("Save").cancel_text("Cancel"))
+    .confirm()
+    .on_ok(|_, _, _| true)
+```
+
+### Opening a Dialog on Button Click
+
+Use `cx.listener` in `render()` — the callback receives `&mut Window`:
+
+```rust
+div()
+    .id("add-proxy-btn")
+    .on_click(cx.listener(|this, _, window, cx| {
+        this.open_proxy_form_dialog(None, window, cx);
+    }))
+    .child("+ ADD PROXY")
+```
+
+### Opening a Dialog from a Table Row (Edit Button)
+
+`TableDelegate::render_td` has no `&mut Window`, so you cannot call `open_dialog` directly. Instead, write a request into `SettingsState` and drain it from `observe_in`:
+
+```rust
+// In proxies_tab.rs render_td (controls column):
+.on_click(move |_, _, cx| {
+    if let Some(st) = state_edit.upgrade() {
+        let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+            s.proxy_edit_request = Some(proxy_edit.clone());
+            cx.notify();   // triggers the observe_in below
+        });
+    }
+})
+
+// In SettingsApp::new():
+cx.observe_in(&state, window, |this, _, window, cx| {
+    this.sync_tables(cx);
+
+    let edit = this.state.read(cx).proxy_edit_request.clone();
+    if let Some(proxy) = edit {
+        let _ = cx.update_entity(&this.state, |s, _cx| {
+            s.proxy_edit_request = None;
+            // ⚠ Do NOT call cx.notify() here — would re-trigger this observer
+        });
+        this.open_proxy_form_dialog(Some(proxy), window, cx);
+        return;
+    }
+
+    cx.notify();
+})
+.detach();
+```
+
+### Double-Click on Row Opens Dialog
+
+```rust
+fn on_proxy_table_event(
     &mut self,
-    _table: &Entity<TableState<EgressDelegate>>,
+    _table: &Entity<TableState<ProxiesDelegate>>,
     event: &TableEvent,
     window: &mut Window,
     cx: &mut Context<Self>,
 ) {
     if let TableEvent::DoubleClickedRow(row_ix) = event {
-        let egresses = &self.state.read(cx).egresses;
-        if let Some(egress) = egresses.get(*row_ix) {
-            let egress = egress.clone();
-            self.open_egress_detail_dialog(egress, window, cx);
+        if let Some(proxy) = self.state.read(cx).proxies.get(*row_ix) {
+            let proxy = proxy.clone();
+            self.open_proxy_form_dialog(Some(proxy), window, cx);
         }
     }
 }
 ```
 
-### Dialog Construction Pattern
+### Form Dialog with Custom Header/Footer and Input Fields
+
+All form dialogs use the `modal_header` / `modal_footer` pattern for a full-bleed title bar matching the design system. Create `InputState` entities **before** the dialog closure (closure is `Fn`, entities must exist before capture):
 
 ```rust
-fn open_egress_detail_dialog(
+use crate::components::{field_label, modal_footer, modal_header, proto_btn};
+
+fn open_proxy_form_dialog(
     &mut self,
-    egress: Egress,
+    existing: Option<ProxyConfig>,
     window: &mut Window,
     cx: &mut Context<Self>,
 ) {
-    let name = egress.name.clone();
-    let dns = egress.dns_servers.join(", ");
+    let is_edit = existing.is_some();
+    let (hdr_icon, hdr_title) = if is_edit { ("✏", "EDIT PROXY") } else { ("⊕", "ADD PROXY") };
+    let ok_label = if is_edit { "Update" } else { "Add" };
 
-    window.open_dialog(cx, move |dialog, _, _| {
+    let init_name = existing.as_ref().map(|p| p.name.as_str()).unwrap_or("New Proxy");
+    let name_input = cx.new(|cx| {
+        let mut s = InputState::new(window, cx);
+        s.set_value(init_name, window, cx);
+        s
+    });
+    let name_c = name_input.clone();
+
+    // Arc<Mutex<T>> for shared mutable state across Fn closure
+    let selected_proto = Arc::new(Mutex::new(
+        existing.as_ref().map(|p| p.protocol.clone()).unwrap_or(ProxyProtocol::Socks5)
+    ));
+    let proto_c = selected_proto.clone();
+
+    window.open_dialog(cx, move |dialog, _, _cx| {
+        let proto_for_ok = proto_c.clone();
+        let name_for_ok = name_c.clone();
+
         dialog
-            .title(format!("Egress: {name}"))
-            .w(px(500.))
-            .close_button(true)
+            .p(px(0.))                  // zero padding → full-bleed title bar
+            .close_button(false)        // modal_header provides ✕ button
+            .title(modal_header(hdr_icon, hdr_title))
+            .w(px(480.))
+            .button_props(DialogButtonProps::default().ok_text(ok_label).cancel_text("Cancel"))
+            .footer(|ok, cancel, w, cx| vec![modal_footer(cancel(w, cx), ok(w, cx))])
             .child(
-                v_flex()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .text_color(colors::text())
-                            // Use dns.clone() in else branch (Fn closure, not FnOnce)
-                            .child(if dns.is_empty() { "—".to_string() } else { dns.clone() })
+                v_flex().px(px(16.)).py(px(16.)).gap(px(16.))
+                    .child(v_flex().gap(px(4.))
+                        .child(field_label("NAME"))
+                        .child(Input::new(&name_c))
                     )
             )
-            .on_ok(|_, _, _| true)
+            .on_ok(move |_, _, cx| {
+                let name = name_for_ok.read(cx).value().to_string();
+                let proto = proto_for_ok.lock().unwrap().clone();
+                // ... create/update proxy ...
+                true
+            })
     });
 }
 ```
 
+**Pattern for egress form** (`open_egress_form_dialog`) is identical — fields differ (Name, Color, Targets CSV, DNS CSV). The `parse_targets_csv` helper converts the targets text field into `Vec<RouteTarget>`.
+
+### `parse_targets_csv` — Egress Targets Field
+
+Parses a comma-separated string like `"dev:eth0, tun:wg0, proxy:my-id"` into `Vec<RouteTarget>`:
+
+```
+tun:<name>   → RouteTarget::Tun(name)
+proxy:<id>   → RouteTarget::Proxy(id)
+dev:<name>   → RouteTarget::Device(name)
+<bare>       → RouteTarget::Device(bare)     // fallback
+```
+
+Located in `settings/helpers.rs`.
+
 ### Critical: Fn vs FnOnce Closures
 
-The dialog closure is `Fn` (called multiple times by the framework). This means:
+The dialog closure is `Fn` (called on every render frame while open). All captured values must support repeated use:
 
 ```rust
-// ❌ BROKEN: moves dns_clone, can't be called again
-.child(if dns.is_empty() { "—".to_string() } else { dns_clone })
+// ❌ BROKEN: moves dns, can't render again
+.child(if dns.is_empty() { "—".to_string() } else { dns })
 
-// ✅ CORRECT: clones in else branch, original stays usable
+// ✅ CORRECT: clone in the branch that would consume
 .child(if dns.is_empty() { "—".to_string() } else { dns.clone() })
 ```
 
@@ -279,23 +400,20 @@ div()
     )
 ```
 
-### Badge Element Helper
+### Design System Helpers (`components/modal.rs`)
+
+All table and dialog primitives live in `apps/gpui/src/components/modal.rs` and are re-exported from `crate::components`:
 
 ```rust
-fn badge_el(label: &str, color: gpui::Hsla) -> gpui::AnyElement {
-    div()
-        .text_size(px(10.))
-        .text_color(color)
-        .px(px(6.))
-        .py(px(2.))
-        .rounded(px(3.))
-        .border_1()
-        .border_color(color)
-        .bg(colors::bg())
-        .child(label.to_string())
-        .into_any_element()
-}
+use crate::components::{action_btn, field_label, modal_footer, modal_header, proto_btn, table_badge};
 ```
+
+- `table_badge(label, color)` — inline bordered badge for Status/Type/Protocol columns
+- `action_btn(id, label, color) -> Stateful<Div>` — small outline button; chain `.on_click(...)` directly
+- `field_label(text)` — 10px bold muted uppercase label for form fields
+- `modal_header(icon, title)` — full-bleed dialog title bar with ✕ close button
+- `modal_footer(cancel, ok)` — styled footer bar accepting rendered button elements
+- `proto_btn(label, text_color, border_color, on_click)` — protocol selector button for proxy form
 
 ## Gotchas and Lessons Learned
 
@@ -388,10 +506,12 @@ The key files to understand are:
 
 ## Next Steps
 
-- [ ] Editable fields in dialogs (currently read-only detail view)
-- [ ] Add egress form dialog (name, targets, DNS)
-- [ ] Add proxy form dialog (name, protocol, host, port, auth)
+- [x] Add proxy form dialog (name, protocol, host, port) — Add + Edit
+- [x] Add egress form dialog (name, color, targets CSV, DNS CSV) — Add + Edit
+- [x] Custom design-system modal header/footer — full-bleed title bar with ✕ button
+- [x] Reusable `table_badge`, `action_btn`, `field_label`, `proto_btn` components in `components/modal.rs`
 - [ ] Implement EgressTarget with priority ordering in table
-- [ ] Drag-and-drop row reordering for priority
+- [ ] Auth fields in proxy form dialog (Basic / Shadowsocks)
+- [ ] Drag-and-drop row reordering for egress priority
 - [ ] Search/filter for rules table
 - [ ] Bulk actions (enable/disable multiple rules)

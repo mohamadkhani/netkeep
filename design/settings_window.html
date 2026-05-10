@@ -261,13 +261,11 @@
                                 <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px]">10</div>
                                 <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">ACTIVE</span></div>
                                 <div class="col-span-2 flex justify-end gap-1">
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">visibility</button>
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">edit</button>
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">power_settings_new</button>
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-error p-1 rounded hover:bg-error/10 transition-colors">delete</button>
+                                    <button class="edit-egress-btn font-label-caps text-[10px] px-2 py-0.5 rounded border border-primary text-primary hover:bg-primary/10 transition-colors">Edit</button>
+                                    <button class="font-label-caps text-[10px] px-2 py-0.5 rounded border border-error text-error hover:bg-error/10 transition-colors">Delete</button>
                                 </div>
                             </div>
-                            
+
                             <!-- Row 3: WiFi Interface -->
                             <div class="grid grid-cols-12 gap-x-gutter p-density-compact hover:bg-surface-bright transition-colors items-center">
                                 <div class="col-span-3 flex items-center gap-2">
@@ -279,13 +277,11 @@
                                 <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px]">20</div>
                                 <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant border border-outline-variant">INACTIVE</span></div>
                                 <div class="col-span-2 flex justify-end gap-1">
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">visibility</button>
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">edit</button>
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">power_settings_new</button>
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-error p-1 rounded hover:bg-error/10 transition-colors">delete</button>
+                                    <button class="edit-egress-btn font-label-caps text-[10px] px-2 py-0.5 rounded border border-primary text-primary hover:bg-primary/10 transition-colors">Edit</button>
+                                    <button class="font-label-caps text-[10px] px-2 py-0.5 rounded border border-error text-error hover:bg-error/10 transition-colors">Delete</button>
                                 </div>
                             </div>
-                            
+
                             <!-- Row 4: Ethernet Interface -->
                             <div class="grid grid-cols-12 gap-x-gutter p-density-compact hover:bg-surface-bright transition-colors items-center">
                                 <div class="col-span-3 flex items-center gap-2">
@@ -297,10 +293,8 @@
                                 <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px]">30</div>
                                 <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">ACTIVE</span></div>
                                 <div class="col-span-2 flex justify-end gap-1">
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">visibility</button>
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">edit</button>
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">power_settings_new</button>
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-error p-1 rounded hover:bg-error/10 transition-colors">delete</button>
+                                    <button class="edit-egress-btn font-label-caps text-[10px] px-2 py-0.5 rounded border border-primary text-primary hover:bg-primary/10 transition-colors">Edit</button>
+                                    <button class="font-label-caps text-[10px] px-2 py-0.5 rounded border border-error text-error hover:bg-error/10 transition-colors">Delete</button>
                                 </div>
                             </div>
                         </div>
@@ -350,7 +344,7 @@
                 
                 <!-- Add Egress Button -->
                 <div class="p-density-comfortable border-t border-outline-variant bg-surface-container-high flex justify-between items-center">
-                    <button class="flex items-center gap-2 bg-primary hover:bg-primary-container text-on-primary font-label-caps text-[10px] px-4 py-2 rounded transition-colors">
+                    <button id="open-add-egress-modal" class="flex items-center gap-2 bg-primary hover:bg-primary-container text-on-primary font-label-caps text-[10px] px-4 py-2 rounded transition-colors">
                         <span class="material-symbols-outlined text-[16px]">add</span>
                         ADD EGRESS
                     </button>
@@ -438,11 +432,170 @@
 
                 <!-- Add Proxy Button -->
                 <div class="p-density-comfortable border-t border-outline-variant bg-surface-container-high">
-                    <button class="flex items-center gap-2 bg-primary hover:bg-primary-container text-on-primary font-label-caps text-[10px] px-4 py-2 rounded transition-colors">
+                    <button id="open-add-proxy-modal" class="flex items-center gap-2 bg-primary hover:bg-primary-container text-on-primary font-label-caps text-[10px] px-4 py-2 rounded transition-colors">
                         <span class="material-symbols-outlined text-[16px]">add</span>
                         ADD PROXY
                     </button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add / Edit Egress Modal -->
+    <div id="egress-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+        <div class="bg-surface-container border border-outline-variant rounded-lg w-[480px] flex flex-col shadow-2xl">
+            <!-- Modal Header -->
+            <div class="flex items-center justify-between px-density-comfortable py-3 border-b border-outline-variant bg-surface-container-high rounded-t-lg">
+                <div class="flex items-center gap-2">
+                    <span class="material-symbols-outlined text-[16px] text-primary" id="egress-modal-icon">add_circle</span>
+                    <span class="font-label-caps text-label-caps text-on-surface" id="egress-modal-title">ADD EGRESS</span>
+                </div>
+                <button id="close-egress-modal" class="material-symbols-outlined text-[20px] text-on-surface-variant hover:text-on-surface transition-colors p-1 rounded hover:bg-surface-variant">close</button>
+            </div>
+
+            <!-- Modal Body -->
+            <div class="p-density-comfortable flex flex-col gap-4">
+
+                <!-- Name -->
+                <div class="flex flex-col gap-1">
+                    <label class="font-label-caps text-[10px] text-on-surface-variant">NAME</label>
+                    <input
+                        id="egress-name"
+                        type="text"
+                        placeholder="e.g. WireGuard VPN"
+                        value="New Egress"
+                        class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
+                    />
+                </div>
+
+                <!-- Color -->
+                <div class="flex flex-col gap-1">
+                    <label class="font-label-caps text-[10px] text-on-surface-variant">COLOR</label>
+                    <div class="flex gap-2 items-center">
+                        <input
+                            id="egress-color"
+                            type="text"
+                            placeholder="#3b82f6"
+                            value="#3b82f6"
+                            class="flex-1 bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
+                        />
+                        <div id="egress-color-swatch" class="w-8 h-8 rounded border border-outline-variant" style="background:#3b82f6"></div>
+                    </div>
+                </div>
+
+                <!-- Targets -->
+                <div class="flex flex-col gap-1">
+                    <label class="font-label-caps text-[10px] text-on-surface-variant">TARGETS <span class="text-on-surface-variant/60 normal-case font-body-sm">(comma-separated: dev:eth0, tun:wg0, proxy:id)</span></label>
+                    <input
+                        id="egress-targets"
+                        type="text"
+                        placeholder="dev:eth0"
+                        value="dev:eth0"
+                        class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
+                    />
+                </div>
+
+                <!-- DNS Servers -->
+                <div class="flex flex-col gap-1">
+                    <label class="font-label-caps text-[10px] text-on-surface-variant">DNS SERVERS <span class="text-on-surface-variant/60 normal-case font-body-sm">(comma-separated, leave empty for system default)</span></label>
+                    <input
+                        id="egress-dns"
+                        type="text"
+                        placeholder="1.1.1.1, 8.8.8.8"
+                        value=""
+                        class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
+                    />
+                </div>
+
+            </div>
+
+            <!-- Modal Footer -->
+            <div class="flex justify-end gap-2 px-density-comfortable py-3 border-t border-outline-variant bg-surface-container-high rounded-b-lg">
+                <button id="cancel-egress" class="font-label-caps text-[10px] px-4 py-2 rounded border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-outline transition-colors">
+                    CANCEL
+                </button>
+                <button id="confirm-egress" class="flex items-center gap-2 bg-primary hover:bg-primary-container text-on-primary font-label-caps text-[10px] px-4 py-2 rounded transition-colors">
+                    <span class="material-symbols-outlined text-[16px]" id="egress-confirm-icon">add</span>
+                    <span id="egress-confirm-label">ADD EGRESS</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Proxy Modal -->
+    <div id="add-proxy-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+        <div class="bg-surface-container border border-outline-variant rounded-lg w-[480px] flex flex-col shadow-2xl">
+            <!-- Modal Header -->
+            <div class="flex items-center justify-between px-density-comfortable py-3 border-b border-outline-variant bg-surface-container-high rounded-t-lg">
+                <div class="flex items-center gap-2">
+                    <span class="material-symbols-outlined text-[16px] text-primary">add_circle</span>
+                    <span class="font-label-caps text-label-caps text-on-surface">ADD PROXY</span>
+                </div>
+                <button id="close-add-proxy-modal" class="material-symbols-outlined text-[20px] text-on-surface-variant hover:text-on-surface transition-colors p-1 rounded hover:bg-surface-variant">close</button>
+            </div>
+
+            <!-- Modal Body -->
+            <div class="p-density-comfortable flex flex-col gap-4">
+
+                <!-- Name -->
+                <div class="flex flex-col gap-1">
+                    <label class="font-label-caps text-[10px] text-on-surface-variant">NAME</label>
+                    <input
+                        id="proxy-name"
+                        type="text"
+                        placeholder="e.g. Work SOCKS5"
+                        value="New Proxy"
+                        class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
+                    />
+                </div>
+
+                <!-- Protocol -->
+                <div class="flex flex-col gap-1">
+                    <label class="font-label-caps text-[10px] text-on-surface-variant">PROTOCOL</label>
+                    <div class="flex gap-2">
+                        <button data-proto="socks5" class="proto-btn flex-1 font-label-caps text-[10px] py-2 rounded border transition-colors border-[#22c55e] text-[#22c55e] bg-[#22c55e]/10">SOCKS5</button>
+                        <button data-proto="http"   class="proto-btn flex-1 font-label-caps text-[10px] py-2 rounded border transition-colors border-outline-variant text-on-surface-variant hover:border-primary hover:text-primary">HTTP</button>
+                        <button data-proto="ss"     class="proto-btn flex-1 font-label-caps text-[10px] py-2 rounded border transition-colors border-outline-variant text-on-surface-variant hover:border-[#14b8a6] hover:text-[#14b8a6]">SS</button>
+                    </div>
+                </div>
+
+                <!-- Host + Port row -->
+                <div class="flex gap-3">
+                    <div class="flex flex-col gap-1 flex-1">
+                        <label class="font-label-caps text-[10px] text-on-surface-variant">HOST</label>
+                        <input
+                            id="proxy-host"
+                            type="text"
+                            placeholder="127.0.0.1"
+                            value="127.0.0.1"
+                            class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
+                        />
+                    </div>
+                    <div class="flex flex-col gap-1 w-24">
+                        <label class="font-label-caps text-[10px] text-on-surface-variant">PORT</label>
+                        <input
+                            id="proxy-port"
+                            type="number"
+                            placeholder="1080"
+                            value="1080"
+                            min="1"
+                            max="65535"
+                            class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
+                        />
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Modal Footer -->
+            <div class="flex justify-end gap-2 px-density-comfortable py-3 border-t border-outline-variant bg-surface-container-high rounded-b-lg">
+                <button id="cancel-add-proxy" class="font-label-caps text-[10px] px-4 py-2 rounded border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-outline transition-colors">
+                    CANCEL
+                </button>
+                <button id="confirm-add-proxy" class="flex items-center gap-2 bg-primary hover:bg-primary-container text-on-primary font-label-caps text-[10px] px-4 py-2 rounded transition-colors">
+                    <span class="material-symbols-outlined text-[16px]">add</span>
+                    ADD PROXY
+                </button>
             </div>
         </div>
     </div>
@@ -502,9 +655,136 @@
             });
         });
 
-        // Close button
-        document.querySelector('.material-symbols-outlined[title="close"]').addEventListener('click', () => {
-            console.log('Close settings');
+        // ── Add Proxy Modal ──────────────────────────────────────────────────
+        const addProxyModal = document.getElementById('add-proxy-modal');
+        const openAddProxyBtn = document.getElementById('open-add-proxy-modal');
+        const closeAddProxyBtn = document.getElementById('close-add-proxy-modal');
+        const cancelAddProxy = document.getElementById('cancel-add-proxy');
+        const confirmAddProxy = document.getElementById('confirm-add-proxy');
+        const protoBtns = document.querySelectorAll('.proto-btn');
+
+        const protoColors = {
+            socks5: { border: '#22c55e', text: '#22c55e', bg: 'rgba(34,197,94,0.1)' },
+            http:   { border: '#adc6ff', text: '#adc6ff', bg: 'rgba(173,198,255,0.1)' },
+            ss:     { border: '#14b8a6', text: '#14b8a6', bg: 'rgba(20,184,166,0.1)' },
+        };
+
+        let selectedProto = 'socks5';
+
+        function openModal() {
+            addProxyModal.classList.remove('hidden');
+        }
+        function closeModal() {
+            addProxyModal.classList.add('hidden');
+        }
+        function selectProto(proto) {
+            selectedProto = proto;
+            protoBtns.forEach(btn => {
+                const p = btn.dataset.proto;
+                const c = protoColors[p];
+                if (p === proto) {
+                    btn.style.borderColor = c.border;
+                    btn.style.color = c.text;
+                    btn.style.background = c.bg;
+                } else {
+                    btn.style.borderColor = '';
+                    btn.style.color = '';
+                    btn.style.background = '';
+                    btn.classList.add('border-outline-variant', 'text-on-surface-variant');
+                    btn.classList.remove('border-primary');
+                }
+            });
+        }
+
+        openAddProxyBtn.addEventListener('click', openModal);
+        closeAddProxyBtn.addEventListener('click', closeModal);
+        cancelAddProxy.addEventListener('click', closeModal);
+        addProxyModal.addEventListener('click', (e) => { if (e.target === addProxyModal) closeModal(); });
+
+        protoBtns.forEach(btn => {
+            btn.addEventListener('click', () => selectProto(btn.dataset.proto));
+        });
+
+        confirmAddProxy.addEventListener('click', () => {
+            const name = document.getElementById('proxy-name').value.trim() || 'New Proxy';
+            const host = document.getElementById('proxy-host').value.trim() || '127.0.0.1';
+            const port = parseInt(document.getElementById('proxy-port').value) || 1080;
+            console.log('Add proxy:', { name, proto: selectedProto, host, port });
+            closeModal();
+        });
+
+        // Initialize SOCKS5 selected
+        selectProto('socks5');
+
+        // ── Add / Edit Egress Modal ──────────────────────────────────────────
+        const egressModal       = document.getElementById('egress-modal');
+        const openAddEgressBtn  = document.getElementById('open-add-egress-modal');
+        const closeEgressBtn    = document.getElementById('close-egress-modal');
+        const cancelEgress      = document.getElementById('cancel-egress');
+        const confirmEgress     = document.getElementById('confirm-egress');
+        const egressModalTitle  = document.getElementById('egress-modal-title');
+        const egressModalIcon   = document.getElementById('egress-modal-icon');
+        const egressConfirmIcon = document.getElementById('egress-confirm-icon');
+        const egressConfirmLabel = document.getElementById('egress-confirm-label');
+        const egressColorInput  = document.getElementById('egress-color');
+        const egressColorSwatch = document.getElementById('egress-color-swatch');
+
+        let egressIsEdit = false;
+
+        function openEgressModal(editMode, data) {
+            egressIsEdit = editMode;
+            if (editMode) {
+                egressModalTitle.textContent  = 'EDIT EGRESS';
+                egressModalIcon.textContent   = 'edit';
+                egressConfirmIcon.textContent = 'save';
+                egressConfirmLabel.textContent = 'SAVE';
+                document.getElementById('egress-name').value    = data.name    || '';
+                document.getElementById('egress-color').value   = data.color   || '#3b82f6';
+                document.getElementById('egress-targets').value = data.targets || '';
+                document.getElementById('egress-dns').value     = data.dns     || '';
+            } else {
+                egressModalTitle.textContent  = 'ADD EGRESS';
+                egressModalIcon.textContent   = 'add_circle';
+                egressConfirmIcon.textContent = 'add';
+                egressConfirmLabel.textContent = 'ADD EGRESS';
+                document.getElementById('egress-name').value    = 'New Egress';
+                document.getElementById('egress-color').value   = '#3b82f6';
+                document.getElementById('egress-targets').value = 'dev:eth0';
+                document.getElementById('egress-dns').value     = '';
+            }
+            updateColorSwatch();
+            egressModal.classList.remove('hidden');
+        }
+        function closeEgressModal() {
+            egressModal.classList.add('hidden');
+        }
+        function updateColorSwatch() {
+            const c = egressColorInput.value.trim();
+            try { egressColorSwatch.style.background = c; } catch(_) {}
+        }
+
+        openAddEgressBtn.addEventListener('click', () => openEgressModal(false, {}));
+        closeEgressBtn.addEventListener('click', closeEgressModal);
+        cancelEgress.addEventListener('click', closeEgressModal);
+        egressModal.addEventListener('click', (e) => { if (e.target === egressModal) closeEgressModal(); });
+        egressColorInput.addEventListener('input', updateColorSwatch);
+
+        // Edit buttons on egress rows
+        document.querySelectorAll('.edit-egress-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const row = btn.closest('[class*="grid"]');
+                const name = row.querySelector('.font-data-mono')?.textContent || '';
+                openEgressModal(true, { name, color: '#3b82f6', targets: 'dev:eth0', dns: '' });
+            });
+        });
+
+        confirmEgress.addEventListener('click', () => {
+            const name    = document.getElementById('egress-name').value.trim()    || 'New Egress';
+            const color   = document.getElementById('egress-color').value.trim()   || '#3b82f6';
+            const targets = document.getElementById('egress-targets').value.trim() || 'dev:eth0';
+            const dns     = document.getElementById('egress-dns').value.trim();
+            console.log(egressIsEdit ? 'Save egress:' : 'Add egress:', { name, color, targets, dns });
+            closeEgressModal();
         });
     </script>
 </body>

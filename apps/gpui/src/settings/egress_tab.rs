@@ -3,13 +3,14 @@
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{Egress, RouteTarget};
 use gpui::{
-    App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement,
+    App, AppContext as _, Context, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
 };
 
 use gpui_component::table::{Column, TableDelegate, TableState};
 
 use crate::colors;
+use crate::components::{action_btn, table_badge};
 use crate::daemon;
 
 use super::SettingsState;
@@ -41,7 +42,7 @@ impl EgressDelegate {
                 Column::new("targets", "Targets").width(px(200.)),
                 Column::new("dns", "DNS").width(px(140.)),
                 Column::new("status", "Status").width(px(80.)),
-                Column::new("controls", "").width(px(80.)).resizable(false),
+                Column::new("controls", "").width(px(160.)).resizable(false),
             ],
         }
     }
@@ -112,22 +113,7 @@ impl TableDelegate for EgressDelegate {
             // Type badge
             1 => {
                 let (label, color) = Self::egress_type_label(egress);
-                div()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(color)
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(color)
-                            .bg(colors::bg())
-                            .child(label.to_string()),
-                    )
-                    .into_any_element()
+                table_badge(label, color)
             }
             // Targets
             2 => {
@@ -161,30 +147,14 @@ impl TableDelegate for EgressDelegate {
             }
             // Status badge
             4 => {
-                let (label, color) =
-                    if egress.is_available || egress.is_system_default {
-                        ("ACTIVE", colors::green())
-                    } else {
-                        ("INACTIVE", colors::muted())
-                    };
-                div()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(color)
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(color)
-                            .bg(colors::bg())
-                            .child(label.to_string()),
-                    )
-                    .into_any_element()
+                let (label, color) = if egress.is_available || egress.is_system_default {
+                    ("ACTIVE", colors::green())
+                } else {
+                    ("INACTIVE", colors::muted())
+                };
+                table_badge(label, color)
             }
-            // Controls (delete for non-system)
+            // Controls (edit + delete for non-system)
             5 => {
                 if egress.is_system_default {
                     return div().into_any_element();
@@ -193,20 +163,29 @@ impl TableDelegate for EgressDelegate {
                 let socket_path = self.socket_path.clone();
                 let weak = self.state_weak.clone();
 
+                let egress_edit  = egress.clone();
+                let state_edit   = self.state_weak.clone();
+
                 div()
                     .flex()
                     .items_center()
+                    .gap(px(6.))
+                    // Edit button — sets egress_edit_request side-channel
                     .child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("eg-del-{eid}").into()))
-                            .text_size(px(11.))
-                            .text_color(colors::error())
-                            .cursor_pointer()
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(colors::error())
+                        action_btn(format!("eg-edit-{eid}"), "Edit", colors::primary())
+                            .on_click(move |_, _, cx| {
+                                let egress = egress_edit.clone();
+                                if let Some(st) = state_edit.upgrade() {
+                                    let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                        s.egress_edit_request = Some(egress);
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
+                    // Delete button
+                    .child(
+                        action_btn(format!("eg-del-{eid}"), "Delete", colors::error())
                             .on_click(move |_, _, cx| {
                                 let eid_req = eid.clone();
                                 let eid_cmp = eid.clone();
@@ -249,8 +228,7 @@ impl TableDelegate for EgressDelegate {
                                     }
                                 })
                                 .detach();
-                            })
-                            .child("Delete"),
+                            }),
                     )
                     .into_any_element()
             }

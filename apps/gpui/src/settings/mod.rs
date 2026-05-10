@@ -8,12 +8,15 @@ mod helpers;
 mod proxies_tab;
 mod rules_tab;
 
+use std::sync::{Arc, Mutex};
+
 use control_api::{ControlRequest, ControlResponse};
-use core_types::{Egress, ProxyAuth, ProxyConfig, ProxyProtocol, RouteTarget};
+use core_types::{Egress, ProxyAuth, ProxyConfig, ProxyProtocol};
 use gpui::{
     div, px, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
+    Render, StatefulInteractiveElement, Styled, Subscription, Window,
 };
+use gpui_component::input::{Input, InputState};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::table::{TableEvent, TableState};
 use gpui_component::TitleBar;
@@ -21,7 +24,7 @@ use gpui_component::WindowExt as _;
 use gpui_component::{h_flex, v_flex};
 
 use crate::colors;
-use crate::daemon;
+use crate::components::{field_label, modal_footer, modal_header, proto_btn};
 
 use egress_tab::EgressDelegate;
 use proxies_tab::ProxiesDelegate;
@@ -50,6 +53,10 @@ pub struct SettingsState {
     pub load_generation: u64,
     pub socket_path: String,
     pub active_tab: SettingsTab,
+    /// Set by the Edit button in the egress table; drained by SettingsApp observer.
+    pub egress_edit_request: Option<Egress>,
+    /// Set by the Edit button in the proxy table; drained by SettingsApp observer.
+    pub proxy_edit_request: Option<ProxyConfig>,
 }
 
 impl SettingsState {
@@ -62,6 +69,8 @@ impl SettingsState {
             load_generation: 0,
             socket_path,
             active_tab: SettingsTab::Rules,
+            egress_edit_request: None,
+            proxy_edit_request: None,
         }
     }
 }
@@ -111,9 +120,34 @@ impl SettingsApp {
         subscriptions.push(cx.subscribe_in(&egress_table, window, Self::on_egress_table_event));
         subscriptions.push(cx.subscribe_in(&proxy_table, window, Self::on_proxy_table_event));
 
-        // Observe state changes to refresh tables
-        cx.observe(&state, |this, _, cx| {
+        // Observe state changes: refresh tables, handle edit requests, re-render.
+        // Note: do NOT call cx.notify() when clearing request fields — that would re-trigger this observer.
+        cx.observe_in(&state, window, |this, _, window, cx| {
             this.sync_tables(cx);
+
+            // Drain egress edit request → open pre-filled egress form.
+            let egress_edit = this.state.read(cx).egress_edit_request.clone();
+            if let Some(egress) = egress_edit {
+                let _ = cx.update_entity(&this.state, |s, _cx| {
+                    s.egress_edit_request = None;
+                    // intentionally no cx.notify() — would re-enter this observer
+                });
+                this.open_egress_form_dialog(Some(egress), window, cx);
+                return;
+            }
+
+            // Drain proxy edit request → open pre-filled proxy form.
+            let proxy_edit = this.state.read(cx).proxy_edit_request.clone();
+            if let Some(proxy) = proxy_edit {
+                let _ = cx.update_entity(&this.state, |s, _cx| {
+                    s.proxy_edit_request = None;
+                    // intentionally no cx.notify() here to avoid re-entering this observer
+                });
+                this.open_proxy_form_dialog(Some(proxy), window, cx);
+                return;
+            }
+
+            cx.notify();
         })
         .detach();
 
@@ -160,7 +194,7 @@ impl SettingsApp {
         });
     }
 
-    /// Handle egress table events — double-click opens detail dialog.
+    /// Handle egress table events — double-click opens edit form.
     fn on_egress_table_event(
         &mut self,
         _table: &Entity<TableState<EgressDelegate>>,
@@ -171,13 +205,15 @@ impl SettingsApp {
         if let TableEvent::DoubleClickedRow(row_ix) = event {
             let egresses = &self.state.read(cx).egresses;
             if let Some(egress) = egresses.get(*row_ix) {
-                let egress = egress.clone();
-                self.open_egress_detail_dialog(egress, window, cx);
+                if !egress.is_system_default {
+                    let egress = egress.clone();
+                    self.open_egress_form_dialog(Some(egress), window, cx);
+                }
             }
         }
     }
 
-    /// Handle proxy table events — double-click opens edit dialog.
+    /// Handle proxy table events — double-click opens edit form.
     fn on_proxy_table_event(
         &mut self,
         _table: &Entity<TableState<ProxiesDelegate>>,
@@ -189,190 +225,379 @@ impl SettingsApp {
             let proxies = &self.state.read(cx).proxies;
             if let Some(proxy) = proxies.get(*row_ix) {
                 let proxy = proxy.clone();
-                self.open_proxy_edit_dialog(proxy, window, cx);
+                self.open_proxy_form_dialog(Some(proxy), window, cx);
             }
         }
     }
 
-    /// Open a dialog showing egress details.
-    fn open_egress_detail_dialog(
+    /// Open the egress form dialog for adding (existing = None) or editing (existing = Some).
+    fn open_egress_form_dialog(
         &mut self,
-        egress: Egress,
+        existing: Option<Egress>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let name = egress.name.clone();
-        let id = egress.id.clone();
-        let is_system = egress.is_system_default;
-        let is_available = egress.is_available;
-        let targets: Vec<String> = egress
-            .targets
-            .iter()
-            .map(|t| helpers::route_summary(t))
-            .collect();
-        let dns = egress.dns_servers.join(", ");
-        let color = egress.color.clone();
+        let state_weak = self.state.downgrade();
+        let socket_path = self.state.read(cx).socket_path.clone();
 
-        window.open_dialog(cx, move |dialog, _, _| {
-            let mut d = dialog
-                .title(format!("Egress: {name}"))
-                .w(px(500.))
-                .close_button(true)
-                .child(
-                    v_flex()
-                        .gap(px(12.))
-                        .child(
-                            h_flex()
-                                .gap(px(12.))
-                                .items_center()
-                                .child(info_field("ID", &id))
-                                .child(info_field("Color", &color))
-                                .child(if is_system {
-                                    badge_el("SYSTEM", colors::muted())
-                                } else {
-                                    badge_el("CUSTOM", colors::primary())
-                                })
-                                .child(if is_available || is_system {
-                                    badge_el("ACTIVE", colors::green())
-                                } else {
-                                    badge_el("INACTIVE", colors::muted())
-                                }),
-                        )
-                        .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(colors::muted())
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .child("TARGETS"),
-                                )
-                                .child(div().text_color(colors::text()).child(
-                                    if targets.is_empty() {
-                                        "default routing".to_string()
-                                    } else {
-                                        targets.join(", ")
-                                    },
-                                )),
-                        )
-                        .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(colors::muted())
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .child("DNS SERVERS"),
-                                )
-                                .child(div().text_color(colors::text()).child(if dns.is_empty() {
-                                    "—".to_string()
-                                } else {
-                                    dns.clone()
-                                })),
-                        ),
-                );
+        let is_edit = existing.is_some();
+        let existing_id = existing.as_ref().map(|e| e.id.clone());
+        let init_name = existing.as_ref().map(|e| e.name.as_str()).unwrap_or("New Egress").to_string();
+        let init_color = existing.as_ref().map(|e| e.color.as_str()).unwrap_or("#3b82f6").to_string();
+        let init_targets = existing
+            .as_ref()
+            .map(|e| e.targets.iter().map(|t| helpers::route_summary(t)).collect::<Vec<_>>().join(", "))
+            .unwrap_or_else(|| "dev:eth0".to_string());
+        let init_dns = existing.as_ref().map(|e| e.dns_servers.join(", ")).unwrap_or_default();
 
-            if !is_system {
-                d = d.on_ok(|_, _, _| true);
-            }
-            d
+        let name_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(init_name.clone(), window, cx);
+            s
         });
-    }
+        let color_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(init_color.clone(), window, cx);
+            s
+        });
+        let targets_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(init_targets.clone(), window, cx);
+            s
+        });
+        let dns_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(init_dns.clone(), window, cx);
+            s
+        });
 
-    /// Open a dialog for editing proxy details.
-    fn open_proxy_edit_dialog(
-        &mut self,
-        proxy: ProxyConfig,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let name = proxy.name.clone();
-        let id = proxy.id.clone();
-        let protocol = match proxy.protocol {
-            ProxyProtocol::Socks5 => "SOCKS5",
-            ProxyProtocol::Http => "HTTP",
-            ProxyProtocol::Shadowsocks => "Shadowsocks",
-        };
-        let address = format!("{}:{}", proxy.host, proxy.port);
-        let auth_summary = match &proxy.auth {
-            ProxyAuth::None => "None".to_string(),
-            ProxyAuth::Basic { username, .. } => format!("{username}:***"),
-            ProxyAuth::Shadowsocks { method, .. } => method.clone(),
-        };
-        let enabled = proxy.enabled;
-        let proto_color = match proxy.protocol {
-            ProxyProtocol::Socks5 => colors::green(),
-            ProxyProtocol::Http => colors::primary(),
-            ProxyProtocol::Shadowsocks => colors::teal(),
-        };
+        let name_c    = name_input.clone();
+        let color_c   = color_input.clone();
+        let targets_c = targets_input.clone();
+        let dns_c     = dns_input.clone();
 
-        window.open_dialog(cx, move |dialog, _, _| {
+        let hdr_icon  = if is_edit { "✏" } else { "⊕" };
+        let hdr_title = if is_edit { "EDIT EGRESS" } else { "ADD EGRESS" };
+        let ok_label  = if is_edit { "Save" } else { "Add Egress" };
+
+        window.open_dialog(cx, move |dialog, _, _cx| {
+            let name_i    = name_c.clone();
+            let color_i   = color_c.clone();
+            let targets_i = targets_c.clone();
+            let dns_i     = dns_c.clone();
+            let state_w   = state_weak.clone();
+            let sock      = socket_path.clone();
+            let eid       = existing_id.clone();
+
             dialog
-                .title(format!("Proxy: {name}"))
+                .p(px(0.))
+                .close_button(false)
+                .title(modal_header(hdr_icon, hdr_title))
                 .w(px(480.))
-                .close_button(true)
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text(ok_label)
+                        .cancel_text("Cancel"),
+                )
+                .footer(|ok, cancel, w, cx| {
+                    vec![modal_footer(cancel(w, cx), ok(w, cx))]
+                })
                 .child(
                     v_flex()
-                        .gap(px(12.))
+                        .px(px(16.))
+                        .py(px(16.))
+                        .gap(px(16.))
                         .child(
-                            h_flex()
-                                .gap(px(12.))
-                                .items_center()
-                                .child(info_field("ID", &id))
-                                .child(badge_el(protocol, proto_color))
-                                .child(if enabled {
-                                    badge_el("ACTIVE", colors::green())
-                                } else {
-                                    badge_el("INACTIVE", colors::muted())
-                                }),
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("NAME"))
+                                .child(Input::new(&name_c)),
                         )
                         .child(
-                            h_flex()
-                                .gap(px(16.))
-                                .child(info_field("Address", &address))
-                                .child(info_field("Auth", &auth_summary)),
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("COLOR (hex)"))
+                                .child(Input::new(&color_c)),
+                        )
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("TARGETS  (dev:eth0, tun:wg0, proxy:id)"))
+                                .child(Input::new(&targets_c)),
+                        )
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("DNS SERVERS  (comma-separated, empty = system)"))
+                                .child(Input::new(&dns_c)),
                         ),
                 )
-                .on_ok(|_, _, _| true)
+                .on_ok(move |_, _, cx| {
+                    let name      = name_i.read(cx).value().to_string();
+                    let color     = color_i.read(cx).value().to_string();
+                    let targets_s = targets_i.read(cx).value().to_string();
+                    let dns_s     = dns_i.read(cx).value().to_string();
+                    let targets   = helpers::parse_targets_csv(&targets_s);
+                    let dns       = helpers::parse_dns_csv(&dns_s);
+                    let id        = eid.clone().unwrap_or_else(|| format!("eg-{}", crate::daemon::unix_now()));
+                    let egress = Egress {
+                        id,
+                        name:    if name.trim().is_empty()  { "New Egress".into() } else { name },
+                        color:   if color.trim().is_empty() { "#3b82f6".into()    } else { color },
+                        targets,
+                        dns_servers: dns,
+                        is_system_default: false,
+                        is_available: false,
+                    };
+                    let to_send  = egress.clone();
+                    let sock_c   = sock.clone();
+                    let state_wc = state_w.clone();
+                    let editing  = eid.is_some();
+                    cx.spawn(async move |cx| {
+                        let res = cx
+                            .background_executor()
+                            .spawn(async move {
+                                crate::daemon::send_request(
+                                    &sock_c,
+                                    &ControlRequest::UpsertEgress(to_send),
+                                )
+                            })
+                            .await;
+                        if let Some(st) = state_wc.upgrade() {
+                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                match res {
+                                    Ok(ControlResponse::Ok) => {
+                                        if editing {
+                                            if let Some(e) = s.egresses.iter_mut().find(|e| e.id == egress.id) {
+                                                *e = egress;
+                                            }
+                                            s.status = Some("Egress updated.".into());
+                                        } else {
+                                            s.egresses.push(egress);
+                                            s.status = Some("Egress added.".into());
+                                        }
+                                        s.load_generation = s.load_generation.saturating_add(1);
+                                    }
+                                    Ok(ControlResponse::Error(msg)) => {
+                                        s.status = Some(format!("save failed: {msg}"));
+                                    }
+                                    Err(e) => {
+                                        s.status = Some(format!("save failed: {e}"));
+                                    }
+                                    _ => {
+                                        s.status = Some("unexpected response".into());
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                    true
+                })
         });
     }
-}
 
-// ── Helper elements ────────────────────────────────────────────────────
+    /// Open the proxy form dialog for adding (existing = None) or editing (existing = Some).
+    fn open_proxy_form_dialog(
+        &mut self,
+        existing: Option<ProxyConfig>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state_weak = self.state.downgrade();
+        let socket_path = self.state.read(cx).socket_path.clone();
 
-fn info_field(label: &str, value: &str) -> gpui::AnyElement {
-    v_flex()
-        .gap(px(2.))
-        .child(
-            div()
-                .text_size(px(10.))
-                .text_color(colors::muted())
-                .child(label.to_string()),
-        )
-        .child(div().text_color(colors::text()).child(value.to_string()))
-        .into_any_element()
-}
+        let is_edit = existing.is_some();
+        let existing_id = existing.as_ref().map(|p| p.id.clone());
+        let init_name = existing.as_ref().map(|p| p.name.as_str()).unwrap_or("New Proxy").to_string();
+        let init_host = existing.as_ref().map(|p| p.host.as_str()).unwrap_or("127.0.0.1").to_string();
+        let init_port = existing.as_ref().map(|p| p.port).unwrap_or(1080).to_string();
+        let init_proto = existing.as_ref().map(|p| p.protocol.clone()).unwrap_or(ProxyProtocol::Socks5);
+        let init_auth = existing.map(|p| p.auth.clone()).unwrap_or(ProxyAuth::None);
 
-fn badge_el(label: &str, color: gpui::Hsla) -> gpui::AnyElement {
-    div()
-        .text_size(px(10.))
-        .text_color(color)
-        .px(px(6.))
-        .py(px(2.))
-        .rounded(px(3.))
-        .border_1()
-        .border_color(color)
-        .bg(colors::bg())
-        .child(label.to_string())
-        .into_any_element()
+        // Create input entities before the Fn dialog closure.
+        let name_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(init_name.clone(), window, cx);
+            s
+        });
+        let host_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(init_host.clone(), window, cx);
+            s
+        });
+        let port_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(init_port.clone(), window, cx);
+            s
+        });
+
+        // Shared protocol — interior mutability because dialog closure is Fn.
+        let selected_proto: Arc<Mutex<ProxyProtocol>> = Arc::new(Mutex::new(init_proto));
+
+        let name_input_c = name_input.clone();
+        let host_input_c = host_input.clone();
+        let port_input_c = port_input.clone();
+        let proto_c = selected_proto.clone();
+
+        let hdr_icon  = if is_edit { "✏" } else { "⊕" };
+        let hdr_title = if is_edit { "EDIT PROXY" } else { "ADD PROXY" };
+        let ok_label  = if is_edit { "Save" } else { "Add Proxy" };
+
+        window.open_dialog(cx, move |dialog, _, _cx| {
+            let cur_proto = proto_c.lock().unwrap().clone();
+
+            let proto_socks5 = selected_proto.clone();
+            let proto_http   = selected_proto.clone();
+            let proto_ss     = selected_proto.clone();
+            let proto_for_ok = proto_c.clone();
+
+            let (sc, hc, sc2) = match cur_proto {
+                ProxyProtocol::Socks5      => (colors::green(),   colors::muted(),   colors::muted()),
+                ProxyProtocol::Http        => (colors::muted(),   colors::primary(), colors::muted()),
+                ProxyProtocol::Shadowsocks => (colors::muted(),   colors::muted(),   colors::teal()),
+            };
+
+            let name_i   = name_input_c.clone();
+            let host_i   = host_input_c.clone();
+            let port_i   = port_input_c.clone();
+            let state_w  = state_weak.clone();
+            let sock     = socket_path.clone();
+            let eid      = existing_id.clone();
+            let auth_val = init_auth.clone();
+
+            dialog
+                .p(px(0.))
+                .close_button(false)
+                .title(modal_header(hdr_icon, hdr_title))
+                .w(px(480.))
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text(ok_label)
+                        .cancel_text("Cancel"),
+                )
+                .footer(|ok, cancel, w, cx| {
+                    vec![modal_footer(cancel(w, cx), ok(w, cx))]
+                })
+                .child(
+                    v_flex()
+                        .px(px(16.))
+                        .py(px(16.))
+                        .gap(px(16.))
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("NAME"))
+                                .child(Input::new(&name_input_c)),
+                        )
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("PROTOCOL"))
+                                .child(
+                                    h_flex()
+                                        .gap(px(8.))
+                                        .child(proto_btn("SOCKS5", sc, sc, move |_, _, _| {
+                                            *proto_socks5.lock().unwrap() = ProxyProtocol::Socks5;
+                                        }))
+                                        .child(proto_btn("HTTP", hc, hc, move |_, _, _| {
+                                            *proto_http.lock().unwrap() = ProxyProtocol::Http;
+                                        }))
+                                        .child(proto_btn("SS", sc2, sc2, move |_, _, _| {
+                                            *proto_ss.lock().unwrap() = ProxyProtocol::Shadowsocks;
+                                        })),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .gap(px(4.))
+                                        .child(field_label("HOST"))
+                                        .child(Input::new(&host_input_c)),
+                                )
+                                .child(
+                                    v_flex()
+                                        .w(px(96.))
+                                        .gap(px(4.))
+                                        .child(field_label("PORT"))
+                                        .child(Input::new(&port_input_c)),
+                                ),
+                        ),
+                )
+                .on_ok(move |_, _, cx| {
+                    let name     = name_i.read(cx).value().to_string();
+                    let host     = host_i.read(cx).value().to_string();
+                    let port_str = port_i.read(cx).value().to_string();
+                    let port: u16 = port_str.trim().parse().unwrap_or(1080);
+                    let proto    = proto_for_ok.lock().unwrap().clone();
+                    let id       = eid.clone().unwrap_or_else(|| format!("px-{}", crate::daemon::unix_now()));
+                    let proxy = ProxyConfig {
+                        id,
+                        name: if name.trim().is_empty() { "New Proxy".into() } else { name },
+                        protocol: proto,
+                        host: if host.trim().is_empty() { "127.0.0.1".into() } else { host },
+                        port,
+                        auth: auth_val.clone(),
+                        enabled: true,
+                    };
+                    let to_send  = proxy.clone();
+                    let sock_c   = sock.clone();
+                    let state_wc = state_w.clone();
+                    let editing  = eid.is_some();
+                    cx.spawn(async move |cx| {
+                        let res = cx
+                            .background_executor()
+                            .spawn(async move {
+                                crate::daemon::send_request(
+                                    &sock_c,
+                                    &ControlRequest::UpsertProxy(to_send),
+                                )
+                            })
+                            .await;
+                        if let Some(st) = state_wc.upgrade() {
+                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                match res {
+                                    Ok(ControlResponse::Ok) => {
+                                        if editing {
+                                            if let Some(p) = s.proxies.iter_mut().find(|p| p.id == proxy.id) {
+                                                *p = proxy;
+                                            }
+                                            s.status = Some("Proxy updated.".into());
+                                        } else {
+                                            s.proxies.push(proxy);
+                                            s.status = Some("Proxy added.".into());
+                                        }
+                                        s.load_generation = s.load_generation.saturating_add(1);
+                                    }
+                                    Ok(ControlResponse::Error(msg)) => {
+                                        s.status = Some(format!("save failed: {msg}"));
+                                    }
+                                    Err(e) => {
+                                        s.status = Some(format!("save failed: {e}"));
+                                    }
+                                    _ => {
+                                        s.status = Some("unexpected response".into());
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                    true
+                })
+        });
+    }
 }
 
 // ── Render ─────────────────────────────────────────────────────────────
 
 impl Render for SettingsApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_tables(cx);
 
         let state = self.state.read(cx);
@@ -425,12 +650,46 @@ impl Render for SettingsApp {
 
         // Add button for egress/proxies tabs
         let add_button: Option<gpui::AnyElement> = match active_tab {
-            SettingsTab::Egress => {
-                Some(render_add_egress_button(weak.clone(), socket_path.clone()))
-            }
-            SettingsTab::Proxies => {
-                Some(render_add_proxy_button(weak.clone(), socket_path.clone()))
-            }
+            SettingsTab::Egress => Some(
+                div()
+                    .id(gpui::ElementId::Name("add-egress-btn".into()))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .bg(colors::primary())
+                    .text_color(colors::bg())
+                    .px(px(12.))
+                    .py(px(6.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_size(px(10.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_egress_form_dialog(None, window, cx);
+                    }))
+                    .child("+ ADD EGRESS")
+                    .into_any_element(),
+            ),
+            SettingsTab::Proxies => Some(
+                div()
+                    .id(gpui::ElementId::Name("add-proxy-btn".into()))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .bg(colors::primary())
+                    .text_color(colors::bg())
+                    .px(px(12.))
+                    .py(px(6.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_size(px(10.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_proxy_form_dialog(None, window, cx);
+                    }))
+                    .child("+ ADD PROXY")
+                    .into_any_element(),
+            ),
             SettingsTab::Rules => None,
         };
 
@@ -524,147 +783,10 @@ impl Render for SettingsApp {
             )
             // Footer with add button
             .children(footer_el)
+            // Dialog layer — must be rendered here or dialogs never appear
+            .children(gpui_component::Root::render_dialog_layer(window, &mut **cx))
             .into_any_element()
     }
 }
 
-// ── Add Egress button ──────────────────────────────────────────────────
 
-fn render_add_egress_button(
-    state_weak: WeakEntity<SettingsState>,
-    socket_path: String,
-) -> gpui::AnyElement {
-    div()
-        .id(gpui::ElementId::Name("add-egress-btn".into()))
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .bg(colors::primary())
-        .text_color(colors::bg())
-        .px(px(12.))
-        .py(px(6.))
-        .rounded(px(4.))
-        .cursor_pointer()
-        .text_size(px(10.))
-        .font_weight(gpui::FontWeight::BOLD)
-        .on_click({
-            let weak = state_weak.clone();
-            let sock = socket_path.clone();
-            move |_, _, cx| {
-                let weak_c = weak.clone();
-                let sock_c = sock.clone();
-                cx.spawn(async move |cx| {
-                    let new_eg = Egress {
-                        id: format!("eg-{}", daemon::unix_now()),
-                        name: "New Egress".into(),
-                        color: "#3b82f6".into(),
-                        targets: vec![RouteTarget::Device("eth0".into())],
-                        dns_servers: vec![],
-                        is_system_default: false,
-                        is_available: false,
-                    };
-                    let to_send = new_eg.clone();
-                    let res = cx
-                        .background_executor()
-                        .spawn(async move {
-                            daemon::send_request(&sock_c, &ControlRequest::UpsertEgress(to_send))
-                        })
-                        .await;
-                    if let Some(st) = weak_c.upgrade() {
-                        let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
-                            match res {
-                                Ok(ControlResponse::Ok) => {
-                                    s.egresses.push(new_eg);
-                                    s.load_generation = s.load_generation.saturating_add(1);
-                                    s.status = Some("Egress added.".into());
-                                }
-                                Ok(ControlResponse::Error(msg)) => {
-                                    s.status = Some(format!("add failed: {msg}"));
-                                }
-                                Err(e) => {
-                                    s.status = Some(format!("add failed: {e}"));
-                                }
-                                _ => {
-                                    s.status = Some("unexpected response".into());
-                                }
-                            }
-                            cx.notify();
-                        });
-                    }
-                })
-                .detach();
-            }
-        })
-        .child("+ ADD EGRESS")
-        .into_any_element()
-}
-
-// ── Add Proxy button ───────────────────────────────────────────────────
-
-fn render_add_proxy_button(
-    state_weak: WeakEntity<SettingsState>,
-    socket_path: String,
-) -> gpui::AnyElement {
-    div()
-        .id(gpui::ElementId::Name("add-proxy-btn".into()))
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .bg(colors::primary())
-        .text_color(colors::bg())
-        .px(px(12.))
-        .py(px(6.))
-        .rounded(px(4.))
-        .cursor_pointer()
-        .text_size(px(10.))
-        .font_weight(gpui::FontWeight::BOLD)
-        .on_click({
-            let weak = state_weak.clone();
-            let sock = socket_path.clone();
-            move |_, _, cx| {
-                let weak_c = weak.clone();
-                let sock_c = sock.clone();
-                cx.spawn(async move |cx| {
-                    let new_proxy = ProxyConfig {
-                        id: format!("px-{}", daemon::unix_now()),
-                        name: "New Proxy".into(),
-                        protocol: ProxyProtocol::Socks5,
-                        host: "127.0.0.1".into(),
-                        port: 1080,
-                        auth: ProxyAuth::None,
-                        enabled: true,
-                    };
-                    let to_send = new_proxy.clone();
-                    let res = cx
-                        .background_executor()
-                        .spawn(async move {
-                            daemon::send_request(&sock_c, &ControlRequest::UpsertProxy(to_send))
-                        })
-                        .await;
-                    if let Some(st) = weak_c.upgrade() {
-                        let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
-                            match res {
-                                Ok(ControlResponse::Ok) => {
-                                    s.proxies.push(new_proxy);
-                                    s.status = Some("Proxy added.".into());
-                                }
-                                Ok(ControlResponse::Error(msg)) => {
-                                    s.status = Some(format!("add failed: {msg}"));
-                                }
-                                Err(e) => {
-                                    s.status = Some(format!("add failed: {e}"));
-                                }
-                                _ => {
-                                    s.status = Some("unexpected response".into());
-                                }
-                            }
-                            cx.notify();
-                        });
-                    }
-                })
-                .detach();
-            }
-        })
-        .child("+ ADD PROXY")
-        .into_any_element()
-}

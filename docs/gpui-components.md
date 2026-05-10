@@ -451,7 +451,7 @@ Modal dialogs for user interaction. Requires `Root` wrapper and `WindowExt` trai
 ### Key Types
 
 ```rust
-use gpui_component::dialog::Dialog;
+use gpui_component::dialog::{Dialog, DialogButtonProps};
 use gpui_component::{Root, WindowExt as _};
 ```
 
@@ -461,16 +461,20 @@ use gpui_component::{Root, WindowExt as _};
 // In a method with &mut Window and &mut Context<Self>:
 window.open_dialog(cx, move |dialog, _, _| {
     dialog
-        .title("Item Details")
-        .w(px(500.))
-        .close_button(true)
+        .title("Add Item")
+        .w(px(480.))
+        .button_props(
+            DialogButtonProps::default()
+                .ok_text("Save")
+                .cancel_text("Cancel"),
+        )
+        .confirm()           // ← REQUIRED to show OK/Cancel buttons
         .child(
             v_flex()
                 .gap(px(12.))
                 .child(div().child("Content here"))
         )
-        .on_ok(|_, _, _| true)      // Return true to close
-        .on_cancel(|_, _, _| true)   // Return true to close
+        .on_ok(|_, _, _| true)   // Return true to close
 });
 ```
 
@@ -488,7 +492,7 @@ window.open_dialog(cx, move |dialog, _, _| {
 ### Dialog Builder Methods
 
 ```rust
-Dialog::new(window, cx)
+dialog
     .title(impl IntoElement)     // Dialog title (any element)
     .w(px(500.))                 // Fixed width
     .max_w(px(600.))             // Max width
@@ -496,13 +500,93 @@ Dialog::new(window, cx)
     .overlay(bool)               // Show backdrop overlay
     .overlay_closable(bool)      // Click overlay to close
     .keyboard(bool)              // Enable keyboard shortcuts
-    .confirm()                   // OK/Cancel only
-    .alert()                     // OK only
+    .button_props(               // Customise button labels/variants
+        DialogButtonProps::default()
+            .ok_text("Save")
+            .cancel_text("Cancel"),
+    )
+    .confirm()                   // Adds OK + Cancel footer buttons
+    .alert()                     // Adds OK-only footer button
     .child(impl IntoElement)     // Add content
-    .on_ok(|dialog, window, cx| bool)   // OK button handler
-    .on_cancel(|dialog, window, cx| bool) // Cancel handler
-    .on_close(|dialog, window, cx|)      // Close handler
+    .on_ok(|_, window, cx| bool)      // OK handler — return true to close
+    .on_cancel(|_, window, cx| bool)  // Cancel handler — return true to close
+    .on_close(|_, window, cx|)        // Called after ok/cancel closes
 ```
+
+### ⚠ `.confirm()` / `.alert()` Is Required for Buttons to Appear (unless using `.footer()`)
+
+`on_ok` alone does **not** render any buttons. You must call `.confirm()` (OK + Cancel), `.alert()` (OK only), **or** provide a custom `.footer()` closure to get buttons. Without one of these the dialog opens but has no way to be confirmed.
+
+```rust
+// ❌ BROKEN — no buttons shown, dialog cannot be confirmed
+dialog.on_ok(|_, _, _| true)
+
+// ✅ CORRECT — footer with OK + Cancel rendered
+dialog.confirm().on_ok(|_, _, _| true)
+
+// ✅ ALSO CORRECT — custom footer (do NOT also call .confirm())
+dialog
+    .footer(|ok, cancel, w, cx| vec![modal_footer(cancel(w, cx), ok(w, cx))])
+    .on_ok(|_, _, _| true)
+```
+
+### Custom Full-Bleed Dialog Header
+
+`Dialog` implements the `Styled` trait, so calling `.p(px(0.))` zeroes all internal padding. Combined with `.close_button(false)` and a custom `.title()`, this gives a full-width header bar:
+
+```rust
+use crate::components::{field_label, modal_footer, modal_header};
+
+window.open_dialog(cx, move |dialog, _, _cx| {
+    dialog
+        .p(px(0.))                   // zero internal padding → full-bleed title
+        .close_button(false)         // hide default X (we add our own in modal_header)
+        .title(modal_header("⊕", "ADD EGRESS"))
+        .w(px(480.))
+        .button_props(
+            DialogButtonProps::default()
+                .ok_text("Save")
+                .cancel_text("Cancel"),
+        )
+        .footer(|ok, cancel, w, cx| vec![modal_footer(cancel(w, cx), ok(w, cx))])
+        .child(
+            v_flex()
+                .px(px(16.))
+                .py(px(16.))
+                .gap(px(16.))
+                .child(v_flex().gap(px(4.))
+                    .child(field_label("NAME"))
+                    .child(Input::new(&name_c))
+                )
+        )
+        .on_ok(move |_, _, cx| {
+            // save ...
+            true
+        })
+});
+```
+
+**Key rules:**
+- `.p(px(0.))` must be called before `.title()` — it tells Dialog to render the title wrapper with zero padding, making it flush with the dialog edges.
+- Do **not** call `.confirm()` when using `.footer()` — they conflict; `.footer()` provides the buttons directly.
+- `window.close_dialog(cx)` can be called inside any `on_click` handler where `window: &mut Window` is available (e.g. inside `modal_header`'s ✕ button).
+
+### ⚠ `render_dialog_layer` Must Be Called in Your `Render` Impl
+
+`window.open_dialog(...)` pushes the dialog into `Root::active_dialogs`, but `Root::render` does **not** render it automatically. You must call `Root::render_dialog_layer` yourself inside your view's `render()`:
+
+```rust
+impl Render for MyApp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .child(/* your content */)
+            // ← Without this line, dialogs are registered but never appear
+            .children(Root::render_dialog_layer(window, &mut **cx))
+    }
+}
+```
+
+Note: `cx` is `&mut Context<Self>` but `render_dialog_layer` expects `&mut App`. Use `&mut **cx` to explicitly double-deref (auto-coercion does not work in free-function call position even though `Context<T>: DerefMut<Target = App>`).
 
 ### Root Requirement
 
@@ -513,6 +597,132 @@ cx.open_window(WindowOptions { ... }, |window, cx| {
     let view = cx.new(|cx| MyView::new(state, window, cx));
     cx.new(|cx| Root::new(view, window, cx))
 });
+```
+
+### Input Fields Inside Dialogs
+
+The `Input` component **is** available in 0.5.1. Create `InputState` entities **before** the dialog closure (since the closure is `Fn`, not `FnOnce`):
+
+```rust
+fn open_form_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let name_input = cx.new(|cx| {
+        let mut s = InputState::new(window, cx);
+        s.set_value("default value", window, cx);
+        s
+    });
+    let name_input_c = name_input.clone();
+
+    window.open_dialog(cx, move |dialog, _, _cx| {
+        dialog
+            .confirm()
+            .child(Input::new(&name_input_c))
+            .on_ok(move |_, _, cx| {
+                let value = name_input_c.read(cx).value().to_string();
+                // use value...
+                true
+            })
+    });
+}
+```
+
+For shared mutable state across the `Fn` closure (e.g. a protocol selector), use `Arc<Mutex<T>>`:
+
+```rust
+let selected: Arc<Mutex<MyEnum>> = Arc::new(Mutex::new(MyEnum::Default));
+let selected_c = selected.clone();
+
+window.open_dialog(cx, move |dialog, _, _cx| {
+    let for_btn = selected.clone();
+    let for_ok  = selected_c.clone();
+    dialog
+        .confirm()
+        .child(div().on_click(move |_, _, _| {
+            *for_btn.lock().unwrap() = MyEnum::Other;
+        }))
+        .on_ok(move |_, _, _| {
+            let val = for_ok.lock().unwrap().clone();
+            // use val...
+            true
+        })
+});
+```
+
+## Design System Components (`components/modal.rs`)
+
+Reusable UI primitives matching the LogiGuard design language. Import from `crate::components::*`.
+
+### `modal_header(icon, title)`
+
+Full-width dialog title bar with icon + UPPERCASE title on the left, ✕ close button on the right.
+
+```rust
+pub fn modal_header(icon: &str, title: &str) -> impl IntoElement
+```
+
+- Background: `surface_container_high`
+- Bottom border: `colors::border()`
+- ✕ button calls `window.close_dialog(cx)` — requires `gpui_component::WindowExt as _`
+
+Usage: pass as `.title(modal_header("⊕", "ADD PROXY"))` on a Dialog that has `.p(px(0.))`.
+
+### `modal_footer(cancel, ok)`
+
+Styled footer bar with top border and `surface_container_high` background. Accepts already-rendered cancel and ok `AnyElement`s.
+
+```rust
+pub fn modal_footer(cancel: AnyElement, ok: AnyElement) -> AnyElement
+```
+
+Usage inside `.footer()`:
+```rust
+dialog.footer(|ok, cancel, w, cx| vec![modal_footer(cancel(w, cx), ok(w, cx))])
+```
+
+Note: `RenderButtonFn` is a private type alias in gpui-component. Never name it — let the compiler infer closure parameter types.
+
+### `field_label(text)`
+
+UPPERCASE label for form fields (10px bold muted text):
+
+```rust
+pub fn field_label(text: &str) -> AnyElement
+```
+
+### `table_badge(label, color)`
+
+Inline bordered badge for Status, Type, and Protocol columns:
+
+```rust
+pub fn table_badge(label: &str, color: Hsla) -> AnyElement
+```
+
+### `action_btn(id, label, color)`
+
+Small outline button for table row actions. Returns `Stateful<Div>` so callers can chain `.on_click(...)`:
+
+```rust
+pub fn action_btn(id: impl Into<SharedString>, label: &str, color: Hsla) -> Stateful<Div>
+```
+
+Border color defaults to `color`. For toggle buttons where text and border differ, override with `.border_color(other)`:
+
+```rust
+action_btn("tog-btn", "Disable", colors::muted())
+    .border_color(colors::border())    // overrides the default
+    .on_click(move |_, _, cx| { ... })
+```
+
+### `proto_btn(label, text_color, border_color, on_click)`
+
+Protocol selector button for proxy form dialogs (SOCKS5 / HTTP / SS):
+
+```rust
+pub fn proto_btn(
+    label: &str,
+    text_color: Hsla,
+    border_color: Hsla,
+    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> AnyElement
 ```
 
 ## TabBar Component
@@ -538,7 +748,6 @@ Custom themes are possible but require deeper configuration. For most cases, use
 
 ## Component Library Limitations (0.5.1)
 
-- No built-in `Input` or `Select` in 0.5.1 — use custom GPUI elements
 - No `DataTable` (git-only) — use `Table` with `TableDelegate` instead
 - No `DialogHeader` / `DialogTitle` / `DialogFooter` (git-only) — use `Dialog::title()` and `.child()` instead
 - Theme customization is limited to two modes (Dark/Light)
@@ -551,9 +760,10 @@ The crates.io version (0.5.1) differs from the git repo version:
 |---------|-----------------|----------|
 | Table | ✅ `Table<D>` | ✅ `DataTable<D>` |
 | TableDelegate | ✅ | ✅ |
-| Dialog | ✅ basic (`Dialog::new`) | ✅ rich (`DialogHeader`, `DialogTitle`, etc.) |
+| Dialog | ✅ `Dialog` + `DialogButtonProps` | ✅ rich (`DialogHeader`, `DialogTitle`, etc.) |
 | TabBar | ✅ | ✅ |
-| Input/Select | ❌ | ✅ |
+| Input | ✅ `Input` + `InputState` | ✅ |
+| Select | ✅ | ✅ |
 | Sizable | ✅ | ✅ |
 
 **Official installation uses git repos:**

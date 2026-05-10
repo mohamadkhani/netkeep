@@ -3,13 +3,14 @@
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{ProxyAuth, ProxyConfig, ProxyProtocol};
 use gpui::{
-    App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement,
+    App, AppContext as _, Context, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
 };
 
 use gpui_component::table::{Column, TableDelegate, TableState};
 
 use crate::colors;
+use crate::components::{action_btn, table_badge};
 use crate::daemon;
 
 use super::SettingsState;
@@ -40,7 +41,7 @@ impl ProxiesDelegate {
                 Column::new("address", "Address").width(px(160.)),
                 Column::new("auth", "Auth").width(px(120.)),
                 Column::new("status", "Status").width(px(80.)),
-                Column::new("controls", "").width(px(140.)).resizable(false),
+                Column::new("controls", "").width(px(180.)).resizable(false),
             ],
         }
     }
@@ -83,22 +84,7 @@ impl TableDelegate for ProxiesDelegate {
                     ProxyProtocol::Http => ("HTTP", colors::primary()),
                     ProxyProtocol::Shadowsocks => ("SS", colors::teal()),
                 };
-                div()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(color)
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(color)
-                            .bg(colors::bg())
-                            .child(label.to_string()),
-                    )
-                    .into_any_element()
+                table_badge(label, color)
             }
             // Address
             2 => div()
@@ -124,50 +110,47 @@ impl TableDelegate for ProxiesDelegate {
                 } else {
                     ("INACTIVE", colors::muted())
                 };
-                div()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(color)
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(color)
-                            .bg(colors::bg())
-                            .child(label.to_string()),
-                    )
-                    .into_any_element()
+                table_badge(label, color)
             }
-            // Controls (toggle + delete)
+            // Controls (edit + toggle + delete)
             5 => {
-                let pid_toggle = proxy.id.clone();
-                let pid_del = proxy.id.clone();
+                let proxy_edit   = proxy.clone();
                 let proxy_toggle = proxy.clone();
-                let socket_toggle = self.socket_path.clone();
+                let pid_del      = proxy.id.clone();
+
+                let state_edit   = self.state_weak.clone();
                 let state_toggle = self.state_weak.clone();
-                let sock_del = self.socket_path.clone();
-                let state_del = self.state_weak.clone();
+                let state_del    = self.state_weak.clone();
+
+                let socket_toggle = self.socket_path.clone();
+                let sock_del      = self.socket_path.clone();
 
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.))
+                    // Edit
+                    .child(
+                        action_btn(format!("px-edit-{}", proxy.id), "Edit", colors::primary())
+                            .on_click(move |_, _, cx| {
+                                let proxy = proxy_edit.clone();
+                                if let Some(st) = state_edit.upgrade() {
+                                    let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                        s.proxy_edit_request = Some(proxy);
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
                     // Toggle
                     .child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("px-tog-{pid_toggle}").into()))
-                            .text_size(px(10.))
-                            .text_color(if proxy.enabled { colors::muted() } else { colors::green() })
-                            .cursor_pointer()
-                            .px(px(4.))
-                            .py(px(1.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(if proxy.enabled { colors::border() } else { colors::green() })
-                            .on_click(move |_, _, cx| {
+                        action_btn(
+                            format!("px-tog-{}", proxy.id),
+                            if proxy.enabled { "Disable" } else { "Enable" },
+                            if proxy.enabled { colors::muted() } else { colors::green() },
+                        )
+                        .border_color(if proxy.enabled { colors::border() } else { colors::green() })
+                        .on_click(move |_, _, cx| {
                                 let mut toggled = proxy_toggle.clone();
                                 toggled.enabled = !toggled.enabled;
                                 let to_send = toggled.clone();
@@ -187,6 +170,9 @@ impl TableDelegate for ProxiesDelegate {
                                         let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                             match res {
                                                 Ok(ControlResponse::Ok) => {
+                                                    if let Some(p) = s.proxies.iter_mut().find(|p| p.id == toggled.id) {
+                                                        p.enabled = toggled.enabled;
+                                                    }
                                                     s.status = Some("Proxy updated.".into());
                                                 }
                                                 Ok(ControlResponse::Error(msg)) => {
@@ -204,21 +190,11 @@ impl TableDelegate for ProxiesDelegate {
                                     }
                                 })
                                 .detach();
-                            })
-                            .child(if proxy.enabled { "Disable" } else { "Enable" }),
+                            }),
                     )
                     // Delete
                     .child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("px-del-{pid_del}").into()))
-                            .text_size(px(11.))
-                            .text_color(colors::error())
-                            .cursor_pointer()
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(colors::error())
+                        action_btn(format!("px-del-{pid_del}"), "Delete", colors::error())
                             .on_click(move |_, _, cx| {
                                 let pid_req = pid_del.clone();
                                 let pid_cmp = pid_del.clone();
@@ -256,8 +232,7 @@ impl TableDelegate for ProxiesDelegate {
                                     }
                                 })
                                 .detach();
-                            })
-                            .child("Delete"),
+                            }),
                     )
                     .into_any_element()
             }

@@ -3,13 +3,14 @@
 use control_api::ControlRequest;
 use core_types::{Rule, RuleAction};
 use gpui::{
-    App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement,
+    App, AppContext as _, Context, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
 };
 
 use gpui_component::table::{Column, TableDelegate, TableState};
 
 use crate::colors;
+use crate::components::action_btn;
 use crate::daemon;
 
 use super::SettingsState;
@@ -135,54 +136,39 @@ impl TableDelegate for RulesDelegate {
                     .items_center()
                     .gap(px(6.))
                     .child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("rule-en-{id_toggle}").into()))
-                            .text_size(px(11.))
-                            .text_color(if enabled { colors::muted() } else { colors::green() })
-                            .cursor_pointer()
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(if enabled { colors::border() } else { colors::green() })
-                            .on_click(move |_, _, cx| {
-                                let mut r = rule_toggle.clone();
-                                let sock = socket_toggle.clone();
-                                let sw = state_toggle.clone();
-                                let tid = id_toggle.clone();
-                                cx.spawn(async move |cx| {
-                                    r.enabled = !r.enabled;
-                                    let _ = cx
-                                        .background_executor()
-                                        .spawn(async move {
-                                            daemon::send_request(&sock, &ControlRequest::AddRule(r))
-                                        })
-                                        .await;
-                                    if let Some(st) = sw.upgrade() {
-                                        let _ = cx.update_entity(&st, |s, cx| {
-                                            if let Some(x) = s.rules.iter_mut().find(|x| x.id == tid)
-                                            {
-                                                x.enabled = !x.enabled;
-                                            }
-                                            cx.notify();
-                                        });
-                                    }
-                                })
-                                .detach();
+                        action_btn(
+                            format!("rule-en-{id_toggle}"),
+                            if enabled { "Disable" } else { "Enable" },
+                            if enabled { colors::muted() } else { colors::green() },
+                        )
+                        .border_color(if enabled { colors::border() } else { colors::green() })
+                        .on_click(move |_, _, cx| {
+                            let mut r = rule_toggle.clone();
+                            let sock = socket_toggle.clone();
+                            let sw = state_toggle.clone();
+                            let tid = id_toggle.clone();
+                            cx.spawn(async move |cx| {
+                                r.enabled = !r.enabled;
+                                let _ = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        daemon::send_request(&sock, &ControlRequest::AddRule(r))
+                                    })
+                                    .await;
+                                if let Some(st) = sw.upgrade() {
+                                    let _ = cx.update_entity(&st, |s, cx| {
+                                        if let Some(x) = s.rules.iter_mut().find(|x| x.id == tid) {
+                                            x.enabled = !x.enabled;
+                                        }
+                                        cx.notify();
+                                    });
+                                }
                             })
-                            .child(if enabled { "Disable" } else { "Enable" }),
+                            .detach();
+                        }),
                     )
                     .child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("rule-del-{id_del}").into()))
-                            .text_size(px(11.))
-                            .text_color(colors::error())
-                            .cursor_pointer()
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(colors::error())
+                        action_btn(format!("rule-del-{id_del}"), "Delete", colors::error())
                             .on_click(move |_, _, cx| {
                                 let rid = id_del.clone();
                                 let sock = sock_del.clone();
@@ -206,8 +192,7 @@ impl TableDelegate for RulesDelegate {
                                     }
                                 })
                                 .detach();
-                            })
-                            .child("Delete"),
+                            }),
                     )
                     .into_any_element()
             }

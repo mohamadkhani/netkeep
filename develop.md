@@ -420,7 +420,18 @@ enabled target wins. If no enabled targets exist, the egress is unavailable.
 - [x] Double-click on egress/proxy rows opens Dialog with details
 - [x] Proxy management views (Proxies tab) with protocol badges, toggle, delete
 - [ ] Implement EgressTarget with priority ordering
-- [ ] Editable fields in dialogs (currently read-only detail view)
+- [x] Add Proxy button opens a form modal (Name, Protocol selector, Host, Port) using gpui-component `Input`
+- [x] Add Egress button opens a form modal (Name, Color, Targets CSV, DNS CSV)
+- [x] Edit button on proxy rows opens pre-filled Edit Proxy modal
+- [x] Edit button on egress rows opens pre-filled Edit Egress modal
+- [x] Custom design-system modal header (full-bleed title bar, ✕ button, `surface-container-high` bg)
+- [x] Custom modal footer (border-top separator, Cancel + Save buttons)
+- [x] Extracted shared UI primitives into `components/modal.rs`: `modal_header`, `modal_footer`, `field_label`, `table_badge`, `action_btn`, `proto_btn`
+- [x] Refactored all tab delegates to use `table_badge` and `action_btn` from components
+- [x] EgressDelegate controls column widened to 160px with Edit + Delete buttons
+- [x] Added `parse_targets_csv` helper for converting text field input to `Vec<RouteTarget>`
+- [ ] Auth fields in proxy form dialog (Basic / Shadowsocks)
+- [ ] Implement EgressTarget with priority ordering
 
 ## 10) Progress Log
 
@@ -549,6 +560,20 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Fixed `subscribe_in` returning `Subscription` (not `()`) — stored in `_subscriptions` Vec
 - [x] Updated docs: develop.md, architecture.md, implementation-status.md, gpui-components.md
 - [x] Created docs/gpui-settings.md for settings window architecture guide
+
+### 2026-05-11 (session 11 — egress/proxy form dialogs + component extraction)
+
+- [x] Added `open_egress_form_dialog(existing)` — form with Name, Color, Targets CSV, DNS CSV fields
+- [x] Added `open_proxy_form_dialog(existing)` — form with Name, Protocol selector, Host, Port fields
+- [x] Both dialogs use custom design-system header/footer: `.p(px(0.))` + `modal_header` + `modal_footer`
+- [x] Edit button in `EgressDelegate` writes `egress_edit_request` to `SettingsState`; observer drains it and opens the dialog
+- [x] Double-click on egress row (non-system) also opens edit form
+- [x] Extracted all reusable UI primitives to `apps/gpui/src/components/modal.rs`
+- [x] `action_btn` returns `Stateful<Div>` (not `Div`) to allow `.on_click()` chaining
+- [x] `table_badge` and `action_btn` used consistently across all three tab delegates
+- [x] Added `parse_targets_csv` in `helpers.rs` for parsing `tun:`, `proxy:`, `dev:` prefixes
+- [x] EgressDelegate controls column widened to 160px
+- [x] Updated `docs/gpui-components.md`, `docs/gpui-settings.md`, `develop.md`
 
 ### 2026-05-09 (routing hardening)
 

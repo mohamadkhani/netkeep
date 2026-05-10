@@ -72,6 +72,26 @@ pub fn parse_dns_csv(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Parse a comma-separated targets string (e.g. "dev:eth0, tun:wg0, proxy:id") into RouteTargets.
+/// Bare names without a prefix are treated as Device targets.
+pub fn parse_targets_csv(s: &str) -> Vec<RouteTarget> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            if let Some(n) = t.strip_prefix("tun:") {
+                RouteTarget::Tun(n.to_string())
+            } else if let Some(n) = t.strip_prefix("proxy:") {
+                RouteTarget::Proxy(n.to_string())
+            } else if let Some(n) = t.strip_prefix("dev:") {
+                RouteTarget::Device(n.to_string())
+            } else {
+                RouteTarget::Device(t.to_string())
+            }
+        })
+        .collect()
+}
+
 /// Short human-readable summary of a route target.
 pub fn route_summary(t: &RouteTarget) -> String {
     match t {
