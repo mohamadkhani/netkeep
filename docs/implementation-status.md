@@ -1,8 +1,8 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** workspace builds cleanly; run `cargo test --workspace` for full counts  
-**Phase:** 4 / 5 (GPUI UI complete, routed relay + per-egress DNS resolver added)  
-**Last Updated:** 2026-05-09
+**Test Status:** 77 tests passing (`cargo test --workspace`)
+**Phase:** 4 / 5 (GPUI UI complete, settings window with Table/Dialog, proxy support)
+**Last Updated:** 2026-05-10
 
 ## Completed Work
 
@@ -64,7 +64,8 @@
 - [x] Imported gpui 0.2.2 and gpui-component 0.5.1 from crates.io
 - [x] Modular architecture with separate files:
   - `colors.rs` — Material Design 3 dark theme color constants (from HTML design spec)
-  - `daemon.rs` — socket IPC helpers (send_request, unix_now)
+  - `daemon.rs` — socket IPC helpers (send_request, unix_now, fetch_pending, detect_egresses)
+  - `fonts.rs` — custom font loading (Inter, SpaceGrotesk)
   - `monitor.rs` — background monitor mode (polls daemon, spawns GUI per pending)
   - `state.rs` — AppState entity (item, now_secs, make_permanent, resolved, pending_count)
   - `app.rs` — DecisionApp root view + Render impl + 1-second countdown ticker
@@ -72,6 +73,11 @@
   - `components/flow_info.rs` — grid layout with colored badges (teal protocol, IP/direction chips)
   - `components/action_footer.rs` — segmented pill scope toggle, outlined Allow/Deny buttons with icons
   - `components/status_bar.rs` — centered footer with LogiGuard branding and queue status
+  - `settings/mod.rs` — SettingsApp with Table/Dialog, tab switching, data sync
+  - `settings/rules_tab.rs` — RulesDelegate (TableDelegate) with toggle/delete actions
+  - `settings/egress_tab.rs` — EgressDelegate (TableDelegate) with type badges, delete
+  - `settings/proxies_tab.rs` — ProxiesDelegate (TableDelegate) with protocol badges, toggle/delete
+  - `settings/helpers.rs` — fetch_and_apply, parse_dns_csv, route_summary
 - [x] Material Design 3 dark theme matching HTML design spec (`design/decision_dialog_window.html`)
 - [x] Segmented pill toggle for scope selection (THIS SESSION / PERMANENTLY)
 - [x] Custom outlined buttons (green border ALLOW, error border DENY) replacing gpui-component buttons
@@ -81,7 +87,13 @@
 - [x] 1-second countdown ticker with auto-exit on timeout
 - [x] Async event handlers with weak entity references
 - [x] Monitor mode: polls daemon every 1s, spawns GUI window per new pending decision
-- [x] All 93 tests still passing with GPUI app added
+- [x] Settings window with Rules, Egress, Proxies tabs using gpui-component Table
+- [x] TableDelegate pattern for each tab with custom cell rendering
+- [x] Dialog for egress detail and proxy edit (double-click to open)
+- [x] Proxy support: ProxyConfig, ProxyProtocol, ProxyAuth types
+- [x] Proxy CRUD: control-api, state-store SQLite, daemon, CLI
+- [x] RouteTarget::Proxy(id) replaces RouteTarget::Socks
+- [x] 77 tests passing across workspace
 
 ### Routed Relay + Per-Egress DNS (2026-05-08) ✓
 
@@ -238,7 +250,8 @@ CREATE TABLE pending_decisions (
 | state-store | 8 | CRUD, persistence |
 | control-api | 5 | Request validation |
 | control-service | 12 | RPC handlers, pending lifecycle |
-| **Total** | **93** | |
+| cli | 17 | Command parsing, output formatting |
+| **Total** | **77** | |
 
 ## CLI Commands
 
@@ -400,16 +413,17 @@ LOGIGUARD_NFQUEUE=0 \
 
 ## Key Metrics
 
-- **Lines of code (Rust):** ~5,000 (crates + apps)
+- **Lines of code (Rust):** ~6,000 (crates + apps)
 - **Test code:** ~2,500 (unit + integration)
-- **Test count:** 93 passing
+- **Test count:** 77 passing
 - **Crates:** 7 (core, policy, decision, flow, enforcer, state, control)
 - **Apps:** 3 (daemon, CLI, GPUI)
-- **Database tables:** 3 (rules, flow_events, pending_decisions)
+- **Database tables:** 6 (rules, flow_events, pending_decisions, egresses, egress_targets, egress_dns_servers, proxies)
 - **Unix socket path:** `/tmp/logiguard.sock`
 - **Default timeouts:** 100s (default), 5s (UDP/QUIC), 3s (other)
 - **Queue cap:** 100 pending decisions
+- **GPUI components:** Table (TableDelegate), Dialog, TabBar, Button, Checkbox, Root
 
 ## Conclusion
 
-LogiGuard is feature-complete for MVP (Phase 1-4). Core logic tested extensively. Enforcement path integrated but ProcessResolver still mocked. Ready for Phase 2 integration testing and real-world deployment.
+LogiGuard is feature-complete for MVP (Phase 1-4). Core logic tested extensively. Settings window uses gpui-component Table and Dialog for data management. Proxy support fully implemented across all crates. Enforcement path integrated but ProcessResolver still mocked. Ready for Phase 2 integration testing and real-world deployment.

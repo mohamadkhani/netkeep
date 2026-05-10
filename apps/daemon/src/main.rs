@@ -202,6 +202,7 @@ fn route_target_to_parts(target: &RouteTarget) -> (i64, &str) {
     match target {
         RouteTarget::Tun(v) => (1, v.as_str()),
         RouteTarget::Device(v) => (2, v.as_str()),
+        RouteTarget::Proxy(v) => (3, v.as_str()),
     }
 }
 
@@ -449,6 +450,7 @@ fn fwmark_for_route_probe(target: &RouteTarget) -> Option<u32> {
     match target {
         RouteTarget::Tun(iface) => ensure_route_mark(&RouteTarget::Tun(iface.clone())).ok(),
         RouteTarget::Device(iface) => ensure_route_mark(&RouteTarget::Device(iface.clone())).ok(),
+        RouteTarget::Proxy(_) => None, // Proxies don't use fwmark-based routing
     }
 }
 
@@ -549,6 +551,9 @@ fn open_routed_tcp(host: String, port: u16, target: RouteTarget, db_path: String
         let upstream = match target {
             RouteTarget::Tun(iface) => connect_via_tun(&addrs, &iface),
             RouteTarget::Device(iface) => connect_via_device(&addrs, &iface),
+            RouteTarget::Proxy(id) => Err(format!(
+                "Proxy routing not yet implemented: {id}"
+            )),
         };
         match upstream {
             Ok(upstream) => {

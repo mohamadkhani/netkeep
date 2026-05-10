@@ -266,6 +266,7 @@ impl Default for SystemRouteManager {
 fn device_name(target: &RouteTarget) -> &str {
     match target {
         RouteTarget::Tun(name) | RouteTarget::Device(name) => name,
+        RouteTarget::Proxy(id) => id, // proxy config id — no device name
     }
 }
 
@@ -318,6 +319,10 @@ impl RouteManager for SystemRouteManager {
             }
             RouteTarget::Tun(_) => {
                 run_ip(&["route", "replace", "default", "dev", dev, "table", &table_id.to_string()])?;
+            }
+            RouteTarget::Proxy(_) => {
+                // Proxy routing is handled at the application layer,
+                // not via policy routing tables. No ip-route manipulation needed.
             }
         }
 

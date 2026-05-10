@@ -1,5 +1,5 @@
 use core_types::{
-    Egress, FlowContext, FlowEvent, PendingDecision, RouteTarget, Rule, RuleAction, TransportProtocol,
+    Egress, FlowContext, FlowEvent, PendingDecision, ProxyConfig, RouteTarget, Rule, RuleAction, TransportProtocol,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,10 @@ pub enum ControlRequest {
     ListEgresses,
     UpsertEgress(Egress),
     DeleteEgress { id: String },
+    // Proxy management
+    UpsertProxy(ProxyConfig),
+    DeleteProxy { id: String },
+    ListProxies,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +62,7 @@ pub enum ControlResponse {
     },
     Error(String),
     EgressList(Vec<Egress>),
+    ProxyList(Vec<ProxyConfig>),
 }
 
 // NEW: Push notifications sent from daemon to subscribers
@@ -91,6 +96,12 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
         }
         ControlRequest::UpsertEgress(eg) if eg.id.trim().is_empty() => {
             Err("egress id cannot be empty".to_string())
+        }
+        ControlRequest::UpsertProxy(px) if px.id.trim().is_empty() => {
+            Err("proxy id cannot be empty".to_string())
+        }
+        ControlRequest::DeleteProxy { id } if id.trim().is_empty() => {
+            Err("proxy id cannot be empty".to_string())
         }
         _ => Ok(()),
     }

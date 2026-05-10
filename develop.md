@@ -20,8 +20,10 @@
   - IP
   - CIDR/netmask
   - Wildcard does not match apex by default (`*.example.com` != `example.com`)
-  - Optional route target (e.g. specific TUN or network device)
+  - Optional route target (e.g. specific TUN, network device, or proxy)
   - Optional per-egress DNS server list (resolver IPs)
+  - Proxy support: SOCKS5, HTTP/HTTPS, Shadowsocks with per-type auth
+  - Egress targets have priority ordering; first enabled target is active
 - Protocol coverage in v1:
   - TCP + UDP
   - Best-effort domain inference for QUIC/HTTP3
@@ -133,7 +135,7 @@ enum PushNotification {
 
 - `id`
 - `enabled`
-- `action` (`Allow | Deny | Ask`)
+- `action` (`Allow | Deny | Ask | Route { target }`)
 - `scope`:
   - process matcher (name/path/uid)
   - domain exact
@@ -141,7 +143,7 @@ enum PushNotification {
   - ip exact
   - cidr
   - protocol/port optional
-  - optional route target identifier (e.g. `tun0`, `vpn-work`, `eth1`)
+  - optional route target identifier (e.g. `tun0`, `vpn-work`, `eth1`, or proxy ID)
 - `duration` (`UntilRestart | Permanent`)
 - `priority` (derived from specificity + explicit tie-break)
 - `created_at`, `updated_at`
@@ -164,6 +166,50 @@ enum PushNotification {
 - deadline_at (`created + timeout`)
 - snapshot context for UI/CLI prompt
 - default fallback action (`Deny`)
+
+### 3.4 Proxy
+
+A standalone proxy endpoint that can be attached to egresses.
+
+- `id` — unique identifier (e.g. `proxy-<epoch>`)
+- `name` — user-friendly label (e.g. "Work VPN Proxy")
+- `protocol` — `Socks5 | Http | Shadowsocks`
+- `host` — hostname or IP address
+- `port` — remote port
+- `auth` — authentication credentials per protocol:
+  - `None` — no authentication
+  - `Basic { username, password }` — for SOCKS5 and HTTP
+  - `Shadowsocks { method, password }` — cipher method (e.g. `aes-256-gcm`) + secret
+- `enabled` — whether this proxy is available for use
+
+### 3.5 Egress
+
+An egress represents a named routing destination. Each egress binds to
+one or more prioritized targets (TUN devices, physical NICs, or proxies).
+The first enabled target (lowest priority number) is the active route.
+
+- `id`
+- `name`
+- `color` — UI color code
+- `targets: Vec<EgressTarget>` — ordered list of targets with priority
+- `dns_servers: Vec<String>` — per-egress DNS resolver IPs
+- `is_system_default` — true for the system routing table egress
+- `is_available` — whether the active target is currently usable
+
+**EgressTarget:**
+
+- `target: RouteTarget` — the routing destination
+- `priority: u32` — lower number = higher priority (0 = first)
+- `enabled: bool` — disabled targets are skipped
+
+**RouteTarget:**
+
+- `Tun(name)` — TUN device (e.g. `wg0`)
+- `Device(name)` — physical/virtual NIC (e.g. `eth0`, `wlan0`)
+- `Proxy(id)` — references a `ProxyConfig` by ID
+
+**Active target resolution:** sort targets by priority ascending → first
+enabled target wins. If no enabled targets exist, the egress is unavailable.
 
 ## 4) Rule Resolution and Precedence
 
@@ -366,7 +412,15 @@ enum PushNotification {
 - [x] 1-second countdown ticker with auto-exit
 - [x] Monitor mode: polls daemon, spawns GUI per pending
 - [x] Connect UI to local control API via Unix socket
-- [ ] Build rule management views (future)
+- [x] Build settings window with Rules, Egress, and Proxies tabs
+- [x] Settings runs as separate process (close doesn't kill tray)
+- [x] Single-instance guard prevents duplicate settings windows
+- [x] Modular settings/ directory (mod.rs, rules_tab.rs, egress_tab.rs, proxies_tab.rs, helpers.rs)
+- [x] Refactored settings tabs to use gpui-component Table (TableDelegate pattern) for data display
+- [x] Double-click on egress/proxy rows opens Dialog with details
+- [x] Proxy management views (Proxies tab) with protocol badges, toggle, delete
+- [ ] Implement EgressTarget with priority ordering
+- [ ] Editable fields in dialogs (currently read-only detail view)
 
 ## 10) Progress Log
 
@@ -456,6 +510,45 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Updated docs: `architecture.md`, `implementation-status.md`, `gpui-components.md`, `gpui-api.md`
 - [x] Added `design/` folder with HTML design reference (`decision_dialog_window.html`)
 - [x] 93 workspace tests still passing
+
+### 2026-05-09/10 (settings window + proxy architecture)
+
+- [x] Added settings window with Rules, Egress, and Proxies tabs using gpui-component TabBar
+- [x] TitleBar with drag support, close button, and settings icon
+- [x] Settings runs as separate process (`--settings` flag) — close doesn't kill tray
+- [x] Single-instance guard (`Arc<AtomicBool>`) prevents duplicate settings windows
+- [x] Refactored `management.rs` → `settings/` module (mod.rs, rules_tab.rs, egress_tab.rs, proxies_tab.rs, helpers.rs)
+- [x] Added `RouteTarget::Socks(String)` variant for SOCKS5 proxy support
+- [x] Redesigned egress tab with card layout, target chips, add-target, add-egress buttons
+- [x] Updated all `RouteTarget` match arms across 6 crates (state-store, enforcer, daemon, cli, gpui)
+- [x] Designed proxy architecture: `ProxyConfig`, `ProxyProtocol`, `ProxyAuth`, `EgressTarget` with priority
+- [x] Implemented `ProxyConfig` / `ProxyProtocol` / `ProxyAuth` types in core-types
+- [x] Replaced `RouteTarget::Socks` with `RouteTarget::Proxy(id)` referencing ProxyConfig
+- [x] Added proxy CRUD to control-api (UpsertProxy, DeleteProxy, ListProxies)
+- [x] Added ProxyRepository trait + SQLite persistence to state-store
+- [x] Updated daemon, CLI, enforcer for Proxy variant
+- [x] Added Proxies tab to settings window with protocol badges, toggle, delete
+- [x] 77 tests passing across workspace
+
+### 2026-05-10 (session 10 — Table + Dialog refactor)
+
+- [x] Researched gpui-component 0.5.1 Table, TableDelegate, TableState, TableEvent, Dialog APIs
+- [x] Studied reference implementations in `/home/mohamad/Projects/rust/gpui-component/crates/story/`
+- [x] Refactored all settings tabs to use `Table<D>` with custom `TableDelegate` implementations:
+  - `RulesDelegate` — columns: ID, Action, Destination, Route, Controls (toggle+delete)
+  - `EgressDelegate` — columns: Name, Type, Targets, DNS, Status, Controls (delete)
+  - `ProxiesDelegate` — columns: Name, Protocol, Address, Auth, Status, Controls (toggle+delete)
+- [x] `SettingsApp` holds `Entity<TableState<D>>` for each tab, subscribes to `TableEvent::DoubleClickedRow`
+- [x] Double-click on egress row opens detail Dialog (name, id, type badge, status, targets, DNS)
+- [x] Double-click on proxy row opens edit Dialog (name, id, protocol badge, status, address, auth)
+- [x] Dialog uses `window.open_dialog(cx, |dialog, _, _| { ... })` via `WindowExt` trait
+- [x] Root component wraps settings view for dialog support
+- [x] Window size increased to 960×720 for table readability
+- [x] Fixed compilation: `SettingsApp::new(state, window, cx)` 3-arg constructor
+- [x] Fixed `Fn` closure move: `dns.clone()` pattern for non-Copy types in dialog closures
+- [x] Fixed `subscribe_in` returning `Subscription` (not `()`) — stored in `_subscriptions` Vec
+- [x] Updated docs: develop.md, architecture.md, implementation-status.md, gpui-components.md
+- [x] Created docs/gpui-settings.md for settings window architecture guide
 
 ### 2026-05-09 (routing hardening)
 

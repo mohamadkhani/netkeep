@@ -282,6 +282,22 @@ impl<R: Repository> ControlService<R> {
                     ControlResponse::Error("egress not found".to_string())
                 }
             }
+            ControlRequest::UpsertProxy(proxy) => {
+                self.repo.upsert_proxy(&proxy);
+                ControlResponse::Ok
+            }
+            ControlRequest::DeleteProxy { id } => {
+                if self.repo.delete_proxy(&id) {
+                    ControlResponse::Ok
+                } else {
+                    ControlResponse::Error("proxy not found".to_string())
+                }
+            }
+            ControlRequest::ListProxies => {
+                let mut proxies = self.repo.list_proxies();
+                proxies.sort_by(|a, b| a.id.cmp(&b.id));
+                ControlResponse::ProxyList(proxies)
+            }
         }
     }
 }

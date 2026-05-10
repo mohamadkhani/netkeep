@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use core_types::{
-    DestinationMatcher, Egress, FlowEvent, FlowState, PendingDecision, RouteTarget, Rule, RuleAction, RuleDuration,
-    TransportProtocol,
+    DestinationMatcher, Egress, FlowEvent, FlowState, PendingDecision, ProxyAuth, ProxyConfig, ProxyProtocol,
+    RouteTarget, Rule, RuleAction, RuleDuration, TransportProtocol,
 };
 use rusqlite::{params, Connection};
 
@@ -54,11 +54,22 @@ pub trait EgressRepository {
 }
 
 // ---------------------------------------------------------------------------
+// ProxyRepository
+// ---------------------------------------------------------------------------
+
+pub trait ProxyRepository {
+    fn upsert_proxy(&mut self, proxy: &ProxyConfig);
+    fn list_proxies(&self) -> Vec<ProxyConfig>;
+    fn delete_proxy(&mut self, id: &str) -> bool;
+    fn get_proxy(&self, id: &str) -> Option<ProxyConfig>;
+}
+
+// ---------------------------------------------------------------------------
 // Combined supertrait used by ControlService
 // ---------------------------------------------------------------------------
 
-pub trait Repository: RuleRepository + FlowRepository + PendingRepository + EgressRepository {}
-impl<T: RuleRepository + FlowRepository + PendingRepository + EgressRepository> Repository for T {}
+pub trait Repository: RuleRepository + FlowRepository + PendingRepository + EgressRepository + ProxyRepository {}
+impl<T: RuleRepository + FlowRepository + PendingRepository + EgressRepository + ProxyRepository> Repository for T {}
 
 // ---------------------------------------------------------------------------
 // In-memory implementation (used in tests)
@@ -70,6 +81,7 @@ pub struct InMemoryRuleRepository {
     events: Vec<FlowEvent>,
     pending: HashMap<String, PendingDecision>,
     egresses: HashMap<String, Egress>,
+    proxies: HashMap<String, ProxyConfig>,
 }
 
 impl RuleRepository for InMemoryRuleRepository {
@@ -144,6 +156,24 @@ impl EgressRepository for InMemoryRuleRepository {
     }
 }
 
+impl ProxyRepository for InMemoryRuleRepository {
+    fn upsert_proxy(&mut self, proxy: &ProxyConfig) {
+        self.proxies.insert(proxy.id.clone(), proxy.clone());
+    }
+
+    fn list_proxies(&self) -> Vec<ProxyConfig> {
+        self.proxies.values().cloned().collect()
+    }
+
+    fn delete_proxy(&mut self, id: &str) -> bool {
+        self.proxies.remove(id).is_some()
+    }
+
+    fn get_proxy(&self, id: &str) -> Option<ProxyConfig> {
+        self.proxies.get(id).cloned()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SQLite implementation
 // ---------------------------------------------------------------------------
@@ -202,6 +232,18 @@ impl SqliteRuleRepository {
                  dns_server TEXT NOT NULL,
                  PRIMARY KEY (egress_id, dns_server),
                  FOREIGN KEY (egress_id) REFERENCES egresses(id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS proxies (
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 protocol INTEGER NOT NULL,
+                 host TEXT NOT NULL,
+                 port INTEGER NOT NULL,
+                 auth_kind INTEGER NOT NULL DEFAULT 0,
+                 auth_username TEXT NOT NULL DEFAULT '',
+                 auth_password TEXT NOT NULL DEFAULT '',
+                 auth_method TEXT NOT NULL DEFAULT '',
+                 enabled INTEGER NOT NULL DEFAULT 1
              );",
         )
         .map_err(|e| e.to_string())?;
@@ -234,6 +276,7 @@ fn route_target_to_parts(target: &RouteTarget) -> (i64, &str) {
     match target {
         RouteTarget::Tun(v) => (1, v.as_str()),
         RouteTarget::Device(v) => (2, v.as_str()),
+        RouteTarget::Proxy(v) => (3, v.as_str()),
     }
 }
 
@@ -241,6 +284,7 @@ fn parts_to_route_target(kind: i64, value: String) -> Option<RouteTarget> {
     match kind {
         1 => Some(RouteTarget::Tun(value)),
         2 => Some(RouteTarget::Device(value)),
+        3 => Some(RouteTarget::Proxy(value)),
         _ => None,
     }
 }
@@ -692,6 +736,131 @@ impl SqliteRuleRepository {
             Err(_) => return Vec::new(),
         };
         mapped.filter_map(Result::ok).collect()
+    }
+}
+
+// --- proxy encoding helpers ---
+
+fn proxy_protocol_to_i64(p: &ProxyProtocol) -> i64 {
+    match p {
+        ProxyProtocol::Socks5 => 1,
+        ProxyProtocol::Http => 2,
+        ProxyProtocol::Shadowsocks => 3,
+    }
+}
+
+fn i64_to_proxy_protocol(v: i64) -> Option<ProxyProtocol> {
+    match v {
+        1 => Some(ProxyProtocol::Socks5),
+        2 => Some(ProxyProtocol::Http),
+        3 => Some(ProxyProtocol::Shadowsocks),
+        _ => None,
+    }
+}
+
+/// Encode ProxyAuth into (kind, username, password, method).
+fn auth_to_parts(auth: &ProxyAuth) -> (i64, &str, &str, &str) {
+    match auth {
+        ProxyAuth::None => (0, "", "", ""),
+        ProxyAuth::Basic { username, password } => (1, username.as_str(), password.as_str(), ""),
+        ProxyAuth::Shadowsocks { method, password } => (2, "", password.as_str(), method.as_str()),
+    }
+}
+
+fn parts_to_auth(kind: i64, username: String, password: String, method: String) -> ProxyAuth {
+    match kind {
+        1 => ProxyAuth::Basic { username, password },
+        2 => ProxyAuth::Shadowsocks { method, password },
+        _ => ProxyAuth::None,
+    }
+}
+
+impl ProxyRepository for SqliteRuleRepository {
+    fn upsert_proxy(&mut self, proxy: &ProxyConfig) {
+        let (auth_kind, auth_user, auth_pass, auth_method) = auth_to_parts(&proxy.auth);
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO proxies (id, name, protocol, host, port, auth_kind, auth_username, auth_password, auth_method, enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    proxy.id,
+                    proxy.name,
+                    proxy_protocol_to_i64(&proxy.protocol),
+                    proxy.host,
+                    proxy.port as i64,
+                    auth_kind,
+                    auth_user,
+                    auth_pass,
+                    auth_method,
+                    proxy.enabled as i64,
+                ],
+            )
+            .ok();
+    }
+
+    fn list_proxies(&self) -> Vec<ProxyConfig> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, name, protocol, host, port, auth_kind, auth_username, auth_password, auth_method, enabled FROM proxies ORDER BY id",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let mapped = match stmt.query_map([], |row| {
+            let protocol = i64_to_proxy_protocol(row.get::<_, i64>(2)?).unwrap_or(ProxyProtocol::Socks5);
+            let auth = parts_to_auth(
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            );
+            Ok(ProxyConfig {
+                id: row.get::<_, String>(0)?,
+                name: row.get::<_, String>(1)?,
+                protocol,
+                host: row.get::<_, String>(3)?,
+                port: row.get::<_, i64>(4)? as u16,
+                auth,
+                enabled: row.get::<_, i64>(9)? != 0,
+            })
+        }) {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
+        };
+        mapped.filter_map(Result::ok).collect()
+    }
+
+    fn delete_proxy(&mut self, id: &str) -> bool {
+        self.conn
+            .execute("DELETE FROM proxies WHERE id = ?1", params![id])
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
+    fn get_proxy(&self, id: &str) -> Option<ProxyConfig> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, name, protocol, host, port, auth_kind, auth_username, auth_password, auth_method, enabled FROM proxies WHERE id = ?1",
+            )
+            .ok()?;
+        let mut rows = stmt.query(params![id]).ok()?;
+        let row = rows.next().ok()??;
+        let protocol = i64_to_proxy_protocol(row.get::<_, i64>(2).ok()?).unwrap_or(ProxyProtocol::Socks5);
+        let auth = parts_to_auth(
+            row.get::<_, i64>(5).ok()?,
+            row.get::<_, String>(6).ok()?,
+            row.get::<_, String>(7).ok()?,
+            row.get::<_, String>(8).ok()?,
+        );
+        Some(ProxyConfig {
+            id: row.get::<_, String>(0).ok()?,
+            name: row.get::<_, String>(1).ok()?,
+            protocol,
+            host: row.get::<_, String>(3).ok()?,
+            port: row.get::<_, i64>(4).ok()? as u16,
+            auth,
+            enabled: row.get::<_, i64>(9).ok()? != 0,
+        })
     }
 }
 

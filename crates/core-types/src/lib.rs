@@ -12,6 +12,8 @@ pub enum RuleAction {
 pub enum RouteTarget {
     Tun(String),
     Device(String),
+    /// Route traffic through a managed proxy (references `ProxyConfig.id`).
+    Proxy(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,5 +116,37 @@ pub struct Egress {
     /// Unavailable egresses should still be shown (greyed out) so the user
     /// knows they exist, but traffic must not be routed through them.
     pub is_available: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Proxy — a remote proxy server that can be used as an egress target
+// ---------------------------------------------------------------------------
+
+/// Supported proxy protocols.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProxyProtocol {
+    Socks5,
+    Http,
+    Shadowsocks,
+}
+
+/// Authentication configuration for a proxy connection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProxyAuth {
+    None,
+    Basic { username: String, password: String },
+    Shadowsocks { method: String, password: String },
+}
+
+/// A managed proxy server configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    pub id: String,
+    pub name: String,
+    pub protocol: ProxyProtocol,
+    pub host: String,
+    pub port: u16,
+    pub auth: ProxyAuth,
+    pub enabled: bool,
 }
 

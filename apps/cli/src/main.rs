@@ -225,6 +225,7 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
                         let route = match &r.route_target {
                             Some(RouteTarget::Tun(d)) => format!(" route=tun:{d}"),
                             Some(RouteTarget::Device(d)) => format!(" route=dev:{d}"),
+                            Some(RouteTarget::Proxy(d)) => format!(" route=proxy:{d}"),
                             None => String::new(),
                         };
                         format!(
@@ -336,6 +337,23 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
                             e.is_available,
                             e.targets,
                             dns,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(body)
+            }
+        }
+        ControlResponse::ProxyList(proxies) => {
+            if proxies.is_empty() {
+                Ok("no proxies".to_string())
+            } else {
+                let body = proxies
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{} name={} proto={:?} {}:{} enabled={}",
+                            p.id, p.name, p.protocol, p.host, p.port, p.enabled
                         )
                     })
                     .collect::<Vec<_>>()

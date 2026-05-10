@@ -2,10 +2,10 @@
 
 Network flow authorization system for Linux: intercept unknown flows, prompt user, enforce rules.
 
-**Repository:** https://github.com/mohammadreza-khani/logiguard  
-**Language:** Rust  
-**Platforms:** Linux desktop first  
-**Status:** Phase 4+ (GPUI UI + daemon-side routed relay + per-egress DNS)
+**Repository:** https://github.com/mohammadreza-khani/logiguard
+**Language:** Rust
+**Platforms:** Linux desktop first
+**Status:** Phase 4+ (GPUI UI + settings window with Table/Dialog + proxy support)
 
 ## System Overview
 
@@ -109,8 +109,12 @@ Shared data models, no dependencies on other crates.
 - `PendingDecision` — user decision queue item
 - `FlowEvent` — audit log entry
 - `RuleAction` — {Allow, Deny, Ask, Route{target}}
-- `RouteTarget` — {Tun(name), Device(name)}
-- `Egress` — named route destination with targets, availability, and optional `dns_servers`
+- `RouteTarget` — {Tun(name), Device(name), Proxy(id)}
+- `ProxyConfig` — proxy endpoint (SOCKS5/HTTP/Shadowsocks) with host, port, auth
+- `ProxyProtocol` — {Socks5, Http, Shadowsocks}
+- `ProxyAuth` — {None, Basic{username, password}, Shadowsocks{method, password}}
+- `EgressTarget` — target + priority + enabled flag
+- `Egress` — named route destination with prioritized targets, availability, and optional `dns_servers`
 - `RuleDuration` — {UntilRestart, Permanent}
 - `DestinationMatcher` — {IpExact, Cidr, DomainExact, DomainWildcard}
 - `TransportProtocol` — {Tcp, Udp, Quic, Other}
@@ -207,8 +211,9 @@ SQLite-backed persistence.
 - `flow_events` table — id, process_name, device_label, destination_ip, destination_domain, protocol, state, timestamp_secs
 - `pending_decisions` table — id, flow_id, created_at, deadline_at, default_action
 - `egresses` table — id, name, color, is_system_default
-- `egress_targets` table — target kind/value per egress
+- `egress_targets` table — target kind/value, priority, enabled per egress
 - `egress_dns_servers` table — DNS resolver IPs per egress
+- `proxies` table — id, name, protocol, host, port, auth_type, auth_data (JSON), enabled
 
 **Migrations:** Auto-run on startup via schema versioning.
 
@@ -229,6 +234,12 @@ ResolvePending { pending_id, action }
 Health
 Unlock
 OpenRoutedTcp { host, port, target }
+UpsertEgress(Egress)
+DeleteEgress { id }
+ListEgresses
+UpsertProxy(ProxyConfig)
+DeleteProxy { id }
+ListProxies
 ```
 
 **Responses:**
@@ -244,6 +255,8 @@ PendingResolved { action }
 Health { ready, fail_close_active, timeout_secs, ... }
 Unlocked
 RoutedTcpReady { listen_addr }
+EgressList(Vec<Egress>)
+ProxyList(Vec<ProxyConfig>)
 Error(String)
 ```
 
@@ -330,7 +343,7 @@ Every system effect behind a trait:
 **state-store:** 8+ tests (CRUD, persistence, migrations)  
 **control-api:** 5+ tests (request validation)
 
-**Current:** 93 tests passing.
+**Current:** 77 tests passing.
 
 ### Integration Tests
 
@@ -418,6 +431,76 @@ Prevents remote unlock attempts.
 - **Timeout expiry:** O(m) scan (m=pending). Called every 1s, max 100 pendings = fast.
 - **Packet processing:** O(n) rule lookup per packet. Expect <100 µs per verdict.
 - **SQLite writes:** Async journaling. Should not block packet processing.
+
+## Settings Window Architecture
+
+The settings window (`--settings` flag) runs as a separate GPUI process. It uses gpui-component's `Table` and `Dialog` components for data management.
+
+### Process Model
+
+```
+Tray icon (main process)
+  │ --settings flag → spawn separate process
+  └→ settings process (independent lifecycle)
+       │ gpui_component::init()
+       │ Root::new(view, window, cx)  // Required for Dialog support
+       └→ SettingsApp (Render)
+            ├── TabBar (Rules / Egress / Proxies)
+            ├── Table<RulesDelegate>
+            ├── Table<EgressDelegate>
+            └── Table<ProxiesDelegate>
+```
+
+### Table + Delegate Pattern
+
+Each tab uses a `TableDelegate` implementation:
+
+| Delegate | Columns | Actions |
+|----------|---------|---------|
+| `RulesDelegate` | ID, Action, Destination, Route, Controls | Toggle enabled, Delete |
+| `EgressDelegate` | Name, Type, Targets, DNS, Status, Controls | Delete |
+| `ProxiesDelegate` | Name, Protocol, Address, Auth, Status, Controls | Toggle enabled, Delete |
+
+**Data flow:**
+1. `SettingsState` entity holds raw data (rules, egresses, proxies)
+2. `SettingsApp::sync_tables()` copies data into each delegate on state change
+3. `cx.observe(&state, ...)` triggers sync on state updates
+4. `fetch_and_apply()` async task loads data from daemon via Unix socket
+
+### Dialog Pattern
+
+Double-clicking a table row opens a detail dialog:
+
+```rust
+cx.subscribe_in(&egress_table, window, |this, _table, event, window, cx| {
+    if let TableEvent::DoubleClickedRow(row_ix) = event {
+        // Open dialog with egress details
+        window.open_dialog(cx, |dialog, _, _| {
+            dialog.title("Egress: ...").w(px(500.)).child(...)
+        });
+    }
+});
+```
+
+**Key constraint:** Dialog closure is `Fn` (not `FnOnce`). Use `.clone()` for non-Copy types consumed in conditional branches.
+
+### File Structure
+
+```
+apps/gpui/src/settings/
+├── mod.rs           # SettingsApp, SettingsState, tab switching, dialog handlers
+├── rules_tab.rs     # RulesDelegate (TableDelegate)
+├── egress_tab.rs    # EgressDelegate (TableDelegate)
+├── proxies_tab.rs   # ProxiesDelegate (TableDelegate)
+└── helpers.rs       # fetch_and_apply, parse_dns_csv, route_summary
+```
+
+### Window Configuration
+
+- Size: 960×720 pixels
+- TitleBar: gpui-component TitleBar with drag support
+- Root wrapper: Required for Dialog support
+- Single-instance guard: `Arc<AtomicBool>` prevents duplicate windows
 
 ## Future Enhancements (Out of MVP Scope)
 

@@ -1,14 +1,13 @@
-//! Rules tab — displays firewall rules with toggle/delete actions.
+//! Rules tab — DataTable delegate for firewall rules with toggle/delete actions.
 
 use control_api::ControlRequest;
-use core_types::Rule;
+use core_types::{Rule, RuleAction};
 use gpui::{
-    AppContext as _, ElementId, InteractiveElement, IntoElement,
-    ParentElement, StatefulInteractiveElement, Styled, WeakEntity, div, px,
+    App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
 };
 
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::{h_flex, v_flex};
+use gpui_component::table::{Column, TableDelegate, TableState};
 
 use crate::colors;
 use crate::daemon;
@@ -16,116 +15,137 @@ use crate::daemon;
 use super::SettingsState;
 use super::helpers::route_summary;
 
-/// Render the full Rules tab content (scrollable list of rule rows).
-pub fn render_rules_tab(
-    rules: Vec<Rule>,
-    state_weak: WeakEntity<SettingsState>,
-    socket_path: String,
-) -> gpui::AnyElement {
-    v_flex()
-        .id(ElementId::Name("rules-tab-content".into()))
-        .flex_1()
-        .overflow_y_scrollbar()
-        .px(px(16.))
-        .py(px(12.))
-        .gap(px(20.))
-        // Section header
-        .child(
-            div()
-                .text_size(px(11.))
-                .text_color(colors::muted())
-                .font_weight(gpui::FontWeight::BOLD)
-                .child("FIREWALL RULES"),
-        )
-        // Rules list
-        .children(
-            rules
-                .iter()
-                .map(|rule| rule_row(rule, state_weak.clone(), socket_path.clone())),
-        )
-        .into_any_element()
+// ── Delegate ───────────────────────────────────────────────────────────
+
+/// Table delegate that displays firewall rules.
+pub struct RulesDelegate {
+    pub rules: Vec<Rule>,
+    pub state_weak: WeakEntity<SettingsState>,
+    pub socket_path: String,
+    columns: Vec<Column>,
 }
 
-/// Render a single rule row with toggle and delete buttons.
-fn rule_row(
-    rule: &Rule,
-    state_weak: WeakEntity<SettingsState>,
-    socket_path: String,
-) -> gpui::AnyElement {
-    let id = rule.id.clone();
-    let id_toggle = id.clone();
-    let id_del = id.clone();
-    let rule_toggle = rule.clone();
-    let enabled = rule.enabled;
-    let dest = format!("{:?}", rule.destination);
-    let action = format!("{:?}", rule.action);
-    let route = rule
-        .route_target
-        .as_ref()
-        .map(route_summary)
-        .unwrap_or_default();
+impl RulesDelegate {
+    pub fn new(
+        rules: Vec<Rule>,
+        state_weak: WeakEntity<SettingsState>,
+        socket_path: String,
+    ) -> Self {
+        Self {
+            rules,
+            state_weak,
+            socket_path,
+            columns: vec![
+                Column::new("id", "ID").width(px(140.)),
+                Column::new("action", "Action").width(px(80.)),
+                Column::new("destination", "Destination").width(px(160.)),
+                Column::new("route", "Route").width(px(100.)),
+                Column::new("controls", "").width(px(150.)).resizable(false),
+            ],
+        }
+    }
+}
 
-    let action_color = if enabled {
-        colors::green()
-    } else {
-        colors::muted()
-    };
+impl TableDelegate for RulesDelegate {
+    fn columns_count(&self, _cx: &App) -> usize {
+        self.columns.len()
+    }
 
-    h_flex()
-        .w_full()
-        .items_start()
-        .justify_between()
-        .gap(px(8.))
-        .py(px(6.))
-        .px(px(8.))
-        .rounded(px(4.))
-        .bg(colors::surface_container())
-        .border_1()
-        .border_color(colors::border())
-        .child(
-            v_flex()
-                .flex_1()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(rule.id.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(colors::muted())
-                        .child(format!(
-                            "{action} · {dest}{}",
-                            if route.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · route {route}")
-                            }
-                        )),
-                ),
-        )
-        .child(
-            h_flex()
-                .gap(px(6.))
-                .items_center()
-                // Toggle enabled/disabled
-                .child(
-                    div()
-                        .id(ElementId::Name(format!("rule-en-{id_toggle}").into()))
-                        .text_size(px(11.))
-                        .text_color(action_color)
-                        .cursor_pointer()
-                        .px(px(8.))
-                        .py(px(4.))
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(colors::border())
-                        .on_click({
-                            let socket_toggle = socket_path.clone();
-                            let state_toggle = state_weak.clone();
-                            move |_, _, cx| {
+    fn rows_count(&self, _cx: &App) -> usize {
+        self.rules.len()
+    }
+
+    fn column(&self, col_ix: usize, _cx: &App) -> &Column {
+        &self.columns[col_ix]
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let Some(rule) = self.rules.get(row_ix) else {
+            return div().into_any_element();
+        };
+
+        match col_ix {
+            // ID column with enabled indicator dot
+            0 => {
+                let enabled = rule.enabled;
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .size(px(8.))
+                            .rounded(px(4.))
+                            .bg(if enabled { colors::green() } else { colors::muted() }),
+                    )
+                    .child(
+                        div()
+                            .text_color(if enabled { colors::text() } else { colors::muted() })
+                            .child(rule.id.clone()),
+                    )
+                    .into_any_element()
+            }
+            // Action column
+            1 => {
+                let (label, color) = match &rule.action {
+                    RuleAction::Allow => ("Allow", colors::green()),
+                    RuleAction::Deny => ("Deny", colors::error()),
+                    RuleAction::Ask => ("Ask", colors::orange()),
+                    RuleAction::Route { .. } => ("Route", colors::primary()),
+                };
+                let color = if rule.enabled { color } else { colors::muted() };
+                div().text_color(color).child(label.to_string()).into_any_element()
+            }
+            // Destination column
+            2 => div()
+                .text_color(colors::muted())
+                .child(format!("{:?}", rule.destination))
+                .into_any_element(),
+            // Route column
+            3 => {
+                let route = rule
+                    .route_target
+                    .as_ref()
+                    .map(route_summary)
+                    .unwrap_or_default();
+                div()
+                    .text_color(if route.is_empty() { colors::muted() } else { colors::text() })
+                    .child(if route.is_empty() { "—".to_string() } else { route })
+                    .into_any_element()
+            }
+            // Controls column (toggle + delete)
+            4 => {
+                let id_toggle = rule.id.clone();
+                let id_del = rule.id.clone();
+                let rule_toggle = rule.clone();
+                let enabled = rule.enabled;
+                let socket_toggle = self.socket_path.clone();
+                let state_toggle = self.state_weak.clone();
+                let sock_del = self.socket_path.clone();
+                let state_del = self.state_weak.clone();
+
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .id(gpui::ElementId::Name(format!("rule-en-{id_toggle}").into()))
+                            .text_size(px(11.))
+                            .text_color(if enabled { colors::muted() } else { colors::green() })
+                            .cursor_pointer()
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(3.))
+                            .border_1()
+                            .border_color(if enabled { colors::border() } else { colors::green() })
+                            .on_click(move |_, _, cx| {
                                 let mut r = rule_toggle.clone();
                                 let sock = socket_toggle.clone();
                                 let sw = state_toggle.clone();
@@ -135,16 +155,12 @@ fn rule_row(
                                     let _ = cx
                                         .background_executor()
                                         .spawn(async move {
-                                            daemon::send_request(
-                                                &sock,
-                                                &ControlRequest::AddRule(r),
-                                            )
+                                            daemon::send_request(&sock, &ControlRequest::AddRule(r))
                                         })
                                         .await;
                                     if let Some(st) = sw.upgrade() {
                                         let _ = cx.update_entity(&st, |s, cx| {
-                                            if let Some(x) =
-                                                s.rules.iter_mut().find(|x| x.id == tid)
+                                            if let Some(x) = s.rules.iter_mut().find(|x| x.id == tid)
                                             {
                                                 x.enabled = !x.enabled;
                                             }
@@ -153,26 +169,21 @@ fn rule_row(
                                     }
                                 })
                                 .detach();
-                            }
-                        })
-                        .child(if enabled { "Enabled" } else { "Disabled" }),
-                )
-                // Delete button
-                .child(
-                    div()
-                        .id(ElementId::Name(format!("rule-del-{id_del}").into()))
-                        .text_size(px(11.))
-                        .text_color(colors::error())
-                        .cursor_pointer()
-                        .px(px(8.))
-                        .py(px(4.))
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(colors::error())
-                        .on_click({
-                            let sock_del = socket_path.clone();
-                            let state_del = state_weak.clone();
-                            move |_, _, cx| {
+                            })
+                            .child(if enabled { "Disable" } else { "Enable" }),
+                    )
+                    .child(
+                        div()
+                            .id(gpui::ElementId::Name(format!("rule-del-{id_del}").into()))
+                            .text_size(px(11.))
+                            .text_color(colors::error())
+                            .cursor_pointer()
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(3.))
+                            .border_1()
+                            .border_color(colors::error())
+                            .on_click(move |_, _, cx| {
                                 let rid = id_del.clone();
                                 let sock = sock_del.clone();
                                 let sw = state_del.clone();
@@ -195,10 +206,12 @@ fn rule_row(
                                     }
                                 })
                                 .detach();
-                            }
-                        })
-                        .child("Delete"),
-                ),
-        )
-        .into_any_element()
+                            })
+                            .child("Delete"),
+                    )
+                    .into_any_element()
+            }
+            _ => div().into_any_element(),
+        }
+    }
 }

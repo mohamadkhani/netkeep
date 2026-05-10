@@ -129,6 +129,9 @@
             <button id="tab-egress" class="tab-btn font-label-caps text-[10px] px-4 py-3 text-on-surface-variant hover:text-on-surface transition-colors border-b-2 border-transparent hover:border-outline">
                 EGRESS
             </button>
+            <button id="tab-proxies" class="tab-btn font-label-caps text-[10px] px-4 py-3 text-on-surface-variant hover:text-on-surface transition-colors border-b-2 border-transparent hover:border-outline">
+                PROXIES
+            </button>
         </div>
 
         <!-- Content -->
@@ -362,6 +365,85 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Proxies Tab Content -->
+            <div id="content-proxies" class="tab-content h-full flex flex-col hidden">
+                <div class="p-density-comfortable flex-1 overflow-auto">
+                    <h2 class="font-label-caps text-label-caps text-on-surface-variant mb-4">PROXY CONFIGURATIONS</h2>
+
+                    <!-- Proxies Table -->
+                    <div class="bg-surface border border-outline-variant rounded overflow-hidden">
+                        <!-- Table Header -->
+                        <div class="grid grid-cols-12 gap-x-gutter bg-surface-container-low border-b border-outline-variant p-density-compact">
+                            <div class="col-span-3 font-label-caps text-[10px] text-on-surface-variant">NAME</div>
+                            <div class="col-span-2 font-label-caps text-[10px] text-on-surface-variant">PROTOCOL</div>
+                            <div class="col-span-3 font-label-caps text-[10px] text-on-surface-variant">ADDRESS</div>
+                            <div class="col-span-2 font-label-caps text-[10px] text-on-surface-variant">AUTH</div>
+                            <div class="col-span-1 font-label-caps text-[10px] text-on-surface-variant">STATUS</div>
+                            <div class="col-span-1 font-label-caps text-[10px] text-on-surface-variant text-right">ACTIONS</div>
+                        </div>
+
+                        <!-- Table Rows -->
+                        <div class="divide-y divide-outline-variant">
+                            <!-- Row 1: SOCKS5 Proxy -->
+                            <div class="grid grid-cols-12 gap-x-gutter p-density-compact hover:bg-surface-bright transition-colors items-center">
+                                <div class="col-span-3 flex items-center gap-2">
+                                    <span class="material-symbols-outlined text-[16px] text-[#22c55e]">vpn_lock</span>
+                                    <span class="font-data-mono text-data-mono text-on-surface">Work SOCKS5</span>
+                                </div>
+                                <div class="col-span-2"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">SOCKS5</span></div>
+                                <div class="col-span-3 font-data-mono text-data-mono text-on-surface text-[12px] bg-surface-variant px-1.5 py-0.5 rounded border border-outline-variant">10.0.0.1:1080</div>
+                                <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px]">user:pass</div>
+                                <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">ACTIVE</span></div>
+                                <div class="col-span-1 flex justify-end gap-1">
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">edit</button>
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-error p-1 rounded hover:bg-error/10 transition-colors">delete</button>
+                                </div>
+                            </div>
+
+                            <!-- Row 2: HTTP Proxy -->
+                            <div class="grid grid-cols-12 gap-x-gutter p-density-compact hover:bg-surface-bright transition-colors items-center">
+                                <div class="col-span-3 flex items-center gap-2">
+                                    <span class="material-symbols-outlined text-[16px] text-on-surface-variant">language</span>
+                                    <span class="font-data-mono text-data-mono text-on-surface">Home HTTP</span>
+                                </div>
+                                <div class="col-span-2"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-primary/10 text-primary border border-primary/30">HTTP</span></div>
+                                <div class="col-span-3 font-data-mono text-data-mono text-on-surface text-[12px] bg-surface-variant px-1.5 py-0.5 rounded border border-outline-variant">proxy.home:8080</div>
+                                <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px]">none</div>
+                                <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant border border-outline-variant">INACTIVE</span></div>
+                                <div class="col-span-1 flex justify-end gap-1">
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">edit</button>
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-error p-1 rounded hover:bg-error/10 transition-colors">delete</button>
+                                </div>
+                            </div>
+
+                            <!-- Row 3: Shadowsocks -->
+                            <div class="grid grid-cols-12 gap-x-gutter p-density-compact hover:bg-surface-bright transition-colors items-center">
+                                <div class="col-span-3 flex items-center gap-2">
+                                    <span class="material-symbols-outlined text-[16px] text-[#3b82f6]">shield</span>
+                                    <span class="font-data-mono text-data-mono text-on-surface">SS Server</span>
+                                </div>
+                                <div class="col-span-2"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#3b82f6]/10 text-[#3b82f6] border border-[#3b82f6]/30">SS</span></div>
+                                <div class="col-span-3 font-data-mono text-data-mono text-on-surface text-[12px] bg-surface-variant px-1.5 py-0.5 rounded border border-outline-variant">ss.example.com:8388</div>
+                                <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px]">aes-256-gcm</div>
+                                <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">ACTIVE</span></div>
+                                <div class="col-span-1 flex justify-end gap-1">
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">edit</button>
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-error p-1 rounded hover:bg-error/10 transition-colors">delete</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Add Proxy Button -->
+                <div class="p-density-comfortable border-t border-outline-variant bg-surface-container-high">
+                    <button class="flex items-center gap-2 bg-primary hover:bg-primary-container text-on-primary font-label-caps text-[10px] px-4 py-2 rounded transition-colors">
+                        <span class="material-symbols-outlined text-[16px]">add</span>
+                        ADD PROXY
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -369,25 +451,28 @@
         // Tab switching
         const tabRules = document.getElementById('tab-rules');
         const tabEgress = document.getElementById('tab-egress');
+        const tabProxies = document.getElementById('tab-proxies');
         const contentRules = document.getElementById('content-rules');
         const contentEgress = document.getElementById('content-egress');
+        const contentProxies = document.getElementById('content-proxies');
+        const allTabs = [tabRules, tabEgress, tabProxies];
+        const allContents = [contentRules, contentEgress, contentProxies];
 
         function switchTab(tab) {
-            if (tab === 'rules') {
-                tabRules.classList.add('text-primary', 'border-primary');
-                tabRules.classList.remove('text-on-surface-variant', 'border-transparent');
-                tabEgress.classList.remove('text-primary', 'border-primary');
-                tabEgress.classList.add('text-on-surface-variant', 'border-transparent');
-                contentRules.classList.remove('hidden');
-                contentEgress.classList.add('hidden');
-            } else {
-                tabEgress.classList.add('text-primary', 'border-primary');
-                tabEgress.classList.remove('text-on-surface-variant', 'border-transparent');
-                tabRules.classList.remove('text-primary', 'border-primary');
-                tabRules.classList.add('text-on-surface-variant', 'border-transparent');
-                contentEgress.classList.remove('hidden');
-                contentRules.classList.add('hidden');
-            }
+            const tabIndex = { rules: 0, egress: 1, proxies: 2 }[tab];
+            allTabs.forEach((t, i) => {
+                if (i === tabIndex) {
+                    t.classList.add('text-primary', 'border-primary');
+                    t.classList.remove('text-on-surface-variant', 'border-transparent');
+                } else {
+                    t.classList.remove('text-primary', 'border-primary');
+                    t.classList.add('text-on-surface-variant', 'border-transparent');
+                }
+            });
+            allContents.forEach((c, i) => {
+                if (i === tabIndex) c.classList.remove('hidden');
+                else c.classList.add('hidden');
+            });
         }
 
         // Initialize with rules tab active
@@ -396,6 +481,7 @@
         // Tab click handlers
         tabRules.addEventListener('click', () => switchTab('rules'));
         tabEgress.addEventListener('click', () => switchTab('egress'));
+        tabProxies.addEventListener('click', () => switchTab('proxies'));
 
         // Toggle switches
         const toggles = document.querySelectorAll('.toggle-switch');

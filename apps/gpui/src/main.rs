@@ -267,14 +267,14 @@ fn run_settings() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
-                    origin: gpui::point(px(120.), px(80.)),
-                    size: size(px(720.), px(560.)),
+                    origin: gpui::point(px(80.), px(40.)),
+                    size: size(px(960.), px(720.)),
                 })),
                 titlebar: Some(gpui_component::TitleBar::title_bar_options()),
                 ..Default::default()
             },
             |window, cx| {
-                let view = cx.new(|cx| SettingsApp::new(state, cx));
+                let view = cx.new(|cx| SettingsApp::new(state, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )

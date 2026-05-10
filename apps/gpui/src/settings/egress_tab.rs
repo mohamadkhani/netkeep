@@ -1,272 +1,260 @@
-//! Egress tab — displays egress routes with DNS editing and delete actions.
+//! Egress tab — DataTable delegate for egress route management.
 
 use control_api::{ControlRequest, ControlResponse};
-use core_types::Egress;
+use core_types::{Egress, RouteTarget};
 use gpui::{
-    App, AppContext as _, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, StatefulInteractiveElement, Styled, WeakEntity, div, px,
-    prelude::FluentBuilder as _,
+    App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
 };
-use gpui_component::input::{Input, InputState};
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::{h_flex, v_flex};
+
+use gpui_component::table::{Column, TableDelegate, TableState};
 
 use crate::colors;
 use crate::daemon;
 
 use super::SettingsState;
-use super::helpers::{parse_dns_csv, route_summary};
+use super::helpers::route_summary;
 
-/// Render the full Egress tab content (scrollable list of egress rows).
-pub fn render_egress_tab(
-    egresses: Vec<Egress>,
-    dns_inputs: &[Entity<InputState>],
-    state_weak: WeakEntity<SettingsState>,
-    socket_path: String,
-) -> gpui::AnyElement {
-    v_flex()
-        .id(ElementId::Name("egress-tab-content".into()))
-        .flex_1()
-        .overflow_y_scrollbar()
-        .px(px(16.))
-        .py(px(12.))
-        .gap(px(20.))
-        // Section header
-        .child(
-            div()
-                .text_size(px(11.))
-                .text_color(colors::muted())
-                .font_weight(gpui::FontWeight::BOLD)
-                .child("EGRESS ROUTES"),
-        )
-        // Egress list
-        .children(egresses.iter().enumerate().map(|(i, eg)| {
-            egress_row(
-                i,
-                eg,
-                dns_inputs.get(i),
-                state_weak.clone(),
-                socket_path.clone(),
-            )
-        }))
-        .into_any_element()
+// ── Delegate ───────────────────────────────────────────────────────────
+
+/// Table delegate that displays egress routes.
+pub struct EgressDelegate {
+    pub egresses: Vec<Egress>,
+    pub state_weak: WeakEntity<SettingsState>,
+    pub socket_path: String,
+    columns: Vec<Column>,
 }
 
-/// Render a single egress row with DNS input and delete button.
-fn egress_row(
-    index: usize,
-    egress: &Egress,
-    dns_input: Option<&Entity<InputState>>,
-    state_weak: WeakEntity<SettingsState>,
-    socket_path: String,
-) -> gpui::AnyElement {
-    let targets = if egress.targets.is_empty() {
-        "default routing".to_string()
-    } else {
-        egress
-            .targets
-            .iter()
-            .map(route_summary)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let avail = if egress.is_available {
-        "up"
-    } else {
-        "down"
-    };
-    let eg_save = egress.clone();
+impl EgressDelegate {
+    pub fn new(
+        egresses: Vec<Egress>,
+        state_weak: WeakEntity<SettingsState>,
+        socket_path: String,
+    ) -> Self {
+        Self {
+            egresses,
+            state_weak,
+            socket_path,
+            columns: vec![
+                Column::new("name", "Name").width(px(140.)),
+                Column::new("type", "Type").width(px(80.)),
+                Column::new("targets", "Targets").width(px(200.)),
+                Column::new("dns", "DNS").width(px(140.)),
+                Column::new("status", "Status").width(px(80.)),
+                Column::new("controls", "").width(px(80.)).resizable(false),
+            ],
+        }
+    }
+}
 
-    let dns_el = if let Some(inp) = dns_input {
-        let inp = inp.clone();
-        let weak_dns = state_weak.clone();
-        let socket_dns = socket_path.clone();
-        let idx = index;
-        h_flex()
-            .w_full()
-            .gap(px(8.))
-            .items_center()
-            .child(Input::new(&inp).w_full().appearance(true))
-            .child(
+impl EgressDelegate {
+    fn egress_type_label(egress: &Egress) -> (&'static str, gpui::Hsla) {
+        if egress.is_system_default {
+            return ("SYSTEM", colors::muted());
+        }
+        if egress.targets.iter().any(|t| matches!(t, RouteTarget::Proxy(_))) {
+            return ("PROXY", colors::teal());
+        }
+        if egress.targets.iter().any(|t| matches!(t, RouteTarget::Tun(_))) {
+            return ("VPN", colors::green());
+        }
+        ("DIRECT", colors::muted())
+    }
+}
+
+impl TableDelegate for EgressDelegate {
+    fn columns_count(&self, _cx: &App) -> usize {
+        self.columns.len()
+    }
+
+    fn rows_count(&self, _cx: &App) -> usize {
+        self.egresses.len()
+    }
+
+    fn column(&self, col_ix: usize, _cx: &App) -> &Column {
+        &self.columns[col_ix]
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let Some(egress) = self.egresses.get(row_ix) else {
+            return div().into_any_element();
+        };
+
+        match col_ix {
+            // Name
+            0 => {
+                let mut el = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_color(colors::text())
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(egress.name.clone()),
+                    );
+                if !egress.is_system_default {
+                    el = el.child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(colors::muted())
+                            .child(format!("({})", egress.id)),
+                    );
+                }
+                el.into_any_element()
+            }
+            // Type badge
+            1 => {
+                let (label, color) = Self::egress_type_label(egress);
                 div()
-                    .id(ElementId::Name(format!("eg-dns-{idx}").into()))
-                    .text_size(px(11.))
-                    .text_color(colors::primary())
-                    .cursor_pointer()
-                    .px(px(8.))
-                    .py(px(4.))
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(colors::primary())
-                    .on_click(move |_, _, cx| {
-                        let inp = inp.clone();
-                        let weak_dns = weak_dns.clone();
-                        let mut eg_save = eg_save.clone();
-                        let socket_dns = socket_dns.clone();
-                        cx.spawn(async move |cx| {
-                            let text = cx
-                                .read_entity(&inp, |i: &InputState, _: &App| {
-                                    i.value().to_string()
-                                })
-                                .unwrap_or_default();
-                            eg_save.dns_servers = parse_dns_csv(&text);
-                            let dns_after = eg_save.dns_servers.clone();
-                            let to_send = eg_save.clone();
-                            let res = cx
-                                .background_executor()
-                                .spawn(async move {
-                                    daemon::send_request(
-                                        &socket_dns,
-                                        &ControlRequest::UpsertEgress(to_send),
-                                    )
-                                })
-                                .await;
-                            if let Some(st) = weak_dns.upgrade() {
-                                let _ = cx.update_entity(&st, |s, cx| {
-                                    match res {
-                                        Ok(ControlResponse::Ok) => {
-                                            s.status = Some("DNS saved.".into());
-                                            if let Some(e) = s.egresses.get_mut(idx) {
-                                                e.dns_servers = dns_after.clone();
-                                            }
-                                        }
-                                        Ok(ControlResponse::Error(msg)) => {
-                                            s.status = Some(format!("save failed: {msg}"));
-                                        }
-                                        Err(e) => {
-                                            s.status = Some(format!("save failed: {e}"));
-                                        }
-                                        _ => {
-                                            s.status = Some("unexpected save response".into());
-                                        }
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                        })
-                        .detach();
-                    })
-                    .child("Save DNS"),
-            )
-            .into_any_element()
-    } else {
-        div()
-            .text_size(px(11.))
-            .text_color(colors::muted())
-            .child("…")
-            .into_any_element()
-    };
-
-    h_flex()
-        .w_full()
-        .items_start()
-        .justify_between()
-        .gap(px(8.))
-        .py(px(8.))
-        .px(px(8.))
-        .rounded(px(4.))
-        .bg(colors::surface_container())
-        .border_1()
-        .border_color(colors::border())
-        .child(
-            v_flex()
-                .flex_1()
-                .gap(px(4.))
-                .child(
-                    h_flex()
-                        .gap(px(8.))
-                        .items_center()
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(egress.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(colors::muted())
-                                .child(format!("({})", egress.id)),
-                        )
-                        .when(!egress.is_system_default, |el| {
-                            el.child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(colors::teal())
-                                    .child(avail),
-                            )
-                        }),
-                )
-                .child(
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(color)
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(3.))
+                            .border_1()
+                            .border_color(color)
+                            .bg(colors::bg())
+                            .child(label.to_string()),
+                    )
+                    .into_any_element()
+            }
+            // Targets
+            2 => {
+                if egress.targets.is_empty() {
                     div()
-                        .text_size(px(11.))
                         .text_color(colors::muted())
-                        .child(targets),
-                )
-                .child(dns_el),
-        )
-        .when(!egress.is_system_default, |el| {
-            el.child(
+                        .child("default routing")
+                        .into_any_element()
+                } else {
+                    let targets: Vec<String> =
+                        egress.targets.iter().map(|t| route_summary(t)).collect();
+                    div()
+                        .text_color(colors::text())
+                        .child(targets.join(", "))
+                        .into_any_element()
+                }
+            }
+            // DNS
+            3 => {
+                if egress.dns_servers.is_empty() {
+                    div()
+                        .text_color(colors::muted())
+                        .child("—")
+                        .into_any_element()
+                } else {
+                    div()
+                        .text_color(colors::text())
+                        .child(egress.dns_servers.join(", "))
+                        .into_any_element()
+                }
+            }
+            // Status badge
+            4 => {
+                let (label, color) =
+                    if egress.is_available || egress.is_system_default {
+                        ("ACTIVE", colors::green())
+                    } else {
+                        ("INACTIVE", colors::muted())
+                    };
                 div()
-                    .id(ElementId::Name(format!("eg-del-{}", egress.id).into()))
-                    .text_size(px(11.))
-                    .text_color(colors::error())
-                    .cursor_pointer()
-                    .px(px(8.))
-                    .py(px(4.))
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(colors::error())
-                    .on_click({
-                        let eid = egress.id.clone();
-                        let socket_path = socket_path.clone();
-                        let weak = state_weak.clone();
-                        move |_, _, cx| {
-                            let weak = weak.clone();
-                            let eid_req = eid.clone();
-                            let eid_cmp = eid.clone();
-                            let socket_path = socket_path.clone();
-                            cx.spawn(async move |cx| {
-                                let res = cx
-                                    .background_executor()
-                                    .spawn(async move {
-                                        daemon::send_request(
-                                            &socket_path,
-                                            &ControlRequest::DeleteEgress { id: eid_req },
-                                        )
-                                    })
-                                    .await;
-                                if let Some(st) = weak.upgrade() {
-                                    let _ = cx.update_entity(&st, |s, cx| {
-                                        match res {
-                                            Ok(ControlResponse::Ok) => {
-                                                s.egresses.retain(|e| e.id != eid_cmp);
-                                                s.load_generation =
-                                                    s.load_generation.saturating_add(1);
-                                                s.status = Some("Egress removed.".into());
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(color)
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(3.))
+                            .border_1()
+                            .border_color(color)
+                            .bg(colors::bg())
+                            .child(label.to_string()),
+                    )
+                    .into_any_element()
+            }
+            // Controls (delete for non-system)
+            5 => {
+                if egress.is_system_default {
+                    return div().into_any_element();
+                }
+                let eid = egress.id.clone();
+                let socket_path = self.socket_path.clone();
+                let weak = self.state_weak.clone();
+
+                div()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .id(gpui::ElementId::Name(format!("eg-del-{eid}").into()))
+                            .text_size(px(11.))
+                            .text_color(colors::error())
+                            .cursor_pointer()
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(3.))
+                            .border_1()
+                            .border_color(colors::error())
+                            .on_click(move |_, _, cx| {
+                                let eid_req = eid.clone();
+                                let eid_cmp = eid.clone();
+                                let socket_path = socket_path.clone();
+                                let weak = weak.clone();
+                                cx.spawn(async move |cx| {
+                                    let res = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            daemon::send_request(
+                                                &socket_path,
+                                                &ControlRequest::DeleteEgress { id: eid_req },
+                                            )
+                                        })
+                                        .await;
+                                    if let Some(st) = weak.upgrade() {
+                                        let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                            match res {
+                                                Ok(ControlResponse::Ok) => {
+                                                    s.egresses.retain(|e| e.id != eid_cmp);
+                                                    s.load_generation =
+                                                        s.load_generation.saturating_add(1);
+                                                    s.status = Some("Egress removed.".into());
+                                                }
+                                                Ok(ControlResponse::Error(msg)) => {
+                                                    s.status =
+                                                        Some(format!("delete failed: {msg}"));
+                                                }
+                                                Err(e) => {
+                                                    s.status =
+                                                        Some(format!("delete failed: {e}"));
+                                                }
+                                                _ => {
+                                                    s.status =
+                                                        Some("unexpected delete response".into());
+                                                }
                                             }
-                                            Ok(ControlResponse::Error(msg)) => {
-                                                s.status =
-                                                    Some(format!("delete failed: {msg}"));
-                                            }
-                                            Err(e) => {
-                                                s.status =
-                                                    Some(format!("delete failed: {e}"));
-                                            }
-                                            _ => {
-                                                s.status =
-                                                    Some("unexpected delete response".into());
-                                            }
-                                        }
-                                        cx.notify();
-                                    });
-                                }
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .detach();
                             })
-                            .detach();
-                        }
-                    })
-                    .child("Delete"),
-            )
-        })
-        .into_any_element()
+                            .child("Delete"),
+                    )
+                    .into_any_element()
+            }
+            _ => div().into_any_element(),
+        }
+    }
 }
