@@ -380,6 +380,12 @@ Planned (Phase 2 onward):
 9. **Daemon-owned routed connect:** Emulator stays unprivileged; daemon accepts `OpenRoutedTcp`, installs **managed** policy-routing (`ip rule fwmark … table …`) via `SystemRouteManager`, sets **`SO_MARK`** on the outbound socket to hit that table, and relays bytes. **Tun:** `default dev <tun>` in the managed table only—do **not** reuse WireGuard’s existing fwmark when that mark means split-tunnel bypass (traffic would leave via `main`/LAN). **Device:** optional Linux **`SO_BINDTODEVICE`** on the iface plus source-IP bind + same fwmark pattern. Diagnostics log both unmarked `ip route get` (follows default route) and **`ip route get … mark …`** (shows the marked policy path).
 
 10. **Per-egress DNS resolution:** Daemon resolves hostnames with egress-specific DNS servers when configured, with fallback to system resolver.
+11. **Throne transparent proxy compatibility:** Device-routed connections bypass throne's TCP redirect via `output_nat` chain:
+    - Saves routing mark to conntrack mark, sets throne's bypass mark (0x2024)
+    - Throne skips redirect for bypassed packets
+    - Bypass only applies when output device is NOT throne-tun
+    - Routing mark restored before routing decision via conntrack
+    - Configurable `ROUTE_MARK_BASE` (default: 20000) via `LOGIGUARD_ROUTE_MARK_BASE` env var
 
 ## Systemd Integration
 
@@ -404,6 +410,7 @@ WantedBy=multi-user.target
 ## Environment Variables
 
 - `LOGIGUARD_SOCKET_PATH` — Unix control socket (daemon default: `/tmp/logiguard.sock`)
+- `LOGIGUARD_ROUTE_MARK_BASE` — Base value for routing fwmark allocation (default: 20000). Used to avoid conflicts with other tools (sing-box, xray, throne).
 - `LOGIGUARD_DB_PATH` — SQLite database file (daemon default: `/tmp/logiguard.db`; override for production paths)
 - `LOGIGUARD_DEVICE_ROUTE_FALLBACK` — if `1`/`true`/`yes`, routed **device** connect may fall back to unmarked `connect` after failures (escape hatch; not fail-close strict)
 - `LOGIGUARD_NFQUEUE` — NFQUEUE number to listen on (default: 0)

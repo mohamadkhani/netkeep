@@ -178,24 +178,87 @@ impl<S: VerdictSink> DryRunEnforcer<S> {
 // Nftables bootstrap — sets up/tears down the NFQUEUE interception rules
 // ---------------------------------------------------------------------------
 
+/// Base fwmark used by logiguard's policy-routing tables.
+/// Packets carrying any mark in this range are daemon-originated relay
+/// connections and must NOT be re-queued to NFQUEUE (would cause a deadlock
+/// where the relay's own SYN is held pending a user decision).
+pub const ROUTE_MARK_BASE: u32 = 20000;
+
 pub trait NftablesBootstrap: Send + Sync {
-    fn setup(&self, queue_num: u16) -> Result<(), String>;
+    /// Install the logiguard nftables table.
+    ///
+    /// * `queue_num` — when `Some(n)`, NFQUEUE rules are added so packets are
+    ///   sent to userspace for classification.  When `None`, only the
+    ///   route-mark protection chains are installed (no interception).
+    /// * `route_mark_base` — marks at or above this value belong to logiguard
+    ///   relay sockets and are preserved across other tools' marking chains
+    ///   via conntrack mark save/restore.
+    fn setup(&self, queue_num: Option<u16>, route_mark_base: u32) -> Result<(), String>;
     fn teardown(&self) -> Result<(), String>;
 }
 
 pub struct SystemNftablesBootstrap;
 
 impl NftablesBootstrap for SystemNftablesBootstrap {
-    fn setup(&self, queue_num: u16) -> Result<(), String> {
+    fn setup(&self, queue_num: Option<u16>, route_mark_base: u32) -> Result<(), String> {
         // Idempotent: tear down first, ignore errors (table may not exist yet).
         let _ = self.teardown();
-        let script = format!(
-            "add table inet logiguard\n\
-             add chain inet logiguard output {{ type filter hook output priority 0; policy accept; }}\n\
-             add rule inet logiguard output queue num {queue_num}\n\
-             add chain inet logiguard forward {{ type filter hook forward priority 0; policy accept; }}\n\
-             add rule inet logiguard forward queue num {queue_num}\n"
+        // Two-chain strategy to survive transparent-proxy tools (e.g. throne,
+        // sing-box, clash) that mark packets in their filter chain (priority 0):
+        //
+        //  priority -150  output_early  ← we run first
+        //                   • save relay mark into conntrack mark (ct mark)
+        //                   • accept relay packets → skip NFQUEUE
+        //                   • queue everything else to NFQUEUE
+        //  priority -100                ← iptables nat OUTPUT (REDIRECT/DNAT)
+        //  priority    0                ← proxy marks packet (e.g. 0x2023)
+        //  priority  +10  output_late   ← we run last, AFTER the proxy
+        //                   • if ct mark >= route_mark_base → restore it
+        //                   • routing decision now sees our mark, not the proxy's
+        //
+        // accept in output_early does NOT prevent priority-0 chains from running;
+        // it only prevents NFQUEUE re-queuing and the drop path.  The ct mark
+        // survives across hook priorities (it's per-connection state), so we can
+        // restore our SO_MARK after the proxy has overwritten the packet mark.
+        let mut script = String::new();
+        script.push_str("add table inet logiguard\n");
+
+        // Add a nat/output chain to bypass throne's TCP redirect for our marked traffic.
+        // Throne uses "meta nfproto ipv4 meta l4proto tcp redirect to :37805" which
+        // would otherwise redirect all our routed connections to its local proxy.
+        // Throne's own rule checks: "meta mark 0x00002024 return" (bypass).
+        // We set this bypass mark for our traffic going to physical devices (NOT throne-tun),
+        // so throne skips the redirect, while also saving our routing mark for later restoration.
+        // Use priority -199 to run BEFORE throne's "mangle" priority (-150).
+        script.push_str(
+            "add chain inet logiguard output_nat { type nat hook output priority -199; policy accept; }\n",
         );
+        // Only bypass throne if output device is NOT throne-tun (i.e., physical NIC routing)
+        script.push_str(&format!(
+            "add rule inet logiguard output_nat meta mark >= {route_mark_base} oifname != \"throne-tun\" ct mark set meta mark meta mark set 0x2024 return\n",
+        ));
+
+        script.push_str(
+            "add chain inet logiguard output_early { type filter hook output priority -150; policy accept; }\n",
+        );
+        // Restore routing mark from ct mark (set by output_nat) and accept to skip NFQUEUE.
+        // Note: ct mark >= route_mark_base means this is our routed traffic that was bypassed.
+        script.push_str(&format!(
+            "add rule inet logiguard output_early ct mark >= {route_mark_base} meta mark set ct mark accept\n",
+        ));
+        if let Some(q) = queue_num {
+            script.push_str(&format!(
+                "add rule inet logiguard output_early queue num {q}\n",
+            ));
+        }
+        if let Some(q) = queue_num {
+            script.push_str(
+                "add chain inet logiguard forward { type filter hook forward priority 0; policy accept; }\n",
+            );
+            script.push_str(&format!(
+                "add rule inet logiguard forward queue num {q}\n",
+            ));
+        }
         run_nft_script(&script)
     }
 
@@ -388,7 +451,7 @@ impl FakeBootstrap {
 }
 
 impl NftablesBootstrap for FakeBootstrap {
-    fn setup(&self, _queue_num: u16) -> Result<(), String> {
+    fn setup(&self, _queue_num: Option<u16>, _route_mark_base: u32) -> Result<(), String> {
         self.setup_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.fail { Err("fake setup failure".to_string()) } else { Ok(()) }
     }
@@ -584,7 +647,7 @@ mod tests {
     #[test]
     fn fake_bootstrap_setup_records_call() {
         let b = FakeBootstrap::default();
-        assert!(b.setup(0).is_ok());
+        assert!(b.setup(Some(0), ROUTE_MARK_BASE).is_ok());
         assert_eq!(b.setup_count(), 1);
         assert_eq!(b.teardown_count(), 0);
     }
@@ -599,7 +662,7 @@ mod tests {
     #[test]
     fn fake_bootstrap_propagates_failure() {
         let b = FakeBootstrap { fail: true, ..Default::default() };
-        assert!(b.setup(0).is_err());
+        assert!(b.setup(Some(0), ROUTE_MARK_BASE).is_err());
         assert!(b.teardown().is_err());
     }
 

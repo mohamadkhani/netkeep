@@ -12,7 +12,7 @@ use control_api::{ControlRequest, ControlResponse, PushNotification};
 use control_service::{ControlService, HealthConfig, SharedService};
 use core_types::{Egress, RouteTarget};
 use decision_engine::{DecisionEngine, OverflowPolicy};
-use enforcer::{NftablesBootstrap, RouteManager, SystemNftablesBootstrap, SystemRouteManager};
+use enforcer::{NftablesBootstrap, RouteManager, SystemNftablesBootstrap, SystemRouteManager, ROUTE_MARK_BASE};
 use enforcer::nfqueue::NfqueueProcessor;
 use flow_classifier::{
     FlowClassifier, FakeProcessResolver, FakeDnsResolver, FakeDeviceLabelResolver,
@@ -31,7 +31,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 100;
 const DEFAULT_PENDING_LIMIT: usize = 100;
 const ROUTED_CONNECT_TIMEOUT_SECS: u64 = 8;
 const DEVICE_ROUTE_FALLBACK_ENV: &str = "LOGIGUARD_DEVICE_ROUTE_FALLBACK";
-const DEVICE_ROUTE_MARK_BASE: u32 = 20000;
+const ROUTE_MARK_BASE_ENV: &str = "LOGIGUARD_ROUTE_MARK_BASE";
 
 struct RoutePolicyState {
     next_mark: u32,
@@ -40,9 +40,9 @@ struct RoutePolicyState {
 }
 
 impl RoutePolicyState {
-    fn new() -> Self {
+    fn with_base(mark_base: u32) -> Self {
         Self {
-            next_mark: DEVICE_ROUTE_MARK_BASE,
+            next_mark: mark_base,
             marks_by_target: HashMap::new(),
             manager: SystemRouteManager::new(),
         }
@@ -51,7 +51,17 @@ impl RoutePolicyState {
 
 fn route_policy_state() -> &'static Mutex<RoutePolicyState> {
     static STATE: OnceLock<Mutex<RoutePolicyState>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(RoutePolicyState::new()))
+    // Initialised explicitly by init_route_policy before any relay thread runs.
+    // Falls back to ROUTE_MARK_BASE if somehow called before init (shouldn't happen).
+    STATE.get_or_init(|| Mutex::new(RoutePolicyState::with_base(ROUTE_MARK_BASE)))
+}
+
+/// Call once in main before any relay threads start.
+/// Forces the singleton to use the runtime mark base instead of the compiled default.
+fn init_route_policy(mark_base: u32) {
+    if let Ok(mut s) = route_policy_state().lock() {
+        s.next_mark = mark_base;
+    }
 }
 
 fn ensure_route_mark(target: &RouteTarget) -> Result<u32, String> {
@@ -368,14 +378,8 @@ fn connect_via_device(addrs: &[SocketAddr], iface: &str) -> Result<TcpStream, St
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false);
-    let current_default = default_route_iface();
-    if default_route_iface().as_deref() == Some(iface) {
-        eprintln!(
-            "routed device connect fallback: iface={iface} is default route, retrying plain connect"
-        );
-        return connect_plain(addrs);
-    }
     if fallback_enabled {
+        let current_default = default_route_iface();
         eprintln!(
             "routed device connect fallback: env {DEVICE_ROUTE_FALLBACK_ENV}=1, \
              iface={iface}, current_default={current_default:?}, retrying plain connect"
@@ -659,6 +663,12 @@ fn main() {
     let udp_timeout_secs = parse_env_u64("LOGIGUARD_UDP_TIMEOUT_SECS", default_timeout_secs);
     let quic_timeout_secs = parse_env_u64("LOGIGUARD_QUIC_TIMEOUT_SECS", default_timeout_secs);
     let other_timeout_secs = parse_env_u64("LOGIGUARD_OTHER_TIMEOUT_SECS", default_timeout_secs);
+    let route_mark_base: u32 = std::env::var(ROUTE_MARK_BASE_ENV)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(ROUTE_MARK_BASE);
+    init_route_policy(route_mark_base);
+    println!("route mark base: {route_mark_base} (table base: {})", 10000 + route_mark_base);
 
     let _ = fs::remove_file(&socket_path);
     let listener = match UnixListener::bind(&socket_path) {
@@ -755,11 +765,32 @@ fn main() {
         }
     });
 
-    // Optional NFQUEUE enforcement (set LOGIGUARD_NFQUEUE=<queue_num>).
-    let bootstrap: Option<Arc<dyn NftablesBootstrap>> =
-        if let Ok(queue_str) = std::env::var("LOGIGUARD_NFQUEUE") {
-            let queue_num: u16 = queue_str.trim().parse().unwrap_or(0);
-            let bs: Arc<dyn NftablesBootstrap> = Arc::new(SystemNftablesBootstrap);
+    // Parse optional NFQUEUE config (set LOGIGUARD_NFQUEUE=<queue_num>).
+    let nfqueue_num: Option<u16> = std::env::var("LOGIGUARD_NFQUEUE")
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
+
+    // Always install the nftables protection chains — they preserve our route
+    // mark across other tools' marking chains (e.g. throne, sing-box) so that
+    // device-routed relay connections actually leave via the requested NIC.
+    // NFQUEUE rules are only added when LOGIGUARD_NFQUEUE is set.
+    let bs: Arc<dyn NftablesBootstrap> = Arc::new(SystemNftablesBootstrap);
+    let nftables_ready = match bs.setup(nfqueue_num, route_mark_base) {
+        Ok(()) => {
+            println!(
+                "nftables rules applied (route_mark_base={route_mark_base}, nfqueue={nfqueue_num:?})"
+            );
+            true
+        }
+        Err(e) => {
+            eprintln!("nftables setup failed (are you root?): {e}");
+            false
+        }
+    };
+
+    // Start the NFQUEUE processor if enabled and nftables came up.
+    let bootstrap: Option<Arc<dyn NftablesBootstrap>> = if nftables_ready {
+        if let Some(queue_num) = nfqueue_num {
             let classifier = FlowClassifier::new(
                 FakeProcessResolver { result: None },
                 FakeDnsResolver { result: None },
@@ -769,28 +800,24 @@ fn main() {
             match NfqueueProcessor::open(queue_num, classifier, registrar) {
                 Err(e) => {
                     eprintln!("nfqueue open failed (are you root?): {e}");
-                    None
+                    Some(Arc::clone(&bs))
                 }
                 Ok(mut processor) => {
-                    if let Err(e) = bs.setup(queue_num) {
-                        eprintln!("nftables setup failed: {e}");
-                        None
-                    } else {
-                        println!(
-                            "nftables rules applied, nfqueue processor on queue {queue_num}"
-                        );
-                        std::thread::spawn(move || {
-                            if let Err(e) = processor.run_loop() {
-                                eprintln!("nfqueue processor stopped: {e}");
-                            }
-                        });
-                        Some(bs)
-                    }
+                    println!("nfqueue processor running on queue {queue_num}");
+                    std::thread::spawn(move || {
+                        if let Err(e) = processor.run_loop() {
+                            eprintln!("nfqueue processor stopped: {e}");
+                        }
+                    });
+                    Some(Arc::clone(&bs))
                 }
             }
         } else {
-            None
-        };
+            Some(Arc::clone(&bs))
+        }
+    } else {
+        None
+    };
 
     for stream in listener.incoming() {
         match stream {

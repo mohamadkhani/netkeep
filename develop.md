@@ -597,6 +597,18 @@ Use this section as a running journal. Keep entries short and dated.
   - try all resolved addresses with timeout per address
 - [x] Added state-store test: `sqlite_egress_dns_servers_roundtrip`
 
+### 2026-05-11 (throne bypass fix)
+
+- [x] Added `ROUTE_MARK_BASE: u32 = 20000` constant to `enforcer` for configurable routing mark base
+- [x] Made routing mark base configurable via `LOGIGUARD_ROUTE_MARK_BASE` env var (default: 20000)
+- [x] Added `output_nat` nftables chain (-199) to bypass throne's TCP redirect for device-routed connections:
+  - Saves routing mark to conntrack mark
+  - Sets throne's bypass mark (0x2024) when output device is NOT throne-tun
+  - Throne sees bypass mark and skips its redirect to :37805
+- [x] Modified `output_early` to restore routing mark from conntrack mark before routing decision
+- [x] Removed `output_late` chain (simplified: no longer needed)
+- [x] Fixed device routing to physical NICs (enp3s0, etc.) working alongside throne transparent proxy
+
 ### 2026-05-06 (session 5)
 
 - [x] Window lifecycle: Check if pending decisions exist before opening window
