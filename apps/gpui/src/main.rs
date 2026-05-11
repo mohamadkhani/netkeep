@@ -19,7 +19,7 @@ use gpui_component::{Root, Theme, ThemeMode};
 use gtk::prelude::WidgetExt as _;
 #[cfg(target_os = "linux")]
 use tray_icon::menu::ContextMenu as _;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, MenuId};
+use tray_icon::menu::{IsMenuItem, Menu as TrayMenu, MenuEvent, MenuId, MenuItem as TrayMenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 
 use app::DecisionApp;
@@ -124,47 +124,44 @@ fn run_tray_monitor() {
 
         // Build menu before the tray so GTK-backed `muda` sees items on the first `gtk_context_menu()`
         // build (see muda gtk/mod.rs: menu children are only populated once).
-        let menu = Menu::new();
+        let menu = TrayMenu::new();
 
-        // NFQUEUE toggle section
-        menu
-            .append(&MenuItem::with_id(
-                MenuId::new("logiguard-nfqueue-enable"),
-                "Enable Network Interception",
-                true,
-                None,
-            ))
-            .expect("menu nfqueue enable item");
-        menu
-            .append(&MenuItem::with_id(
-                MenuId::new("logiguard-nfqueue-disable"),
-                "Disable Network Interception",
-                true,
-                None,
-            ))
-            .expect("menu nfqueue disable item");
-
-        // Separator
-        menu
-            .append(&MenuItem::new("separator", false, None))
-            .expect("menu separator");
-
-        menu
-            .append(&MenuItem::with_id(
-                MenuId::new("logiguard-manage"),
-                "Settings…",
-                true,
-                None,
-            ))
-            .expect("menu manage item");
-        menu
-            .append(&MenuItem::with_id(
-                MenuId::new("logiguard-quit"),
-                "Quit",
-                true,
-                None,
-            ))
-            .expect("menu quit item");
+        // Use muda type aliases so we never pick `gtk::Menu` / `gtk::MenuItem` from other preludes,
+        // and build a `&[&dyn IsMenuItem]` slice so `append_items` matches the expected trait object.
+        let nfqueue_enable = TrayMenuItem::with_id(
+            MenuId::new("logiguard-nfqueue-enable"),
+            "Enable Network Interception",
+            true,
+            None,
+        );
+        let nfqueue_disable = TrayMenuItem::with_id(
+            MenuId::new("logiguard-nfqueue-disable"),
+            "Disable Network Interception",
+            true,
+            None,
+        );
+        let sep = PredefinedMenuItem::separator();
+        let manage = TrayMenuItem::with_id(
+            MenuId::new("logiguard-manage"),
+            "Settings…",
+            true,
+            None,
+        );
+        let quit_item = TrayMenuItem::with_id(
+            MenuId::new("logiguard-quit"),
+            "Quit",
+            true,
+            None,
+        );
+        // Build as `Vec<&dyn IsMenuItem>` so each concrete item coerces at push sites (clearer
+        // for rust-analyzer than a mixed-type array literal).
+        let mut items: Vec<&dyn IsMenuItem> = Vec::with_capacity(5);
+        items.push(&nfqueue_enable);
+        items.push(&nfqueue_disable);
+        items.push(&sep);
+        items.push(&manage);
+        items.push(&quit_item);
+        menu.append_items(&items).expect("tray menu items");
 
         #[cfg(target_os = "linux")]
         {
