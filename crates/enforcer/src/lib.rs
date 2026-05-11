@@ -557,6 +557,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             sni_hint: None,
             ingress_interface: None,
+            tcp_payload_empty: false,
         }
     }
 

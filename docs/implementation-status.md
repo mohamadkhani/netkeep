@@ -1,8 +1,8 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 77 tests passing (`cargo test --workspace`)
+**Test Status:** 81 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, settings window with Table/Dialog, proxy support)
-**Last Updated:** 2026-05-10
+**Last Updated:** 2026-05-12
 
 ## Completed Work
 
@@ -31,7 +31,11 @@
 - [x] `NfqueueProcessor` using pure-Rust `nfq` crate
 - [x] Packet parsing tests (IPv4/TCP, IPv4/UDP, IPv6, QUIC detection)
 - [x] Verdict path tests (allow/deny)
+- [x] TLS SNI extraction from ClientHello (`extract_tls_sni` in `enforcer::nfqueue`)
+- [x] TCP control packets (SYN/ACK/FIN) accepted immediately so handshake completes before classification
+- [x] `RawPacket::tcp_payload_empty` flag to distinguish control packets from data packets
 - [ ] **Not done:** Real netstat-based ProcessResolver (still using FakeProcessResolver)
+- [ ] **Not done:** DNS snoop cache for UDP/QUIC domain inference (SNI covers TCP/HTTPS)
 - [ ] **Not done:** Integration tests with actual kernel NFQUEUE
 
 ### Phase 3: Persistence + CLI ✓
@@ -307,10 +311,10 @@ Currently used by the daemon (see also `apps/daemon/src/main.rs`):
    - Tests: 2-3 integration tests with real process lookup
    - Risk: Low (behind trait, mock-friendly)
 
-2. **SNI Extraction:** Parse QUIC Initial packets to extract SNI hint.
-   - Affects: flow-classifier crate
-   - Tests: 1-2 SNI parsing tests
-   - Risk: Low (optional hint, fallback to IP works)
+2. **DNS Snoop Cache:** Intercept plaintext DNS responses (UDP src port 53) to populate an ip→domain cache for UDP/QUIC flows where SNI is unavailable.
+   - Affects: flow-classifier crate (new `DnsSnoopCache` impl of `DnsResolver`), enforcer crate (detect + parse DNS response packets)
+   - Tests: 2-3 DNS parsing tests, 1 cache lookup test
+   - Risk: Medium — race condition possible (first UDP packet may arrive before DNS response processed); DoH traffic is invisible
 
 3. **Phase 2 Integration Tests:** Test entire flow (unknown flow → pending → timeout → denied) with real NFQUEUE.
    - Requires: Linux kernel NFQUEUE support
@@ -325,31 +329,26 @@ Currently used by the daemon (see also `apps/daemon/src/main.rs`):
    - Tests: 1 boot gate integration test
    - Risk: Medium (kernel safety)
 
-5. **Real DNS Resolver:** Intercept DNS queries to collect domain-IP associations.
-   - Affects: flow-classifier crate
-   - Tests: 2-3 DNS caching tests
-   - Risk: Medium (DNS interception tricky)
-
-6. **Config File Support:** Allow TOML/YAML config instead of env vars only.
+5. **Config File Support:** Allow TOML/YAML config instead of env vars only.
    - Affects: daemon, control-api
    - Tests: 2-3 config parsing tests
    - Risk: Low
 
 ### Phase 5 (Later)
 
-7. **Systemd User Service Unit:** Package daemon as user-installable systemd service.
+6. **Systemd User Service Unit:** Package daemon as user-installable systemd service.
    - Risk: Low
    - Affects: packaging, not core logic
 
-8. **Web UI:** GPUI app covers desktop. Web UI for remote/admin access (stretch goal).
+7. **Web UI:** GPUI app covers desktop. Web UI for remote/admin access (stretch goal).
 
 ## Known Limitations
 
 1. **ProcessResolver:** Currently returns FakeProcessResolver. Real lookup needed for production.
 
-2. **SNI Extraction:** QUIC Initial packets parsed minimally; SNI hint always None.
+2. **SNI — TCP/HTTPS only:** TLS ClientHello SNI extraction works for TCP. QUIC encrypts its Initial packets in newer versions; SNI hint is None for QUIC flows. DNS snoop cache (not yet implemented) would fill this gap.
 
-3. **No DNS Interception:** Domain hints come from SNI only. No passive DNS query collection.
+3. **No DNS Snoop Cache:** For UDP/QUIC flows the destination shows as IP-only. Plaintext DNS response interception would provide domain hints, but DoH traffic is invisible to this approach.
 
 4. **Queue Overflow Policy:** Hardcoded to deny on overflow. User cannot change at runtime (only via env var).
 

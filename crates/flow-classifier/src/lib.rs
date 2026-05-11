@@ -12,6 +12,9 @@ pub struct RawPacket {
     pub sni_hint: Option<String>,
     /// Network interface the packet arrived on (populated for gateway/routed traffic).
     pub ingress_interface: Option<String>,
+    /// True when this is a TCP control packet (SYN/ACK/FIN) with no application payload.
+    /// These must be accepted immediately so the handshake completes before classification.
+    pub tcp_payload_empty: bool,
 }
 
 /// Resolves the local process name from a socket endpoint.
@@ -179,6 +182,7 @@ mod tests {
             protocol,
             sni_hint: sni.map(str::to_string),
             ingress_interface: iface.map(str::to_string),
+            tcp_payload_empty: false,
         }
     }
 

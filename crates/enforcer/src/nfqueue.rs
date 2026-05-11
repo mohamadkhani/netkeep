@@ -43,9 +43,11 @@ where
             let verdict = match parse_raw_packet(msg.get_payload()) {
                 None => Verdict::Drop,
                 Some(raw) => {
-                    // Defense-in-depth: never intercept loopback traffic even if the
-                    // nftables rule has an edge case (e.g. startup race, kernel quirk).
-                    if is_loopback(&raw.dst_ip) {
+                    // Pass through loopback (defense-in-depth) and TCP control packets
+                    // (SYN/ACK/FIN) with no payload. Accepting SYNs lets the TCP handshake
+                    // complete so the TLS ClientHello — which carries the SNI — arrives as
+                    // the first classifiable packet.
+                    if is_loopback(&raw.dst_ip) || raw.tcp_payload_empty {
                         Verdict::Accept
                     } else {
                         let flow = self.classifier.classify(&raw);
@@ -100,18 +102,20 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         }
     };
 
-    let (src_port, dst_port, protocol) = match sliced.transport.as_ref() {
+    let (src_port, dst_port, protocol, sni_hint, tcp_payload_empty) = match sliced.transport.as_ref() {
         Some(TransportSlice::Tcp(t)) => {
-            (t.source_port(), t.destination_port(), TransportProtocol::Tcp)
+            let payload = t.payload();
+            let sni = extract_tls_sni(payload);
+            (t.source_port(), t.destination_port(), TransportProtocol::Tcp, sni, payload.is_empty())
         }
         Some(TransportSlice::Udp(u)) => {
             let (sp, dp) = (u.source_port(), u.destination_port());
             // Best-effort QUIC detection: UDP to/from port 443.
             let proto =
                 if dp == 443 || sp == 443 { TransportProtocol::Quic } else { TransportProtocol::Udp };
-            (sp, dp, proto)
+            (sp, dp, proto, None, false)
         }
-        _ => (0, 0, TransportProtocol::Other),
+        _ => (0, 0, TransportProtocol::Other, None, false),
     };
 
     Some(RawPacket {
@@ -120,9 +124,97 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         dst_ip,
         dst_port,
         protocol,
-        sni_hint: None,
+        sni_hint,
         ingress_interface: None,
+        tcp_payload_empty,
     })
+}
+
+/// Extract the TLS SNI hostname from a TCP payload containing a TLS ClientHello.
+///
+/// TLS record layout:
+///   [0]    content type: 0x16 (handshake)
+///   [1..2] legacy version: 0x03 0x01 (or 0x03 0x03)
+///   [3..4] record length (big-endian u16)
+///   [5]    handshake type: 0x01 (ClientHello)
+///   [6..8] handshake length (big-endian u24)
+///   [9..10] client version
+///   [11..42] random (32 bytes)
+///   [43]   session id length
+///   ...    session id
+///   then:  cipher suites length (u16), cipher suites
+///   then:  compression methods length (u8), compression methods
+///   then:  extensions length (u16), extensions
+///     each extension: type (u16) + length (u16) + data
+///     SNI extension type = 0x0000
+///       SNI list length (u16)
+///       SNI entry type (u8, 0x00 = host_name) + name length (u16) + name bytes
+fn extract_tls_sni(payload: &[u8]) -> Option<String> {
+    // Need at least TLS record header (5) + handshake header (4) + hello header (34+)
+    if payload.len() < 43 {
+        return None;
+    }
+    // TLS handshake record
+    if payload[0] != 0x16 || payload[1] != 0x03 {
+        return None;
+    }
+    // Handshake type must be ClientHello (0x01)
+    if payload[5] != 0x01 {
+        return None;
+    }
+
+    let mut pos = 43; // start of session id length
+
+    // Skip session id
+    let session_id_len = *payload.get(pos)? as usize;
+    pos += 1 + session_id_len;
+
+    // Skip cipher suites
+    let cipher_suites_len = u16::from_be_bytes([*payload.get(pos)?, *payload.get(pos + 1)?]) as usize;
+    pos += 2 + cipher_suites_len;
+
+    // Skip compression methods
+    let compression_len = *payload.get(pos)? as usize;
+    pos += 1 + compression_len;
+
+    // Extensions length
+    if pos + 2 > payload.len() {
+        return None;
+    }
+    let extensions_end = pos + 2 + u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
+    pos += 2;
+
+    // Walk extensions
+    while pos + 4 <= extensions_end && pos + 4 <= payload.len() {
+        let ext_type = u16::from_be_bytes([payload[pos], payload[pos + 1]]);
+        let ext_len = u16::from_be_bytes([payload[pos + 2], payload[pos + 3]]) as usize;
+        pos += 4;
+
+        if pos + ext_len > payload.len() {
+            return None;
+        }
+
+        if ext_type == 0x0000 {
+            // SNI extension: list_length(u16) + type(u8) + name_length(u16) + name
+            if ext_len < 5 {
+                return None;
+            }
+            let ext_data = &payload[pos..pos + ext_len];
+            // SNI entry type 0x00 = host_name
+            if ext_data[2] != 0x00 {
+                return None;
+            }
+            let name_len = u16::from_be_bytes([ext_data[3], ext_data[4]]) as usize;
+            if ext_data.len() < 5 + name_len {
+                return None;
+            }
+            return std::str::from_utf8(&ext_data[5..5 + name_len]).ok().map(str::to_string);
+        }
+
+        pos += ext_len;
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -181,6 +273,73 @@ mod tests {
     fn malformed_payload_returns_none() {
         assert!(parse_raw_packet(&[0xde, 0xad, 0xbe, 0xef]).is_none());
         assert!(parse_raw_packet(&[]).is_none());
+    }
+
+    /// Build a minimal TLS ClientHello TCP payload with the given SNI hostname.
+    fn build_tls_client_hello(sni: &str) -> Vec<u8> {
+        let sni_bytes = sni.as_bytes();
+        let name_len = sni_bytes.len() as u16;
+        // SNI extension data: list_len(u16) + entry_type(u8) + name_len(u16) + name
+        let sni_ext_data_len = (2 + 1 + 2 + sni_bytes.len()) as u16;
+        // Full extension wire size: type(2) + len(2) + data
+        let sni_ext_total = 4 + sni_ext_data_len as usize;
+        // Minimal ClientHello body: version(2) + random(32) + session_id_len(1) +
+        // cipher_suites_len(2) + cipher_suite(2) + compression_len(1) + null(1) +
+        // extensions_len(2) + SNI extension
+        let hello_body_len = 2 + 32 + 1 + 2 + 2 + 1 + 1 + 2 + sni_ext_total;
+        // TLS record length: handshake_type(1) + handshake_len(3) + body
+        let record_len = (1 + 3 + hello_body_len) as u16;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0x16, 0x03, 0x01]);          // TLS record header
+        buf.extend_from_slice(&record_len.to_be_bytes());
+        buf.push(0x01);                                        // handshake type: ClientHello
+        buf.push(0x00);
+        buf.extend_from_slice(&(hello_body_len as u16).to_be_bytes());
+        buf.extend_from_slice(&[0x03, 0x03]);                 // client_version TLS 1.2
+        buf.extend_from_slice(&[0u8; 32]);                    // random
+        buf.push(0x00);                                        // session_id_len = 0
+        buf.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f]);    // cipher_suites
+        buf.extend_from_slice(&[0x01, 0x00]);                 // compression: null
+        buf.extend_from_slice(&(sni_ext_total as u16).to_be_bytes()); // extensions_len
+        buf.extend_from_slice(&[0x00, 0x00]);                 // SNI extension type
+        buf.extend_from_slice(&sni_ext_data_len.to_be_bytes());
+        buf.extend_from_slice(&(1 + 2 + name_len).to_be_bytes()); // SNI list_len
+        buf.push(0x00);                                        // entry type: host_name
+        buf.extend_from_slice(&name_len.to_be_bytes());
+        buf.extend_from_slice(sni_bytes);
+        buf
+    }
+
+    #[test]
+    fn sni_extracted_from_tls_client_hello() {
+        let hello = build_tls_client_hello("example.com");
+        assert_eq!(extract_tls_sni(&hello), Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn sni_not_present_in_non_tls_payload() {
+        assert_eq!(extract_tls_sni(b"GET / HTTP/1.1\r\n"), None);
+        assert_eq!(extract_tls_sni(&[]), None);
+    }
+
+    #[test]
+    fn tcp_packet_with_tls_hello_populates_sni_hint() {
+        let hello = build_tls_client_hello("secure.example.org");
+        let mut buf = Vec::new();
+        PacketBuilder::ipv4([10, 0, 0, 1], [1, 1, 1, 1], 64)
+            .tcp(54321, 443, 0, 65535)
+            .write(&mut buf, &hello)
+            .unwrap();
+        let pkt = parse_raw_packet(&buf).expect("parsed");
+        assert_eq!(pkt.sni_hint.as_deref(), Some("secure.example.org"));
+    }
+
+    #[test]
+    fn tcp_packet_without_tls_has_no_sni_hint() {
+        let raw = build_ipv4_tcp([10, 0, 0, 1], [1, 1, 1, 1], 54321, 443);
+        let pkt = parse_raw_packet(&raw).expect("parsed");
+        assert_eq!(pkt.sni_hint, None);
     }
 
     #[test]

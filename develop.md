@@ -660,6 +660,19 @@ Use this section as a running journal. Keep entries short and dated.
   - deferred/failed spawns are retried on the next poll cycle
 - [x] Removed transient "Decision submitted. Closing..." state and 500ms delay for immediate window close after action
 
+### 2026-05-12 (session 13 — TLS SNI extraction + NFQUEUE domain inference)
+
+- [x] Added `extract_tls_sni()` to `enforcer::nfqueue` — pure byte parser for TLS ClientHello, no external deps
+- [x] Added `RawPacket::tcp_payload_empty` flag to distinguish TCP control packets from data packets
+- [x] Fixed destination showing `(unknown)` in dialog: root cause was classification happening on the TCP SYN (no payload), not the ClientHello
+  - TCP SYN/ACK/FIN (empty payload) are now accepted immediately so the handshake completes
+  - The TLS ClientHello — first packet with application data — is the one classified; SNI is available at that point
+- [x] Combined loopback + empty-payload accept into a single condition in `run_loop`
+- [x] Added 4 enforcer tests: SNI extraction, non-TLS payload, full TCP packet round-trip, no SNI on plain TCP
+- [x] Added `docs/nfqueue-packet-interception.md` — NFQUEUE internals, nftables chain setup, packet path diagram, platform comparison (Linux/macOS/Windows)
+- [x] Added `docs/nfqueue-domain-inference.md` — SNI vs DNS snoop design rationale, SYN timing trap, TLS ClientHello wire format, testing strategy
+- [x] Updated `docs/implementation-status.md` — test count 77→81, Phase 2 checklist, Known Limitations, Next Steps
+
 ## 10.1) Detected Bugs / Follow-ups (Open)
 
 - [ ] **Settings window is not resizable via window borders**
