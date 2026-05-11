@@ -187,6 +187,7 @@ nftables programming and NFQUEUE packet handling.
 - `PacketProcessor` — parse NFQUEUE packets, classify flows, query decision engine
 - `parse_raw_packet()` — IPv4/IPv6, TCP/UDP, QUIC detection from raw bytes
 - `NfqueueProcessor` — accepts packets from `nfq` crate, feeds to PacketProcessor
+- Loopback bypass (defense-in-depth): localhost traffic is accepted without prompting in both nftables and userspace (`127.0.0.0/8`, `::1`, and IPv4-mapped `::ffff:127.0.0.0/104`)
 
 **Data Flow:**
 1. nftables kernel module sends packet to NFQUEUE
@@ -386,6 +387,7 @@ Planned (Phase 2 onward):
     - Bypass only applies when output device is NOT throne-tun
     - Routing mark restored before routing decision via conntrack
     - Configurable `ROUTE_MARK_BASE` (default: 20000) via `LOGIGUARD_ROUTE_MARK_BASE` env var
+12. **Single-decision window gating in monitor mode:** Tray monitor allows only one decision dialog at a time and clears the open-window gate after the spawned `--pending-id` child exits (parent waits on child). Deferred pendings are retried on subsequent polls.
 
 ## Systemd Integration
 

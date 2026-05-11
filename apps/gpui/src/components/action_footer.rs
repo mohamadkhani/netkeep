@@ -1,6 +1,6 @@
 use gpui::{
-    AppContext as _, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, WeakEntity, div, px, prelude::FluentBuilder as _,
+    InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
+    WeakEntity, div, px, prelude::FluentBuilder as _,
 };
 use gpui_component::h_flex;
 
@@ -29,9 +29,6 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
         selected_egress_index,
         state: state_weak,
     } = props;
-
-    let state_weak_deny = state_weak.clone();
-    let state_weak_allow = state_weak.clone();
 
     let pid_deny = pending_id.clone();
     let pid_allow = pending_id.clone();
@@ -71,10 +68,10 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                 .w_full()
                 .gap(px(12.))
                 .child(
-                    allow_button(pid_allow, state_weak_allow, make_permanent, flow.clone(), selected_egress),
+                    allow_button(pid_allow, make_permanent, flow.clone(), selected_egress),
                 )
                 .child(
-                    deny_button(pid_deny, state_weak_deny, make_permanent, flow.clone()),
+                    deny_button(pid_deny, make_permanent, flow.clone()),
                 ),
         )
         // Centered link
@@ -279,7 +276,6 @@ fn egress_selector(
 
 fn allow_button(
     pid: String,
-    state_weak: WeakEntity<AppState>,
     make_permanent: bool,
     flow: FlowContext,
     selected_egress: Egress,
@@ -304,7 +300,6 @@ fn allow_button(
         .on_click({
             move |_, _, cx| {
                 let pid = pid.clone();
-                let state_weak = state_weak.clone();
                 let flow = flow.clone();
                 let mk_perm = make_permanent;
                 let rt = route_target.clone();
@@ -365,16 +360,6 @@ fn allow_button(
                             )
                         })
                         .await;
-                    if let Some(state) = state_weak.upgrade() {
-                        cx.update_entity(&state, |s, cx| {
-                            s.resolved = true;
-                            cx.notify();
-                        })
-                        .ok();
-                    }
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(500))
-                        .await;
                     std::process::exit(0);
                 })
                 .detach();
@@ -398,7 +383,6 @@ fn allow_button(
 
 fn deny_button(
     pid: String,
-    state_weak: WeakEntity<AppState>,
     make_permanent: bool,
     flow: FlowContext,
 ) -> gpui::AnyElement {
@@ -419,7 +403,6 @@ fn deny_button(
         .on_click({
             move |_, _, cx| {
                 let pid = pid.clone();
-                let state_weak = state_weak.clone();
                 let flow = flow.clone();
                 let mk_perm = make_permanent;
                 cx.spawn(async move |cx| {
@@ -468,16 +451,6 @@ fn deny_button(
                                 &ControlRequest::AddRule(rule),
                             )
                         })
-                        .await;
-                    if let Some(state) = state_weak.upgrade() {
-                        cx.update_entity(&state, |s, cx| {
-                            s.resolved = true;
-                            cx.notify();
-                        })
-                        .ok();
-                    }
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(500))
                         .await;
                     std::process::exit(0);
                 })

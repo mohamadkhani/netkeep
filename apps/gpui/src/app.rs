@@ -46,21 +46,6 @@ impl Render for DecisionApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
 
-        if state.resolved {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .bg(colors::surface_container())
-                .child(
-                    gpui::div()
-                        .text_color(colors::text())
-                        .text_sm()
-                        .child("Decision submitted. Closing..."),
-                )
-                .into_any_element();
-        }
-
         let now = state.now_secs;
         let make_permanent = state.make_permanent;
         let pending_count = state.pending_count;

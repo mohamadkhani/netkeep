@@ -609,6 +609,20 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Removed `output_late` chain (simplified: no longer needed)
 - [x] Fixed device routing to physical NICs (enp3s0, etc.) working alongside throne transparent proxy
 
+### 2026-05-11 (session 12 — pending UX + monitor reliability)
+
+- [x] Fixed loopback bypass gap for IPv4-mapped IPv6 localhost (`::ffff:127.0.0.0/104`):
+  - nftables now accepts mapped localhost before NFQUEUE in both `output_early` and `forward`
+  - `NfqueueProcessor::is_loopback` now treats mapped `127/8` as loopback (defense-in-depth)
+- [x] Added `nfqueue` unit test coverage for loopback detection including `::ffff:127.x.x.x`
+- [x] Fixed tray monitor "only first prompt appears" bug:
+  - root cause: `DECISION_WINDOW_OPEN` is process-local; child `--pending-id` process could not clear tray flag
+  - fix: tray process now `wait()`s on spawned child and clears gate after child exits
+- [x] Fixed deferred pending starvation in monitor:
+  - only insert `pending_id` into `shown_ids` after successful spawn
+  - deferred/failed spawns are retried on the next poll cycle
+- [x] Removed transient "Decision submitted. Closing..." state and 500ms delay for immediate window close after action
+
 ### 2026-05-06 (session 5)
 
 - [x] Window lifecycle: Check if pending decisions exist before opening window

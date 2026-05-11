@@ -18,6 +18,8 @@ The settings window is a separate GPUI process (`--settings` flag) that manages 
 Tray icon (main logiguard-gpui process)
   │
   ├── Monitor mode (default): polls daemon, spawns dialog per pending
+  │   - one-window gate is managed in the tray process
+  │   - tray waits on spawned `--pending-id` child and reopens gate on child exit
   │
   └── --settings flag → std::process::Command::spawn()
        │

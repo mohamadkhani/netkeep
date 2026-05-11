@@ -281,7 +281,6 @@ fn run_gui(pending_id: String) {
             item,
             now_secs: daemon::unix_now(),
             make_permanent: false,
-            resolved: false,
             pending_count: 0,
             egresses,
             selected_egress_index: 0,

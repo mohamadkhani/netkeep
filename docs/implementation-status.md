@@ -67,7 +67,7 @@
   - `daemon.rs` — socket IPC helpers (send_request, unix_now, fetch_pending, detect_egresses)
   - `fonts.rs` — custom font loading (Inter, SpaceGrotesk)
   - `monitor.rs` — background monitor mode (polls daemon, spawns GUI per pending)
-  - `state.rs` — AppState entity (item, now_secs, make_permanent, resolved, pending_count)
+  - `state.rs` — AppState entity (item, now_secs, make_permanent, pending_count)
   - `app.rs` — DecisionApp root view + Render impl + 1-second countdown ticker
   - `components/header.rs` — security icon, CONNECTION INTERCEPTED title, circular countdown ring, AUTO-DENY label
   - `components/flow_info.rs` — grid layout with colored badges (teal protocol, IP/direction chips)
@@ -87,6 +87,10 @@
 - [x] 1-second countdown ticker with auto-exit on timeout
 - [x] Async event handlers with weak entity references
 - [x] Monitor mode: polls daemon every 1s, spawns GUI window per new pending decision
+- [x] Monitor reliability fixes:
+  - `shown_ids` tracks only successfully spawned dialogs (deferred/failed spawns retry)
+  - decision-window gate is cleared in tray process after child window exits
+- [x] Decision window exits immediately after action (removed transient "Closing..." state and artificial delay)
 - [x] Settings window with Rules, Egress, Proxies tabs using gpui-component Table
 - [x] TableDelegate pattern for each tab with custom cell rendering
 - [x] Dialog for egress detail and proxy edit (double-click to open)
@@ -107,6 +111,7 @@
 - [x] Route probes in logs: unmarked `ip route get` vs `ip route get … mark …` for debugging policy vs default route
 - [x] Policy tie-break on `rule.id` when specificity and action rank tie (`policy-engine::resolve_action`)
 - [x] `RuleRepository::list_rules` returns stable **ORDER BY id**
+- [x] Loopback interception hardening: skip localhost in both nftables and userspace, including IPv4-mapped IPv6 localhost (`::ffff:127.0.0.0/104`)
 
 ## Bug Fixes (Session 3, 2026-05-06)
 
