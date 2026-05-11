@@ -503,6 +503,43 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Deep Slate dark theme applied via `Theme::change(ThemeMode::Dark, None, cx)`
 - [x] 93 workspace tests still passing
 
+### 2026-05-06 (session 5)
+
+- [x] Window lifecycle: Check if pending decisions exist before opening window
+- [x] Window closes (app exits cleanly) when decision queue becomes empty
+- [x] Initial check done synchronously before Application::new().run()
+- [x] Polling task monitors queue state and calls std::process::exit(0) when empty
+- [x] All 78 workspace tests passing with updated GPUI app
+- [x] Wrote comprehensive documentation: GPUI guide, gpui-component guide, Unix sockets, async patterns, architecture
+
+### 2026-05-06 (session 6)
+
+- [x] Refactored window lifecycle: App always runs, window shows/hides based on pending state
+- [x] Added `should_show_window` flag to AppState (default false)
+- [x] Window displays "Connecting..." until pending decisions arrive
+- [x] When first pending decision received → window shows with decision dialog
+- [x] When all decisions resolved → window returns to "Connecting..." state (stays open)
+- [x] Polling task automatically triggers window display on pending arrival
+- [x] No need to manually restart app when new decisions arrive
+- [x] All 78 tests still passing
+
+### 2026-05-06 (session 7)
+
+- [x] Analyzed OpenSnitch architecture and rules model for comparison
+- [x] Created comprehensive OPENSNITCH_COMPARISON.md document
+- [x] Compared GUI-to-daemon communication strategies
+- [x] Decided on bidirectional socket push using Tokio broadcast channel
+- [ ] Extend `ControlRequest` enum with `SubscribeToPending`
+- [ ] Add `PushNotification` enum to `core-types`
+- [ ] Extend `ControlResponse` with push variants (or separate type)
+- [ ] Add broadcast channel to `ControlService`
+- [ ] Implement subscriber tracking in daemon connection handler
+- [ ] Modify daemon socket reader to handle `tokio::select!` for requests + pushes
+- [ ] Modify GPUI to subscribe on startup and handle incoming push notifications
+- [ ] Remove 1-second polling loop from GPUI (use push instead)
+- [ ] Add tests for push notification lifecycle
+- [ ] Verify 93 tests still passing
+
 ### 2026-05-07/08 (session 8)
 
 - [x] Redesigned GPUI decision dialog to match Material Design 3 dark theme from `design/decision_dialog_window.html`
@@ -521,6 +558,28 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Updated docs: `architecture.md`, `implementation-status.md`, `gpui-components.md`, `gpui-api.md`
 - [x] Added `design/` folder with HTML design reference (`decision_dialog_window.html`)
 - [x] 93 workspace tests still passing
+
+### 2026-05-08 (session 9)
+
+- [x] Added daemon-side routed TCP relay API (`OpenRoutedTcp`) so emulator remains unprivileged
+- [x] Daemon now owns privileged routed connect for `RouteTarget::Tun` (`SO_MARK`) and `RouteTarget::Device` (source-IP bind)
+- [x] Added routed connect timeout (8s) to avoid long kernel-level hangs
+- [x] Daemon now sets `/tmp/logiguard.sock` permissions to `0666` after bind
+- [x] Added `Egress.dns_servers: Vec<String>` to `core-types`
+- [x] Added SQLite table `egress_dns_servers` and repository persistence/load path
+- [x] Added daemon per-egress DNS resolution:
+  - resolve host via egress DNS list when configured
+  - fallback to system DNS when no egress DNS configured
+  - try all resolved addresses with timeout per address
+- [x] Added state-store test: `sqlite_egress_dns_servers_roundtrip`
+
+### 2026-05-09 (routing hardening)
+
+- [x] Policy: `resolve_action` tie-break uses `(specificity, action_rank, rule.id)` so overlapping rules are deterministic (greater id wins when scores tie)
+- [x] SQLite `list_rules()` ordered by `id` for stable iteration
+- [x] Routed **Device** connects: Linux `SO_BINDTODEVICE` + `SO_MARK` + source bind (LAN egress when default route is VPN)
+- [x] Routed **Tun** connects: **always** use daemon-managed `ip rule` / fwmark tables (`ensure_route_mark`) — **do not** reuse WireGuard’s discovered fwmark (often split-tunnel **bypass**, which sent SOCKS upstream out LAN)
+- [x] Daemon logs: `ip route get` default vs `ip route get … mark …` probes to distinguish unmarked lookups from marked policy routing
 
 ### 2026-05-09/10 (settings window + proxy architecture)
 
@@ -561,6 +620,18 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Updated docs: develop.md, architecture.md, implementation-status.md, gpui-components.md
 - [x] Created docs/gpui-settings.md for settings window architecture guide
 
+### 2026-05-11 (throne bypass fix)
+
+- [x] Added `ROUTE_MARK_BASE: u32 = 20000` constant to `enforcer` for configurable routing mark base
+- [x] Made routing mark base configurable via `LOGIGUARD_ROUTE_MARK_BASE` env var (default: 20000)
+- [x] Added `output_nat` nftables chain (-199) to bypass throne's TCP redirect for device-routed connections:
+  - Saves routing mark to conntrack mark
+  - Sets throne's bypass mark (0x2024) when output device is NOT throne-tun
+  - Throne sees bypass mark and skips its redirect to :37805
+- [x] Modified `output_early` to restore routing mark from conntrack mark before routing decision
+- [x] Removed `output_late` chain (simplified: no longer needed)
+- [x] Fixed device routing to physical NICs (enp3s0, etc.) working alongside throne transparent proxy
+
 ### 2026-05-11 (session 11 — egress/proxy form dialogs + component extraction)
 
 - [x] Added `open_egress_form_dialog(existing)` — form with Name, Color, Targets CSV, DNS CSV fields
@@ -574,40 +645,6 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Added `parse_targets_csv` in `helpers.rs` for parsing `tun:`, `proxy:`, `dev:` prefixes
 - [x] EgressDelegate controls column widened to 160px
 - [x] Updated `docs/gpui-components.md`, `docs/gpui-settings.md`, `develop.md`
-
-### 2026-05-09 (routing hardening)
-
-- [x] Policy: `resolve_action` tie-break uses `(specificity, action_rank, rule.id)` so overlapping rules are deterministic (greater id wins when scores tie)
-- [x] SQLite `list_rules()` ordered by `id` for stable iteration
-- [x] Routed **Device** connects: Linux `SO_BINDTODEVICE` + `SO_MARK` + source bind (LAN egress when default route is VPN)
-- [x] Routed **Tun** connects: **always** use daemon-managed `ip rule` / fwmark tables (`ensure_route_mark`) — **do not** reuse WireGuard’s discovered fwmark (often split-tunnel **bypass**, which sent SOCKS upstream out LAN)
-- [x] Daemon logs: `ip route get` default vs `ip route get … mark …` probes to distinguish unmarked lookups from marked policy routing
-
-### 2026-05-08 (session 9)
-
-- [x] Added daemon-side routed TCP relay API (`OpenRoutedTcp`) so emulator remains unprivileged
-- [x] Daemon now owns privileged routed connect for `RouteTarget::Tun` (`SO_MARK`) and `RouteTarget::Device` (source-IP bind)
-- [x] Added routed connect timeout (8s) to avoid long kernel-level hangs
-- [x] Daemon now sets `/tmp/logiguard.sock` permissions to `0666` after bind
-- [x] Added `Egress.dns_servers: Vec<String>` to `core-types`
-- [x] Added SQLite table `egress_dns_servers` and repository persistence/load path
-- [x] Added daemon per-egress DNS resolution:
-  - resolve host via egress DNS list when configured
-  - fallback to system DNS when no egress DNS configured
-  - try all resolved addresses with timeout per address
-- [x] Added state-store test: `sqlite_egress_dns_servers_roundtrip`
-
-### 2026-05-11 (throne bypass fix)
-
-- [x] Added `ROUTE_MARK_BASE: u32 = 20000` constant to `enforcer` for configurable routing mark base
-- [x] Made routing mark base configurable via `LOGIGUARD_ROUTE_MARK_BASE` env var (default: 20000)
-- [x] Added `output_nat` nftables chain (-199) to bypass throne's TCP redirect for device-routed connections:
-  - Saves routing mark to conntrack mark
-  - Sets throne's bypass mark (0x2024) when output device is NOT throne-tun
-  - Throne sees bypass mark and skips its redirect to :37805
-- [x] Modified `output_early` to restore routing mark from conntrack mark before routing decision
-- [x] Removed `output_late` chain (simplified: no longer needed)
-- [x] Fixed device routing to physical NICs (enp3s0, etc.) working alongside throne transparent proxy
 
 ### 2026-05-11 (session 12 — pending UX + monitor reliability)
 
@@ -623,42 +660,27 @@ Use this section as a running journal. Keep entries short and dated.
   - deferred/failed spawns are retried on the next poll cycle
 - [x] Removed transient "Decision submitted. Closing..." state and 500ms delay for immediate window close after action
 
-### 2026-05-06 (session 5)
+## 10.1) Detected Bugs / Follow-ups (Open)
 
-- [x] Window lifecycle: Check if pending decisions exist before opening window
-- [x] Window closes (app exits cleanly) when decision queue becomes empty
-- [x] Initial check done synchronously before Application::new().run()
-- [x] Polling task monitors queue state and calls std::process::exit(0) when empty
-- [x] All 78 workspace tests passing with updated GPUI app
-- [x] Wrote comprehensive documentation: GPUI guide, gpui-component guide, Unix sockets, async patterns, architecture
+- [ ] **Settings window is not resizable via window borders**
+  - Current behavior: settings window opens at a fixed size and has no resize affordance.
+  - Expected behavior: user can resize from edges/corners with sane min/max constraints.
 
-### 2026-05-06 (session 6)
+- [ ] **Runtime interception toggle from tray does not apply reliably**
+  - Current behavior: "Enable Network Interception" at runtime does not consistently activate interception.
+  - Expected behavior: enabling/disabling interception from tray updates daemon state and effective nftables/NFQUEUE behavior immediately.
 
-- [x] Refactored window lifecycle: App always runs, window shows/hides based on pending state
-- [x] Added `should_show_window` flag to AppState (default false)
-- [x] Window displays "Connecting..." until pending decisions arrive
-- [x] When first pending decision received → window shows with decision dialog
-- [x] When all decisions resolved → window returns to "Connecting..." state (stays open)
-- [x] Polling task automatically triggers window display on pending arrival
-- [x] No need to manually restart app when new decisions arrive
-- [x] All 78 tests still passing
+- [ ] **Tray interception control should be a single toggle item**
+  - Current behavior: separate menu actions are shown for enable/disable.
+  - Expected behavior: one menu item with explicit checked/unchecked status (toggle UI) reflecting current interception state.
 
-### 2026-05-06 (session 7)
+- [ ] **Settings "Add Egress" / "Add Proxy" button styling diverges from design**
+  - Current behavior: buttons appear full-width and do not match design-system sizing/style.
+  - Expected behavior: buttons match design spec (size, spacing, typography, visual hierarchy) and avoid unnecessary full-width layout.
 
-- [x] Analyzed OpenSnitch architecture and rules model for comparison
-- [x] Created comprehensive OPENSNITCH_COMPARISON.md document
-- [x] Compared GUI-to-daemon communication strategies
-- [x] Decided on bidirectional socket push using Tokio broadcast channel
-- [ ] Extend `ControlRequest` enum with `SubscribeToPending`
-- [ ] Add `PushNotification` enum to `core-types`
-- [ ] Extend `ControlResponse` with push variants (or separate type)
-- [ ] Add broadcast channel to `ControlService`
-- [ ] Implement subscriber tracking in daemon connection handler
-- [ ] Modify daemon socket reader to handle `tokio::select!` for requests + pushes
-- [ ] Modify GPUI to subscribe on startup and handle incoming push notifications
-- [ ] Remove 1-second polling loop from GPUI (use push instead)
-- [ ] Add tests for push notification lifecycle
-- [ ] Verify 93 tests still passing
+- [ ] **Session rules should be visible in settings and distinguishable from permanent rules**
+  - Current behavior: temporary (until-restart) rules are not clearly surfaced or differentiated in settings views.
+  - Expected behavior: settings list includes both rule durations with a clear visual/status distinction (e.g., badge/filter/column).
 
 ## 11) Definition of Done (MVP)
 
