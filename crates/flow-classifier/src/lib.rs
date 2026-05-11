@@ -1,3 +1,5 @@
+pub mod proc_resolver;
+
 use core_types::{FlowContext, FlowDirection, TransportProtocol};
 
 /// Raw packet information from the network layer before classification.

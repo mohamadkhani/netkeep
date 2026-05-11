@@ -1,6 +1,6 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 81 tests passing (`cargo test --workspace`)
+**Test Status:** 87 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, settings window with Table/Dialog, proxy support)
 **Last Updated:** 2026-05-12
 
@@ -34,7 +34,7 @@
 - [x] TLS SNI extraction from ClientHello (`extract_tls_sni` in `enforcer::nfqueue`)
 - [x] TCP control packets (SYN/ACK/FIN) accepted immediately so handshake completes before classification
 - [x] `RawPacket::tcp_payload_empty` flag to distinguish control packets from data packets
-- [ ] **Not done:** Real netstat-based ProcessResolver (still using FakeProcessResolver)
+- [x] Real ProcessResolver via `/proc/net/{tcp,tcp6,udp,udp6}` → inode → `/proc/<pid>/fd` → `/proc/<pid>/comm`
 - [ ] **Not done:** DNS snoop cache for UDP/QUIC domain inference (SNI covers TCP/HTTPS)
 - [ ] **Not done:** Integration tests with actual kernel NFQUEUE
 
@@ -306,12 +306,7 @@ Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 
 ### Immediate (Session 5+)
 
-1. **Real ProcessResolver:** Implement `/proc/net/tcp` parsing to map (src_ip, src_port) → pid → process name.
-   - Affects: flow-classifier crate
-   - Tests: 2-3 integration tests with real process lookup
-   - Risk: Low (behind trait, mock-friendly)
-
-2. **DNS Snoop Cache:** Intercept plaintext DNS responses (UDP src port 53) to populate an ip→domain cache for UDP/QUIC flows where SNI is unavailable.
+1. **DNS Snoop Cache:** Intercept plaintext DNS responses (UDP src port 53) to populate an ip→domain cache for UDP/QUIC flows where SNI is unavailable.
    - Affects: flow-classifier crate (new `DnsSnoopCache` impl of `DnsResolver`), enforcer crate (detect + parse DNS response packets)
    - Tests: 2-3 DNS parsing tests, 1 cache lookup test
    - Risk: Medium — race condition possible (first UDP packet may arrive before DNS response processed); DoH traffic is invisible
@@ -344,7 +339,7 @@ Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 
 ## Known Limitations
 
-1. **ProcessResolver:** Currently returns FakeProcessResolver. Real lookup needed for production.
+1. **ProcessResolver on high-churn systems:** `/proc/*/fd` scan is O(processes×fds). Adequate for desktop use; would need an inode→pid index for server-scale traffic.
 
 2. **SNI — TCP/HTTPS only:** TLS ClientHello SNI extraction works for TCP. QUIC encrypts its Initial packets in newer versions; SNI hint is None for QUIC flows. DNS snoop cache (not yet implemented) would fill this gap.
 
@@ -430,4 +425,4 @@ LOGIGUARD_NFQUEUE=0 \
 
 ## Conclusion
 
-LogiGuard is feature-complete for MVP (Phase 1-4). Core logic tested extensively. Settings window uses gpui-component Table and Dialog for data management. Proxy support fully implemented across all crates. Enforcement path integrated but ProcessResolver still mocked. Ready for Phase 2 integration testing and real-world deployment.
+LogiGuard is feature-complete for MVP (Phase 1-4). Core logic tested extensively. Settings window uses gpui-component Table and Dialog for data management. Proxy support fully implemented across all crates. Enforcement path fully wired: real ProcessResolver reads `/proc`, TLS SNI extraction populates destination domain. Ready for Phase 2 integration testing and real-world deployment.

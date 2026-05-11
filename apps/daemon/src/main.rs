@@ -15,7 +15,8 @@ use decision_engine::{DecisionEngine, OverflowPolicy};
 use enforcer::{NftablesBootstrap, RouteManager, SystemNftablesBootstrap, SystemRouteManager, ROUTE_MARK_BASE};
 use enforcer::nfqueue::NfqueueProcessor;
 use flow_classifier::{
-    FlowClassifier, FakeProcessResolver, FakeDnsResolver, FakeDeviceLabelResolver,
+    FlowClassifier, FakeDnsResolver, FakeDeviceLabelResolver,
+    proc_resolver::ProcProcessResolver,
 };
 use hickory_resolver::Resolver;
 use hickory_resolver::config::{
@@ -796,7 +797,7 @@ fn main() {
     let bootstrap: Option<Arc<dyn NftablesBootstrap>> = if nftables_ready {
         if let Some(queue_num) = nfqueue_num {
             let classifier = FlowClassifier::new(
-                FakeProcessResolver { result: None },
+                ProcProcessResolver,
                 FakeDnsResolver { result: None },
                 FakeDeviceLabelResolver { result: None },
             );

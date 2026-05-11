@@ -673,6 +673,19 @@ Use this section as a running journal. Keep entries short and dated.
 - [x] Added `docs/nfqueue-domain-inference.md` — SNI vs DNS snoop design rationale, SYN timing trap, TLS ClientHello wire format, testing strategy
 - [x] Updated `docs/implementation-status.md` — test count 77→81, Phase 2 checklist, Known Limitations, Next Steps
 
+### 2026-05-12 (session 14 — real ProcessResolver via /proc)
+
+- [x] Added `ProcProcessResolver` in `crates/flow-classifier/src/proc_resolver.rs`
+  - Reads `/proc/net/{tcp,tcp6,udp,udp6}` to find the socket inode for `(src_ip, src_port)`
+  - Scans `/proc/*/fd/` for a `socket:[inode]` symlink to find the owning pid
+  - Reads `/proc/<pid>/comm` for the process name
+- [x] `parse_proc_net()` is a pure function (no I/O) — testable with static string fixtures
+- [x] Fixed IPv6 word byte order: `/proc/net/tcp6` stores each 32-bit word little-endian → use `to_le_bytes()`
+- [x] 6 unit tests: IPv4 match, wrong port, wrong IP, IPv6 match, IPv4 hex decode, IPv6 hex decode
+- [x] Replaced `FakeProcessResolver { result: None }` with `ProcProcessResolver` in daemon NFQUEUE classifier
+- [x] Added `docs/process-resolver.md` — full lookup chain, `/proc/net` address encoding (IPv4 LE u32, IPv6 four LE words), TOCTOU race handling, platform note
+- [x] Updated `docs/implementation-status.md` — test count 81→87, Phase 2 checklist, Known Limitations, Next Steps
+
 ## 10.1) Detected Bugs / Follow-ups (Open)
 
 - [ ] **Settings window is not resizable via window borders**
