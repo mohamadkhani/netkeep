@@ -391,23 +391,12 @@ Planned (Phase 2 onward):
 
 ## Systemd Integration
 
-**Daemon unit file** (planned):
-```ini
-[Unit]
-Description=LogiGuard Network Authorization Daemon
-Before=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/logiguardd
-Restart=on-failure
-User=root
-
-[Install]
-WantedBy=multi-user.target
-```
+**Daemon unit file (packaged / reference):** `resources/linux/systemd/logiguardd.service`  
+Installs as `/usr/lib/systemd/system/logiguardd.service` with `ExecStart=/usr/bin/logiguardd`, `RuntimeDirectory=logiguard` (socket under `/run/logiguard/`), and `StateDirectory=logiguard` (SQLite under `/var/lib/logiguard/`). Override or drop-in to set `LOGIGUARD_NFQUEUE` when using kernel interception.
 
 **Boot Gate:** nftables rules block all traffic until daemon signals readiness (health check).
+
+**Arch Linux:** see `packaging/archlinux/README.md` and `packaging/archlinux/PKGBUILD`.
 
 ## Environment Variables
 

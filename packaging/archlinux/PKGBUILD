@@ -1,0 +1,61 @@
+# Maintainer: build from a clean clone of the LogiGuard repository.
+# Run `makepkg -sf` from this directory (`packaging/archlinux`); the build
+# uses the repository root at ../../ relative to this PKGBUILD.
+
+pkgname=logiguard
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Linux desktop network flow authorization (daemon, CLI, GPUI tray)'
+arch=('x86_64')
+url='https://github.com/mohammadreza-khani/logiguard'
+license=('Apache')
+depends=(
+  'gcc-libs'
+  'glibc'
+  'gtk3'
+  'hicolor-icon-theme'
+  'libappindicator-gtk3'
+  'libxkbcommon'
+  'xdotool'
+)
+makedepends=('cargo' 'pkgconf' 'clang' 'llvm' 'rsync')
+optdepends=('vulkan-mesa-layers: GPU stack for GPUI on some setups')
+options=('!lto' '!debug')
+install=logiguard.install
+
+prepare() {
+  _root="$(cd "${startdir}/../.." && pwd)"
+  if [[ ! -f "${_root}/Cargo.toml" ]]; then
+    echo "error: expected LogiGuard workspace at ${_root}" >&2
+    exit 1
+  fi
+  rm -rf "${srcdir}/build"
+  mkdir -p "${srcdir}/build"
+  rsync -a --delete \
+    --exclude target \
+    --exclude .git \
+    "${_root}/" "${srcdir}/build/"
+}
+
+build() {
+  cd "${srcdir}/build"
+  export RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}
+  cargo build --workspace --release --locked
+}
+
+package() {
+  cd "${srcdir}/build"
+  install -Dm755 target/release/logiguard-daemon "${pkgdir}/usr/bin/logiguardd"
+  install -Dm755 target/release/logiguard-cli "${pkgdir}/usr/bin/logiguard-cli"
+  install -Dm755 target/release/logiguard-gpui "${pkgdir}/usr/bin/logiguard-gpui"
+
+  install -Dm644 resources/linux/systemd/logiguardd.service \
+    "${pkgdir}/usr/lib/systemd/system/logiguardd.service"
+  install -Dm644 resources/linux/applications/io.logicamp.LogiGuard.desktop \
+    "${pkgdir}/usr/share/applications/io.logicamp.LogiGuard.desktop"
+  install -Dm644 resources/linux/icons/hicolor/scalable/apps/io.logicamp.LogiGuard.svg \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/io.logicamp.LogiGuard.svg"
+
+  install -Dm644 "${startdir}/environment.d-logiguard.conf" \
+    "${pkgdir}/etc/environment.d/logiguard.conf"
+}

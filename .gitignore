@@ -1,4 +1,16 @@
-target/
+# Rust
+/target/
+**/*.rs.bk
+
+# IDE / OS
 .idea/
 .vscode/
 .DS_Store
+*.swp
+*~
+
+# Arch Linux (makepkg) — run from packaging/archlinux/
+packaging/archlinux/pkg/
+packaging/archlinux/src/
+packaging/archlinux/*.pkg.tar.*
+packaging/archlinux/*.log

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=LogiGuard
+Comment=Network flow authorization and pending decision UI
+Exec=sh -c 'LOGIGUARD_SOCKET_PATH=${LOGIGUARD_SOCKET_PATH:-/run/logiguard/logiguard.sock} exec logiguard-gpui'
+Icon=io.logicamp.LogiGuard
+Terminal=false
+Categories=Network;Security;Monitor;
+Keywords=firewall;network;security;vpn;
+StartupNotify=true

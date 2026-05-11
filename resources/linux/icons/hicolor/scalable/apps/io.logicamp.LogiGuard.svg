@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="LogiGuard">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14b8a6"/>
+      <stop offset="100%" stop-color="#0d9488"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="#081425"/>
+  <path fill="url(#g)" d="M64 18 28 36v28c0 22 15 42 36 46 21-4 36-24 36-46V36L64 18zm0 12 26 13v25c0 16-11 31-26 35-15-4-26-19-26-35V43l26-13z"/>
+  <path fill="#adc6ff" d="M64 48c-6 0-11 5-11 11v10c0 6 5 11 11 11s11-5 11-11V59c0-6-5-11-11-11zm0 6c2.8 0 5 2.2 5 5v10c0 2.8-2.2 5-5 5s-5-2.2-5-5V59c0-2.8 2.2-5 5-5z"/>
+</svg>

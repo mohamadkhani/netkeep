@@ -1,0 +1,14 @@
+post_install() {
+  echo 'LogiGuard: enable and start the daemon with:'
+  echo '  systemctl enable --now logiguardd.service'
+  echo 'Optional: set LOGIGUARD_NFQUEUE in the unit for packet interception.'
+  gtk-update-icon-cache -q -t -f usr/share/icons/hicolor 2>/dev/null || true
+}
+
+post_upgrade() {
+  gtk-update-icon-cache -q -t -f usr/share/icons/hicolor 2>/dev/null || true
+}
+
+post_remove() {
+  gtk-update-icon-cache -q -t -f usr/share/icons/hicolor 2>/dev/null || true
+}
