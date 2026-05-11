@@ -113,21 +113,30 @@ All length fields must be bounds-checked before indexing. Use `payload.get(pos)?
 
 When DNS and SNI disagree (possible spoofing or CDN routing), the domain is discarded and only the IP is shown. This is intentional — see design decision #3 in `architecture.md`.
 
-## What DNS Snoop Cache Would Add
+## SNI Cache — Persisting the Domain Across Packets
 
-For completeness, the DNS snoop cache (not yet implemented) would cover:
+**Problem:** SNI is only present in the TLS ClientHello — the very first data packet. Every subsequent encrypted packet in the same TLS session carries no SNI. Without caching, those packets classify with `destination_domain = None`, which fails to match domain-based rules and re-triggers pending decisions for the same connection.
+
+**Solution:** `SniDnsCache` in `crates/flow-classifier/src/lib.rs`.
+
+```rust
+// In NfqueueProcessor::run_loop — before classify():
+if let Some(sni) = &raw.sni_hint {
+    self.dns_cache.insert(&raw.dst_ip, sni);
+}
+let flow = self.classifier.classify(&raw);
+```
+
+The cache stores `dst_ip → domain`. `FlowClassifier` uses it as its `DnsResolver` — so packets after the ClientHello call `dns_cache.resolve_dns(dst_ip)` and get the domain back, making the rule match on every subsequent packet.
+
+**Thread safety:** `SniDnsCache` wraps `Arc<Mutex<HashMap<String, String>>>`. The daemon creates one instance and `.clone()`s it (cheap — just clones the `Arc`) into both the classifier (reader) and the processor (writer).
+
+**Remaining gaps** (DNS snoop cache, not yet implemented):
 - Plain UDP flows to non-HTTPS services
-- QUIC/HTTP3 where SNI is encrypted
+- QUIC/HTTP3 where SNI is encrypted in the packet payload
 - Non-TLS TCP services
 
-Implementation sketch:
-- In the NFQUEUE loop, detect UDP packets where `src_port == 53`
-- Parse the DNS response wire format (answers section, A + AAAA records)
-- Populate `Arc<Mutex<HashMap<String, String>>>` (ip → domain)
-- Implement `DnsResolver` trait over the shared map
-- Pass to `FlowClassifier::new()` in the daemon
-
-The race condition (UDP SYN-equivalent arriving before DNS response) is less critical for UDP flows since UDP has no handshake and the first packet is already the application data. The SYN-timing problem is specific to TCP.
+For these, a DNS snoop cache would be needed — intercept UDP packets where `src_port == 53`, parse the DNS response wire format (A/AAAA answers), and populate the same `SniDnsCache`. The race condition (DNS response racing with the first UDP packet) is less critical for UDP since UDP has no handshake and the first packet is already application data.
 
 ## Testing Strategy
 

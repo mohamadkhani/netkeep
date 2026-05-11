@@ -1,6 +1,42 @@
 pub mod proc_resolver;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use core_types::{FlowContext, FlowDirection, TransportProtocol};
+
+// ── SNI DNS cache ──────────────────────────────────────────────────────────────
+
+/// Shared, thread-safe cache of `dst_ip → domain` mappings learned from SNI.
+///
+/// Populated by the NFQUEUE run loop whenever a TLS ClientHello carries an SNI.
+/// Consulted by `FlowClassifier` for every subsequent packet to the same IP so
+/// the domain survives beyond the ClientHello and rules keep matching.
+#[derive(Clone, Default)]
+pub struct SniDnsCache(Arc<Mutex<HashMap<String, String>>>);
+
+impl SniDnsCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `ip` resolved to `domain` (learned from SNI or DNS).
+    pub fn insert(&self, ip: impl Into<String>, domain: impl Into<String>) {
+        if let Ok(mut m) = self.0.lock() {
+            m.insert(ip.into(), domain.into());
+        }
+    }
+
+    pub fn lookup(&self, ip: &str) -> Option<String> {
+        self.0.lock().ok()?.get(ip).cloned()
+    }
+}
+
+impl DnsResolver for SniDnsCache {
+    fn resolve_dns(&self, dst_ip: &str) -> Option<String> {
+        self.lookup(dst_ip)
+    }
+}
 
 /// Raw packet information from the network layer before classification.
 #[derive(Debug, Clone)]

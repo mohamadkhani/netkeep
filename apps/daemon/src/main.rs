@@ -15,7 +15,7 @@ use decision_engine::{DecisionEngine, OverflowPolicy};
 use enforcer::{NftablesBootstrap, RouteManager, SystemNftablesBootstrap, SystemRouteManager, ROUTE_MARK_BASE};
 use enforcer::nfqueue::NfqueueProcessor;
 use flow_classifier::{
-    FlowClassifier, FakeDnsResolver, FakeDeviceLabelResolver,
+    FlowClassifier, FakeDeviceLabelResolver, SniDnsCache,
     proc_resolver::ProcProcessResolver,
 };
 use hickory_resolver::Resolver;
@@ -796,13 +796,14 @@ fn main() {
     // Start the NFQUEUE processor if enabled and nftables came up.
     let bootstrap: Option<Arc<dyn NftablesBootstrap>> = if nftables_ready {
         if let Some(queue_num) = nfqueue_num {
+            let dns_cache = SniDnsCache::new();
             let classifier = FlowClassifier::new(
                 ProcProcessResolver,
-                FakeDnsResolver { result: None },
+                dns_cache.clone(),
                 FakeDeviceLabelResolver { result: None },
             );
             let registrar = SharedService(Arc::clone(&service));
-            match NfqueueProcessor::open(queue_num, classifier, registrar) {
+            match NfqueueProcessor::open(queue_num, classifier, registrar, dns_cache) {
                 Err(e) => {
                     eprintln!("nfqueue open failed (are you root?): {e}");
                     Some(Arc::clone(&bs))

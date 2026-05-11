@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use core_types::{RuleAction, TransportProtocol};
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
-use flow_classifier::{Classifier, RawPacket};
+use flow_classifier::{Classifier, RawPacket, SniDnsCache};
 use nfq::{Queue, Verdict};
 
 use crate::{FlowDecision, FlowRegistrar};
@@ -16,6 +16,10 @@ pub struct NfqueueProcessor<C, FR> {
     queue: Queue,
     classifier: C,
     registrar: FR,
+    /// Shared cache updated whenever an SNI is extracted from a ClientHello.
+    /// Allows subsequent packets (which carry no SNI) to still be matched
+    /// against domain-based rules by IP lookup.
+    dns_cache: SniDnsCache,
 }
 
 impl<C, FR> NfqueueProcessor<C, FR>
@@ -23,10 +27,10 @@ where
     C: Classifier,
     FR: FlowRegistrar,
 {
-    pub fn open(queue_num: u16, classifier: C, registrar: FR) -> std::io::Result<Self> {
+    pub fn open(queue_num: u16, classifier: C, registrar: FR, dns_cache: SniDnsCache) -> std::io::Result<Self> {
         let mut queue = Queue::open()?;
         queue.bind(queue_num)?;
-        Ok(Self { queue, classifier, registrar })
+        Ok(Self { queue, classifier, registrar, dns_cache })
     }
 
     /// Blocks indefinitely, processing one packet per iteration.
@@ -50,6 +54,11 @@ where
                     if is_loopback(&raw.dst_ip) || raw.tcp_payload_empty {
                         Verdict::Accept
                     } else {
+                        // Populate the DNS cache whenever we learn a domain from SNI so
+                        // later packets to the same IP can still match domain-based rules.
+                        if let Some(sni) = &raw.sni_hint {
+                            self.dns_cache.insert(&raw.dst_ip, sni);
+                        }
                         let flow = self.classifier.classify(&raw);
                         match self.registrar.register(flow, now_secs) {
                             FlowDecision::Immediate(RuleAction::Allow) => Verdict::Accept,

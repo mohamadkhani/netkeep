@@ -35,7 +35,9 @@ nftables OUTPUT hook  (hook priority -150)
   logiguard-daemon (userspace)
     │  recv() from /dev/nfnetlink_queue
     │  parse IP packet bytes
-    │  classify flow (SNI, process, IP)
+    │  TCP control packet (no payload)? → Accept (let handshake complete)
+    │  SNI present? → populate SniDnsCache (ip → domain)
+    │  classify flow (SniDnsCache lookup, process, IP)
     │  query decision engine (rule match / pending)
     ▼
   verdict: Accept or Drop
