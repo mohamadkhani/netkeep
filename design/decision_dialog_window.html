@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html class="dark" lang="en"><head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
@@ -7,205 +6,538 @@
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&amp;family=Space+Grotesk:wght@400;600&amp;display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
 <script id="tailwind-config">
-        tailwind.config = {
-            darkMode: "class",
-            theme: {
-                extend: {
-                    "colors": {
-                        "on-tertiary-fixed-variant": "#3f465c",
-                        "on-secondary-fixed-variant": "#38485d",
-                        "surface-variant": "#2a3548",
-                        "surface-container-low": "#111c2d",
-                        "on-primary-fixed-variant": "#004395",
-                        "on-error": "#690005",
-                        "outline-variant": "#424754",
-                        "inverse-on-surface": "#263143",
-                        "on-primary": "#002e6a",
-                        "on-tertiary": "#283044",
-                        "error-container": "#93000a",
-                        "tertiary-fixed-dim": "#bec6e0",
-                        "primary": "#adc6ff",
-                        "primary-container": "#4d8eff",
-                        "secondary-fixed-dim": "#b7c8e1",
-                        "on-primary-container": "#00285d",
-                        "on-background": "#d8e3fb",
-                        "inverse-surface": "#d8e3fb",
-                        "secondary": "#b7c8e1",
-                        "on-error-container": "#ffdad6",
-                        "inverse-primary": "#005ac2",
-                        "surface-container-highest": "#2a3548",
-                        "surface-container": "#152031",
-                        "tertiary": "#bec6e0",
-                        "primary-fixed": "#d8e2ff",
-                        "on-surface": "#d8e3fb",
-                        "surface-container-lowest": "#040e1f",
-                        "on-secondary-fixed": "#0b1c30",
-                        "surface-tint": "#adc6ff",
-                        "error": "#ffb4ab",
-                        "surface-bright": "#2f3a4c",
-                        "on-secondary-container": "#a9bad3",
-                        "on-tertiary-fixed": "#131b2e",
-                        "outline": "#8c909f",
-                        "tertiary-container": "#8990a8",
-                        "primary-fixed-dim": "#adc6ff",
-                        "surface-container-high": "#1f2a3c",
-                        "secondary-fixed": "#d3e4fe",
-                        "tertiary-fixed": "#dae2fd",
-                        "surface": "#081425",
-                        "on-tertiary-container": "#22293d",
-                        "secondary-container": "#3a4a5f",
-                        "on-surface-variant": "#c2c6d6",
-                        "on-primary-fixed": "#001a42",
-                        "surface-dim": "#081425",
-                        "on-secondary": "#213145",
-                        "background": "#081425"
-                    },
-                    "borderRadius": {
-                        "DEFAULT": "0.125rem",
-                        "lg": "0.25rem",
-                        "xl": "0.5rem",
-                        "full": "0.75rem"
-                    },
-                    "spacing": {
-                        "gutter": "16px",
-                        "unit": "4px",
-                        "margin": "24px",
-                        "density-comfortable": "16px",
-                        "density-compact": "8px"
-                    },
-                    "fontFamily": {
-                        "headline-md": ["Inter"],
-                        "body-sm": ["Inter"],
-                        "body-md": ["Inter"],
-                        "headline-lg": ["Inter"],
-                        "label-caps": ["Inter"],
-                        "data-mono": ["Space Grotesk"]
-                    },
-                    "fontSize": {
-                        "headline-md": ["18px", {"lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
-                        "body-sm": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
-                        "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
-                        "headline-lg": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.02em", "fontWeight": "600"}],
-                        "label-caps": ["11px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "700"}],
-                        "data-mono": ["13px", {"lineHeight": "18px", "letterSpacing": "0.02em", "fontWeight": "400"}]
-                    }
+    tailwind.config = {
+        darkMode: "class",
+        theme: {
+            extend: {
+                "colors": {
+                    "on-tertiary-fixed-variant": "#3f465c",
+                    "on-secondary-fixed-variant": "#38485d",
+                    "surface-variant": "#2a3548",
+                    "surface-container-low": "#111c2d",
+                    "on-primary-fixed-variant": "#004395",
+                    "on-error": "#690005",
+                    "outline-variant": "#424754",
+                    "inverse-on-surface": "#263143",
+                    "on-primary": "#002e6a",
+                    "on-tertiary": "#283044",
+                    "error-container": "#93000a",
+                    "tertiary-fixed-dim": "#bec6e0",
+                    "primary": "#adc6ff",
+                    "primary-container": "#4d8eff",
+                    "secondary-fixed-dim": "#b7c8e1",
+                    "on-primary-container": "#00285d",
+                    "on-background": "#d8e3fb",
+                    "inverse-surface": "#d8e3fb",
+                    "secondary": "#b7c8e1",
+                    "on-error-container": "#ffdad6",
+                    "inverse-primary": "#005ac2",
+                    "surface-container-highest": "#2a3548",
+                    "surface-container": "#152031",
+                    "tertiary": "#bec6e0",
+                    "primary-fixed": "#d8e2ff",
+                    "on-surface": "#d8e3fb",
+                    "surface-container-lowest": "#040e1f",
+                    "on-secondary-fixed": "#0b1c30",
+                    "surface-tint": "#adc6ff",
+                    "error": "#ffb4ab",
+                    "surface-bright": "#2f3a4c",
+                    "on-secondary-container": "#a9bad3",
+                    "on-tertiary-fixed": "#131b2e",
+                    "outline": "#8c909f",
+                    "tertiary-container": "#8990a8",
+                    "primary-fixed-dim": "#adc6ff",
+                    "surface-container-high": "#1f2a3c",
+                    "secondary-fixed": "#d3e4fe",
+                    "tertiary-fixed": "#dae2fd",
+                    "surface": "#081425",
+                    "on-tertiary-container": "#22293d",
+                    "secondary-container": "#3a4a5f",
+                    "on-surface-variant": "#c2c6d6",
+                    "on-primary-fixed": "#001a42",
+                    "surface-dim": "#081425",
+                    "on-secondary": "#213145",
+                    "background": "#081425"
+                },
+                "borderRadius": {
+                    "DEFAULT": "0.125rem",
+                    "lg": "0.25rem",
+                    "xl": "0.5rem",
+                    "full": "0.75rem"
+                },
+                "spacing": {
+                    "gutter": "16px",
+                    "unit": "4px",
+                    "margin": "24px",
+                    "density-comfortable": "16px",
+                    "density-compact": "8px"
+                },
+                "fontFamily": {
+                    "headline-md": ["Inter"],
+                    "body-sm": ["Inter"],
+                    "body-md": ["Inter"],
+                    "headline-lg": ["Inter"],
+                    "label-caps": ["Inter"],
+                    "data-mono": ["Space Grotesk"]
+                },
+                "fontSize": {
+                    "headline-md": ["18px", {"lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+                    "body-sm": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                    "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                    "headline-lg": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.02em", "fontWeight": "600"}],
+                    "label-caps": ["11px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "700"}],
+                    "data-mono": ["13px", {"lineHeight": "18px", "letterSpacing": "0.02em", "fontWeight": "400"}]
                 }
             }
         }
-    </script>
+    }
+</script>
 <style>
-        .material-symbols-outlined {
-            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-        }
-    </style>
+    .material-symbols-outlined {
+        font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    }
+    .toggle-btn.active {
+        background-color: #adc6ff;
+        color: #002e6a;
+        font-weight: 700;
+    }
+    .toggle-btn {
+        transition: background-color 0.15s, color 0.15s;
+    }
+    .scope-btn.active {
+        background-color: #adc6ff;
+        color: #002e6a;
+        font-weight: 700;
+    }
+    /* IP octet selector */
+    .octet {
+        font-family: 'Space Grotesk', monospace;
+        font-size: 12px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        width: 38px;
+        text-align: center;
+        cursor: pointer;
+        transition: color 0.12s, background 0.12s;
+        color: #adc6ff;
+        background: rgba(173,198,255,0.10);
+        border: 1px solid rgba(173,198,255,0.25);
+        user-select: none;
+    }
+    .octet:hover { background: rgba(173,198,255,0.20); }
+    .octet.masked {
+        color: #424754;
+        background: transparent;
+        border-color: #424754;
+        text-decoration: line-through;
+    }
+    .octet-sep { color: #424754; margin: 0 1px; font-family: 'Space Grotesk', monospace; font-size: 12px; }
+    .cidr-badge {
+        font-family: 'Space Grotesk', monospace;
+        font-size: 11px;
+        color: #8c909f;
+        margin-left: 3px;
+        width: 16px;
+        text-align: right;
+        display: inline-block;
+    }
+    .allow-btn:not(:disabled) { cursor: pointer; }
+    .allow-btn:disabled, .deny-btn:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+    }
+    /* Scenario switcher (demo only) */
+    .scenario-bar button.active { background:#1f2a3c; color:#adc6ff; font-weight:700; }
+</style>
 </head>
 <body class="bg-background text-on-surface h-screen w-screen flex items-center justify-center font-body-md overflow-hidden">
+
+<!-- Demo scenario switcher -->
+<div class="scenario-bar fixed top-4 left-1/2 -translate-x-1/2 z-[60] flex gap-1 bg-surface-container border border-outline-variant rounded-lg p-1">
+    <button onclick="setScenario('domain')" class="active text-[10px] font-label-caps px-3 py-1 rounded transition-colors" id="btn-domain">Domain known</button>
+    <button onclick="setScenario('ip')" class="text-[10px] font-label-caps px-3 py-1 rounded transition-colors text-on-surface-variant" id="btn-ip">IP only</button>
+    <button onclick="setScenario('unknown')" class="text-[10px] font-label-caps px-3 py-1 rounded transition-colors text-on-surface-variant" id="btn-unknown">Both unknown</button>
+</div>
+
 <!-- Scrim -->
 <div class="fixed inset-0 bg-black/60 z-40 backdrop-blur-sm"></div>
+
 <!-- Modal Container -->
 <div class="relative z-50 w-full max-w-lg bg-surface-container border border-outline-variant rounded-lg flex flex-col mx-gutter">
-<!-- 1. Header Bar -->
-<div class="flex items-center justify-between p-density-comfortable border-b border-outline-variant bg-surface-container-high rounded-t-lg">
-<div class="flex items-center gap-2 text-primary">
-<span class="material-symbols-outlined text-[16px]">security</span>
-<h1 class="font-label-caps text-label-caps">CONNECTION INTERCEPTED</h1>
+
+    <!-- 1. Header Bar -->
+    <div class="flex items-center justify-between p-density-comfortable border-b border-outline-variant bg-surface-container-high rounded-t-lg">
+        <div class="flex items-center gap-2 text-primary">
+            <span class="material-symbols-outlined text-[16px]">security</span>
+            <h1 class="font-label-caps text-label-caps">CONNECTION INTERCEPTED</h1>
+        </div>
+        <div class="flex flex-col items-center">
+            <div class="relative w-8 h-8 flex items-center justify-center">
+                <svg class="absolute inset-0 w-full h-full transform -rotate-90" viewBox="0 0 36 36">
+                    <path class="text-surface-variant" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" stroke-width="3"></path>
+                    <path class="text-[#22c55e]" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" stroke-dasharray="100, 100" stroke-width="3" style="stroke-dashoffset: 13;"></path>
+                </svg>
+                <span class="font-data-mono text-[11px] font-bold text-on-surface">87s</span>
+            </div>
+            <span class="font-label-caps text-[9px] text-error mt-1 tracking-wider">AUTO-DENY</span>
+        </div>
+    </div>
+
+    <!-- 2. Flow Details (read-only, what was intercepted) -->
+    <div class="p-density-comfortable flex flex-col gap-unit">
+        <div class="grid grid-cols-12 gap-x-gutter gap-y-3 bg-surface border border-outline-variant rounded p-density-comfortable">
+
+            <!-- Process -->
+            <div class="col-span-4 flex flex-col gap-1">
+                <span class="font-label-caps text-label-caps text-on-surface-variant">PROCESS</span>
+            </div>
+            <div class="col-span-8 flex items-center gap-2" id="flow-process">
+                <span class="material-symbols-outlined text-[#f97316] text-[16px]">local_fire_department</span>
+                <span class="font-data-mono text-data-mono text-on-surface" id="process-name-display">firefox</span>
+            </div>
+
+            <!-- Destination -->
+            <div class="col-span-4 flex flex-col gap-1">
+                <span class="font-label-caps text-label-caps text-on-surface-variant">DESTINATION</span>
+            </div>
+            <div class="col-span-8 flex items-center" id="flow-destination">
+                <a class="font-data-mono text-data-mono text-primary hover:underline cursor-pointer" id="dest-display">accounts.google.com</a>
+            </div>
+
+            <!-- IP Address -->
+            <div class="col-span-4 flex flex-col gap-1">
+                <span class="font-label-caps text-label-caps text-on-surface-variant">IP ADDRESS</span>
+            </div>
+            <div class="col-span-8 flex items-center">
+                <span class="font-data-mono text-data-mono text-on-surface bg-surface-variant px-2 py-0.5 rounded text-[12px] border border-outline-variant">142.250.80.100</span>
+            </div>
+
+            <!-- Protocol -->
+            <div class="col-span-4 flex flex-col gap-1">
+                <span class="font-label-caps text-label-caps text-on-surface-variant">PROTOCOL</span>
+            </div>
+            <div class="col-span-8 flex items-center">
+                <span class="font-data-mono text-data-mono text-[#14b8a6] bg-[#14b8a6]/10 px-2 py-0.5 rounded border border-[#14b8a6]/30 text-[12px]">TCP : 443</span>
+            </div>
+
+            <!-- Direction -->
+            <div class="col-span-4 flex flex-col gap-1">
+                <span class="font-label-caps text-label-caps text-on-surface-variant">DIRECTION</span>
+            </div>
+            <div class="col-span-8 flex items-center">
+                <span class="font-label-caps text-label-caps text-on-surface-variant bg-surface-variant px-2 py-0.5 rounded border border-outline-variant">OUTBOUND</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. Rule Scope Section -->
+    <div class="px-density-comfortable pb-density-comfortable flex flex-col gap-3">
+
+        <!-- Unknown connection warning (shown when both process and destination are unknown) -->
+        <div id="unknown-warning" class="hidden items-center gap-2 bg-error/10 border border-error/30 rounded px-3 py-2">
+            <span class="material-symbols-outlined text-error text-[16px]">warning</span>
+            <span class="font-body-sm text-body-sm text-error">Unable to identify this connection. Specify a destination to create a rule, or allow/deny this one-time connection only.</span>
+        </div>
+
+        <div class="bg-surface border border-outline-variant rounded p-density-comfortable flex flex-col gap-3">
+            <span class="font-label-caps text-label-caps text-on-surface-variant">RULE WILL MATCH</span>
+
+            <!-- Process Scope -->
+            <div class="flex items-center justify-between gap-3">
+                <span class="font-body-sm text-body-sm text-on-surface-variant w-20 shrink-0">Process</span>
+                <div class="flex bg-surface-container-high rounded p-0.5 border border-outline-variant" id="process-toggle-group">
+                    <button onclick="setProcessScope('specific')" class="toggle-btn active font-label-caps text-[10px] px-3 py-1 rounded" id="proc-specific">
+                        <span id="proc-specific-label">firefox</span>
+                    </button>
+                    <button onclick="setProcessScope('all')" class="toggle-btn font-label-caps text-[10px] px-3 py-1 rounded text-on-surface-variant" id="proc-all">
+                        all processes
+                    </button>
+                </div>
+            </div>
+
+            <!-- Destination Scope — domain known -->
+            <div id="dest-scope-domain" class="flex items-center justify-between gap-3">
+                <span class="font-body-sm text-body-sm text-on-surface-variant w-20 shrink-0">Destination</span>
+                <div class="flex bg-surface-container-high rounded p-0.5 border border-outline-variant">
+                    <button onclick="setDomainScope('exact')" class="toggle-btn active font-label-caps text-[10px] px-2 py-1 rounded" id="dom-exact">
+                        accounts.google.com
+                    </button>
+                    <button onclick="setDomainScope('wildcard')" class="toggle-btn font-label-caps text-[10px] px-2 py-1 rounded text-on-surface-variant" id="dom-wildcard">
+                        *.google.com
+                    </button>
+                    <button onclick="setDomainScope('any')" class="toggle-btn font-label-caps text-[10px] px-2 py-1 rounded text-on-surface-variant" id="dom-any">
+                        any
+                    </button>
+                </div>
+            </div>
+
+            <!-- Destination Scope — IP only (no domain) -->
+            <div id="dest-scope-ip" class="hidden flex-col gap-2">
+                <div class="flex items-center justify-between gap-3">
+                    <span class="font-body-sm text-body-sm text-on-surface-variant w-20 shrink-0">Destination</span>
+                    <div class="flex items-center gap-0.5">
+                        <span class="octet" id="ip-oct-1" onclick="clickOctet(1)">142</span>
+                        <span class="octet-sep">.</span>
+                        <span class="octet" id="ip-oct-2" onclick="clickOctet(2)">250</span>
+                        <span class="octet-sep">.</span>
+                        <span class="octet" id="ip-oct-3" onclick="clickOctet(3)">80</span>
+                        <span class="octet-sep">.</span>
+                        <span class="octet" id="ip-oct-4" onclick="clickOctet(4)">100</span>
+                        <span class="cidr-badge" id="ip-cidr-badge">/32</span>
+                    </div>
+                </div>
+                <div class="flex items-center justify-end">
+                    <span style="font-size:9px;" class="text-on-surface-variant">
+                        Click an octet to mask it and everything after
+                    </span>
+                </div>
+            </div>
+
+            <!-- Destination Scope — both unknown: mandatory IP picker, no "any" -->
+            <div id="dest-scope-unknown" class="hidden flex-col gap-2">
+                <div class="flex items-center justify-between gap-3">
+                    <span class="font-body-sm text-body-sm text-on-surface-variant w-20 shrink-0">Destination</span>
+                    <div class="flex items-center gap-0.5">
+                        <span class="octet" id="unk-oct-1" onclick="clickOctetUnk(1)">142</span>
+                        <span class="octet-sep">.</span>
+                        <span class="octet" id="unk-oct-2" onclick="clickOctetUnk(2)">250</span>
+                        <span class="octet-sep">.</span>
+                        <span class="octet" id="unk-oct-3" onclick="clickOctetUnk(3)">80</span>
+                        <span class="octet-sep">.</span>
+                        <span class="octet" id="unk-oct-4" onclick="clickOctetUnk(4)">100</span>
+                        <span class="cidr-badge" id="unk-cidr-badge">/32</span>
+                    </div>
+                </div>
+                <div class="flex items-center justify-between">
+                    <span style="font-size:9px;" class="text-on-surface-variant">
+                        Click an octet to mask it and everything after
+                    </span>
+                    <span style="font-size:9px;" class="text-error">destination required</span>
+                </div>
+            </div>
+
+            <!-- Rule summary -->
+            <div class="flex items-center gap-2 pt-1 border-t border-outline-variant">
+                <span class="material-symbols-outlined text-on-surface-variant text-[14px]">policy</span>
+                <span class="font-body-sm text-body-sm text-on-surface-variant" id="rule-summary">
+                    Rule applies to <strong class="text-on-surface">firefox</strong> connecting to <strong class="text-on-surface">accounts.google.com</strong>
+                </span>
+            </div>
+        </div>
+
+        <!-- Duration + Route row -->
+        <div class="flex items-center justify-between gap-3">
+            <!-- Duration toggle -->
+            <div class="flex bg-surface-container-high rounded p-0.5 border border-outline-variant">
+                <button class="scope-btn active font-label-caps text-[10px] px-3 py-1 rounded">THIS SESSION</button>
+                <button class="scope-btn font-label-caps text-[10px] px-3 py-1 rounded text-on-surface-variant">PERMANENTLY</button>
+            </div>
+            <!-- Route via -->
+            <div class="flex flex-wrap gap-1">
+                <button class="font-label-caps text-[10px] px-2 py-1 rounded border border-[#22c55e]/60 bg-[#22c55e]/10 text-[#22c55e] font-bold">TUN: wg0</button>
+                <button class="font-label-caps text-[10px] px-2 py-1 rounded border border-outline-variant bg-surface text-on-surface-variant">Default</button>
+                <button class="font-label-caps text-[10px] px-2 py-1 rounded border border-outline-variant bg-surface text-on-surface-variant">wlan0</button>
+            </div>
+        </div>
+
+        <!-- Allow / Deny buttons -->
+        <div class="grid grid-cols-2 gap-3">
+            <button id="allow-btn" class="allow-btn flex items-center justify-center gap-2 bg-surface-variant hover:bg-surface-bright border border-[#22c55e]/50 text-[#22c55e] py-2 px-4 rounded transition-colors group">
+                <span class="material-symbols-outlined text-[18px] group-hover:scale-110 transition-transform">gpp_good</span>
+                <span class="font-label-caps text-label-caps">ALLOW</span>
+            </button>
+            <button id="deny-btn" class="deny-btn flex items-center justify-center gap-2 bg-surface-variant hover:bg-surface-bright border border-error/50 text-error py-2 px-4 rounded transition-colors group">
+                <span class="material-symbols-outlined text-[18px] group-hover:scale-110 transition-transform">gpp_bad</span>
+                <span class="font-label-caps text-label-caps">DENY</span>
+            </button>
+        </div>
+
+    </div>
+
+    <!-- 4. Footer -->
+    <div class="p-density-compact border-t border-outline-variant bg-surface-container-high rounded-b-lg flex justify-center">
+        <span class="font-data-mono text-[10px] text-on-surface-variant opacity-70">
+            LogiGuard · Fail-close active · Queue: 3 pending
+        </span>
+    </div>
 </div>
-<div class="flex flex-col items-center">
-<!-- Circular Countdown Ring -->
-<div class="relative w-8 h-8 flex items-center justify-center">
-<svg class="absolute inset-0 w-full h-full transform -rotate-90" viewbox="0 0 36 36">
-<path class="text-surface-variant" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" stroke-width="3"></path>
-<path class="text-[#22c55e]" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" stroke-dasharray="100, 100" stroke-width="3" style="stroke-dashoffset: 13;"></path>
-</svg>
-<span class="font-data-mono text-[11px] font-bold text-on-surface">87s</span>
-</div>
-<span class="font-label-caps text-[9px] text-error mt-1 tracking-wider">AUTO-DENY</span>
-</div>
-</div>
-<!-- 2. Flow Details Section -->
-<div class="p-density-comfortable flex flex-col gap-unit">
-<div class="grid grid-cols-12 gap-x-gutter gap-y-3 bg-surface border border-outline-variant rounded p-density-comfortable">
-<!-- Process -->
-<div class="col-span-4 flex flex-col gap-1">
-<span class="font-label-caps text-label-caps text-on-surface-variant">PROCESS</span>
-</div>
-<div class="col-span-8 flex items-center gap-2">
-<span class="material-symbols-outlined text-[#f97316] text-[16px]">local_fire_department</span>
-<span class="font-data-mono text-data-mono text-on-surface">firefox</span>
-</div>
-<!-- Destination -->
-<div class="col-span-4 flex flex-col gap-1">
-<span class="font-label-caps text-label-caps text-on-surface-variant">DESTINATION</span>
-</div>
-<div class="col-span-8 flex items-center">
-<a class="font-data-mono text-data-mono text-primary hover:underline cursor-pointer" href="#">accounts.google.com</a>
-</div>
-<!-- IP Address -->
-<div class="col-span-4 flex flex-col gap-1">
-<span class="font-label-caps text-label-caps text-on-surface-variant">IP ADDRESS</span>
-</div>
-<div class="col-span-8 flex items-center">
-<span class="font-data-mono text-data-mono text-on-surface bg-surface-variant px-2 py-0.5 rounded text-[12px] border border-outline-variant">142.250.80.100</span>
-</div>
-<!-- Protocol -->
-<div class="col-span-4 flex flex-col gap-1">
-<span class="font-label-caps text-label-caps text-on-surface-variant">PROTOCOL</span>
-</div>
-<div class="col-span-8 flex items-center">
-<span class="font-data-mono text-data-mono text-[#14b8a6] bg-[#14b8a6]/10 px-2 py-0.5 rounded border border-[#14b8a6]/30 text-[12px]">TCP : 443</span>
-</div>
-<!-- Direction -->
-<div class="col-span-4 flex flex-col gap-1">
-<span class="font-label-caps text-label-caps text-on-surface-variant">DIRECTION</span>
-</div>
-<div class="col-span-8 flex items-center">
-<span class="font-label-caps text-label-caps text-on-surface-variant bg-surface-variant px-2 py-0.5 rounded border border-outline-variant">OUTBOUND</span>
-</div>
-</div>
-</div>
-<!-- 3. Action Section -->
-<div class="p-density-comfortable pt-0 flex flex-col gap-4">
-<!-- Scope Toggle -->
-<div class="flex items-center justify-between bg-surface p-2 rounded border border-outline-variant">
-<span class="font-label-caps text-label-caps text-on-surface-variant mr-4">APPLY RULE FOR:</span>
-<div class="flex bg-surface-container-high rounded p-1 border border-outline-variant">
-<button class="font-label-caps text-[10px] px-3 py-1 rounded bg-primary text-on-primary font-bold">THIS SESSION</button>
-<button class="font-label-caps text-[10px] px-3 py-1 rounded text-on-surface-variant hover:text-on-surface transition-colors">PERMANENTLY</button>
-</div>
-</div>
-<!-- Egress Selector -->
-<div class="flex flex-wrap gap-1.5">
-<span class="font-label-caps text-label-caps text-on-surface-variant mr-2 self-center">ROUTE VIA:</span>
-<button class="font-label-caps text-[10px] px-2.5 py-1 rounded border border-[#6b7280]/60 bg-[#6b7280]/10 text-[#6b7280] font-bold">Default Route</button>
-<button class="font-label-caps text-[10px] px-2.5 py-1 rounded border border-[#22c55e]/60 bg-[#22c55e]/10 text-[#22c55e] font-bold">TUN: wg0</button>
-<button class="font-label-caps text-[10px] px-2.5 py-1 rounded border border-outline-variant bg-surface text-on-surface-variant">Device: wlan0</button>
-<button class="font-label-caps text-[10px] px-2.5 py-1 rounded border border-outline-variant bg-surface text-on-surface-variant">Device: eth0</button>
-</div>
-<!-- Main Buttons -->
-<div class="grid grid-cols-2 gap-3">
-<button class="flex items-center justify-center gap-2 bg-surface-variant hover:bg-surface-bright border border-[#22c55e]/50 text-[#22c55e] py-2 px-4 rounded transition-colors group">
-<span class="material-symbols-outlined text-[18px] group-hover:scale-110 transition-transform">gpp_good</span>
-<span class="font-label-caps text-label-caps">ALLOW</span>
-</button>
-<button class="flex items-center justify-center gap-2 bg-surface-variant hover:bg-surface-bright border border-error/50 text-error py-2 px-4 rounded transition-colors group">
-<span class="material-symbols-outlined text-[18px] group-hover:scale-110 transition-transform">gpp_bad</span>
-<span class="font-label-caps text-label-caps">DENY</span>
-</button>
-</div>
-<!-- Link -->
-<div class="flex justify-center mt-1">
-<a class="font-body-sm text-body-sm text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1" href="#">
-                    Always ask for this process <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
-</a>
-</div>
-</div>
-<!-- 4. Footer -->
-<div class="p-density-compact border-t border-outline-variant bg-surface-container-high rounded-b-lg flex justify-center">
-<span class="font-data-mono text-[10px] text-on-surface-variant opacity-70">
-                LogiGuard · Fail-close active · Queue: 3 pending
-            </span>
-</div>
-</div>
+
+<script>
+    // --- State ---
+    let scenario = 'domain'; // 'domain' | 'ip' | 'unknown'
+    let processScope = 'specific'; // 'specific' | 'all'
+    let domainScope = 'exact';     // 'exact' | 'wildcard' | 'any'
+    // Number of active octets: 4=/32, 3=/24, 2=/16, 1=/8
+    let activeOctets = 4;
+    const octets = ['142', '250', '80', '100'];
+
+    function cidrFromActive(n) {
+        if (n === 4) return { prefix: '/32', addr: '142.250.80.100/32' };
+        if (n === 3) return { prefix: '/24', addr: '142.250.80.0/24' };
+        if (n === 2) return { prefix: '/16', addr: '142.250.0.0/16' };
+        return     { prefix: '/8',  addr: '142.0.0.0/8' };
+    }
+
+    // --- Scenario switcher (demo only) ---
+    function setScenario(s) {
+        scenario = s;
+        processScope = 'specific';
+        domainScope = 'exact';
+        cidrScope = '/32';
+
+        ['domain','ip','unknown'].forEach(id => {
+            document.getElementById('btn-' + id).classList.remove('active');
+            document.getElementById('btn-' + id).classList.add('text-on-surface-variant');
+        });
+        document.getElementById('btn-' + s).classList.add('active');
+        document.getElementById('btn-' + s).classList.remove('text-on-surface-variant');
+
+        // Reset toggle states
+        document.querySelectorAll('.toggle-btn').forEach(b => {
+            b.classList.remove('active');
+            b.classList.add('text-on-surface-variant');
+        });
+
+        if (s === 'domain') {
+            document.getElementById('process-name-display').textContent = 'firefox';
+            document.getElementById('dest-display').textContent = 'accounts.google.com';
+            document.getElementById('dest-display').className = 'font-data-mono text-data-mono text-primary hover:underline cursor-pointer';
+            document.getElementById('proc-specific-label').textContent = 'firefox';
+            document.getElementById('proc-specific').classList.add('active');
+            document.getElementById('proc-specific').classList.remove('text-on-surface-variant');
+            document.getElementById('dom-exact').classList.add('active');
+            document.getElementById('dom-exact').classList.remove('text-on-surface-variant');
+            document.getElementById('dest-scope-domain').classList.remove('hidden');
+            document.getElementById('dest-scope-ip').classList.add('hidden');
+            document.getElementById('dest-scope-ip').classList.remove('flex');
+            document.getElementById('dest-scope-unknown').classList.add('hidden');
+            document.getElementById('dest-scope-unknown').classList.remove('flex');
+            document.getElementById('unknown-warning').classList.add('hidden');
+            document.getElementById('unknown-warning').classList.remove('flex');
+        } else if (s === 'ip') {
+            activeOctets = 4;
+            document.getElementById('process-name-display').textContent = 'curl';
+            document.getElementById('dest-display').textContent = '(unknown)';
+            document.getElementById('dest-display').className = 'font-data-mono text-data-mono text-on-surface-variant italic';
+            document.getElementById('proc-specific-label').textContent = 'curl';
+            document.getElementById('proc-specific').classList.add('active');
+            document.getElementById('proc-specific').classList.remove('text-on-surface-variant');
+            document.getElementById('dest-scope-domain').classList.add('hidden');
+            document.getElementById('dest-scope-ip').classList.remove('hidden');
+            document.getElementById('dest-scope-ip').classList.add('flex');
+            document.getElementById('dest-scope-unknown').classList.add('hidden');
+            document.getElementById('dest-scope-unknown').classList.remove('flex');
+            document.getElementById('unknown-warning').classList.add('hidden');
+            document.getElementById('unknown-warning').classList.remove('flex');
+            setTimeout(() => renderOctets('ip'), 0);
+        } else {
+            activeOctets = 4;
+            document.getElementById('process-name-display').textContent = '(unknown)';
+            document.getElementById('dest-display').textContent = '(unknown)';
+            document.getElementById('dest-display').className = 'font-data-mono text-data-mono text-on-surface-variant italic';
+            document.getElementById('proc-specific-label').textContent = 'unknown';
+            document.getElementById('proc-specific').classList.add('active');
+            document.getElementById('proc-specific').classList.remove('text-on-surface-variant');
+            document.getElementById('dest-scope-domain').classList.add('hidden');
+            document.getElementById('dest-scope-ip').classList.add('hidden');
+            document.getElementById('dest-scope-ip').classList.remove('flex');
+            document.getElementById('dest-scope-unknown').classList.remove('hidden');
+            document.getElementById('dest-scope-unknown').classList.add('flex');
+            document.getElementById('unknown-warning').classList.remove('hidden');
+            document.getElementById('unknown-warning').classList.add('flex');
+            processScope = 'specific';
+            setTimeout(() => renderOctets('unk'), 0);
+        }
+        updateRuleSummary();
+        updateButtonState();
+    }
+
+    // --- Process scope toggle ---
+    function setProcessScope(scope) {
+        if (scenario === 'unknown' && scope === 'all') return; // blocked
+        processScope = scope;
+        document.getElementById('proc-specific').classList.toggle('active', scope === 'specific');
+        document.getElementById('proc-specific').classList.toggle('text-on-surface-variant', scope !== 'specific');
+        document.getElementById('proc-all').classList.toggle('active', scope === 'all');
+        document.getElementById('proc-all').classList.toggle('text-on-surface-variant', scope !== 'all');
+        // When all processes + domain scope: disable "any" destination option
+        updateButtonState();
+        updateRuleSummary();
+    }
+
+    // --- Domain scope toggle ---
+    function setDomainScope(scope) {
+        if (processScope === 'all' && scope === 'any') return; // blocked: too broad
+        domainScope = scope;
+        ['exact','wildcard','any'].forEach(s => {
+            document.getElementById('dom-' + s).classList.toggle('active', s === scope);
+            document.getElementById('dom-' + s).classList.toggle('text-on-surface-variant', s !== scope);
+        });
+        updateRuleSummary();
+        updateButtonState();
+    }
+
+    // --- IP octet click handlers ---
+    function renderOctets(prefix) {
+        for (let i = 1; i <= 4; i++) {
+            const el = document.getElementById(prefix + '-oct-' + i);
+            if (!el) continue;
+            const active = i <= activeOctets;
+            el.classList.toggle('masked', !active);
+            el.textContent = active ? octets[i - 1] : '0';
+        }
+        const { prefix: cidrPrefix } = cidrFromActive(activeOctets);
+        const badge = document.getElementById(prefix === 'ip' ? 'ip-cidr-badge' : 'unk-cidr-badge');
+        if (badge) badge.textContent = cidrPrefix;
+    }
+
+    function clickOctet(n) {
+        // Clicking active octet N masks it and all after → set boundary to N-1
+        // Clicking masked octet N activates it and all before → set boundary to N
+        activeOctets = (n <= activeOctets && n > 1) ? n - 1 : n;
+        renderOctets('ip');
+        updateRuleSummary();
+        updateButtonState();
+    }
+
+    function clickOctetUnk(n) {
+        activeOctets = (n <= activeOctets && n > 1) ? n - 1 : n;
+        renderOctets('unk');
+        updateRuleSummary();
+        updateButtonState();
+    }
+
+    // --- Rule summary line ---
+    function updateRuleSummary() {
+        const el = document.getElementById('rule-summary');
+        const processLabel = processScope === 'all'
+            ? '<strong class="text-on-surface">any process</strong>'
+            : `<strong class="text-on-surface">${document.getElementById('proc-specific-label').textContent}</strong>`;
+
+        let destLabel;
+        if (scenario === 'domain') {
+            if (domainScope === 'exact') destLabel = '<strong class="text-on-surface">accounts.google.com</strong>';
+            else if (domainScope === 'wildcard') destLabel = '<strong class="text-on-surface">*.google.com</strong>';
+            else destLabel = '<strong class="text-on-surface">any destination</strong>';
+        } else {
+            destLabel = `<strong class="text-on-surface">${cidrFromActive(activeOctets).addr}</strong>`;
+        }
+
+        el.innerHTML = `Rule applies to ${processLabel} connecting to ${destLabel}`;
+    }
+
+    // --- Button enable/disable ---
+    function updateButtonState() {
+        const allowBtn = document.getElementById('allow-btn');
+        const denyBtn = document.getElementById('deny-btn');
+        // Disabled when: all processes + any destination (too broad)
+        const tooBroad = (processScope === 'all') && (scenario === 'domain' && domainScope === 'any');
+        allowBtn.disabled = tooBroad;
+        denyBtn.disabled = tooBroad;
+    }
+
+    // Init
+    setScenario('domain');
+</script>
 </body></html>

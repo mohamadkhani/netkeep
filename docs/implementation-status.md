@@ -1,7 +1,7 @@
 # LogiGuard Current Implementation State
 
 **Test Status:** 87 tests passing (`cargo test --workspace`)
-**Phase:** 4 / 5 (GPUI UI complete, settings window with Table/Dialog, proxy support)
+**Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
 **Last Updated:** 2026-05-12
 
 ## Completed Work
@@ -75,7 +75,7 @@
   - `app.rs` — DecisionApp root view + Render impl + 1-second countdown ticker
   - `components/header.rs` — security icon, CONNECTION INTERCEPTED title, circular countdown ring, AUTO-DENY label
   - `components/flow_info.rs` — grid layout with colored badges (teal protocol, IP/direction chips)
-  - `components/action_footer.rs` — segmented pill scope toggle, outlined Allow/Deny buttons with icons
+  - `components/action_footer.rs` — rule scope section (process toggle, destination scope selector, CIDR octet picker, rule summary line), duration pill, egress chips, Allow/Deny buttons with broad-rule validation
   - `components/status_bar.rs` — centered footer with LogiGuard branding and queue status
   - `settings/mod.rs` — SettingsApp with Table/Dialog, tab switching, data sync
   - `settings/rules_tab.rs` — RulesDelegate (TableDelegate) with toggle/delete actions
@@ -101,7 +101,12 @@
 - [x] Proxy support: ProxyConfig, ProxyProtocol, ProxyAuth types
 - [x] Proxy CRUD: control-api, state-store SQLite, daemon, CLI
 - [x] RouteTarget::Proxy(id) replaces RouteTarget::Socks
-- [x] 77 tests passing across workspace
+- [x] Rule scope selection UI implemented (process toggle, domain/CIDR destination scope, rule summary line)
+- [x] `DestinationMatcher::Any` variant added (allows "specific process, any destination" rules)
+- [x] `ProcessScope` / `DestScope` state in `AppState` initialized from flow at startup
+- [x] Too-broad rule validation: Allow/Deny buttons disabled for "all processes + any destination"
+- [x] CIDR octet picker: fixed-width clickable chips, active_octets drives prefix computation
+- [x] Warning banner when both process and destination unknown
 
 ### Routed Relay + Per-Egress DNS (2026-05-08) ✓
 
@@ -175,7 +180,7 @@ struct Rule {
     pub action: RuleAction,            // Allow | Deny | Ask
     pub duration: RuleDuration,        // UntilRestart | Permanent
     pub process_name: Option<String>,  // Process name matcher (e.g., "firefox", "ssh")
-    pub destination: DestinationMatcher, // IpExact | Cidr | DomainExact | DomainWildcard
+    pub destination: DestinationMatcher, // IpExact | Cidr | DomainExact | DomainWildcard | Any
 }
 ```
 

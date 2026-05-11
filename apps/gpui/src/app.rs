@@ -49,6 +49,8 @@ impl Render for DecisionApp {
         let now = state.now_secs;
         let make_permanent = state.make_permanent;
         let pending_count = state.pending_count;
+        let process_scope = state.process_scope.clone();
+        let dest_scope = state.dest_scope.clone();
         let state_weak = self.state.downgrade();
         let item = state.item.clone();
         let mono_font = Theme::global(cx).mono_font_family.clone();
@@ -63,6 +65,8 @@ impl Render for DecisionApp {
 
         v_flex()
             .w_full()
+            .h_full()
+            .overflow_hidden()
             .bg(colors::surface_container())
             .border_1()
             .border_color(colors::border())
@@ -84,6 +88,8 @@ impl Render for DecisionApp {
                     make_permanent,
                     egresses: state.egresses.clone(),
                     selected_egress_index: state.selected_egress_index,
+                    process_scope,
+                    dest_scope,
                     state: state_weak,
                 },
             ))

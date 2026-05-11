@@ -28,6 +28,8 @@ pub enum DestinationMatcher {
     Cidr(String),
     DomainExact(String),
     DomainWildcard(String),
+    /// Matches any destination — only valid when a process constraint is present.
+    Any,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,6 +2,10 @@
 
 Library: https://crates.io/crates/gpui-component
 
+> **Don't reinvent the wheel.** This library already provides labels, inputs, buttons, tables, dialogs,
+> tabs, and layout containers. Always check here (and the Export Map below) before reaching for `div()`.
+> Raw `div()` is only appropriate when no library component fits the need.
+
 ## Initialization
 
 Must call before using components:
@@ -777,3 +781,183 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui = "0.2"
 gpui-component = "0.5"
 ```
+
+---
+
+## Label Component
+
+`Label` is a text element with optional secondary text. It is **not re-exported from the crate root** — import from the submodule:
+
+```rust
+use gpui_component::label::Label;
+```
+
+### Basic Usage
+
+```rust
+Label::new("hello")
+    .text_size(px(12.))
+    .text_color(colors::text())
+    .into_any_element()
+```
+
+### With Secondary Text
+
+```rust
+Label::new("socks-client")
+    .secondary("ui-123abc")   // rendered below in muted/smaller style
+```
+
+### Key Methods
+
+| Method | Description |
+|---|---|
+| `.text_size(px(N))` | Override font size |
+| `.text_color(hsla)` | Override text color |
+| `.secondary(text)` | Dim sub-label below the main text |
+| `.masked(bool)` | Replace content with bullet dots |
+
+### When to Use Label vs div
+
+Prefer `Label` whenever you are rendering a single line of read-only text in a table cell, form row, or summary line. Use `div()` only when you need to nest child elements or apply layout (flex, sizing, border, bg) directly on the text container — `Label` is a leaf, not a container.
+
+```rust
+// ✅ Correct — single read-only text
+Label::new(dest_text(&rule.destination)).text_size(px(12.))
+
+// ✅ Correct — container with children
+h_flex()
+    .gap(px(6.))
+    .child(Label::new("name"))
+    .child(some_badge)
+
+// ❌ Avoid — raw div for plain text
+div().text_size(px(12.)).child("some text")
+```
+
+---
+
+## Export Map — What Is and Is Not Re-exported
+
+Many gpui-component types are in submodules and **not** re-exported at the crate root. Always verify before using a bare `gpui_component::Foo` import.
+
+| Type | Import path |
+|---|---|
+| `h_flex` / `v_flex` | `gpui_component::h_flex` (crate root ✅) |
+| `Root` | `gpui_component::Root` (crate root ✅) |
+| `Theme` / `ThemeMode` | `gpui_component::{Theme, ThemeMode}` (crate root ✅) |
+| `Table` | `gpui_component::table::Table` |
+| `TableState` | `gpui_component::table::TableState` |
+| `TableDelegate` | `gpui_component::table::TableDelegate` |
+| `Column` | `gpui_component::table::Column` |
+| `TableEvent` | `gpui_component::table::TableEvent` |
+| `Dialog` | `gpui_component::dialog::Dialog` |
+| `DialogButtonProps` | `gpui_component::dialog::DialogButtonProps` |
+| `Input` | `gpui_component::input::Input` |
+| `InputState` | `gpui_component::input::InputState` |
+| `Label` | `gpui_component::label::Label` ⚠ submodule only |
+| `Tab` / `TabBar` | `gpui_component::tab::{Tab, TabBar}` |
+| `Button` | `gpui_component::button::Button` |
+| `ButtonVariants` | `gpui_component::button::ButtonVariants` |
+| `Checkbox` | `gpui_component::checkbox::Checkbox` |
+
+**Rule:** If `use gpui_component::Foo` causes an unresolved import error, drop to the submodule: `use gpui_component::foo_module::Foo`.
+
+---
+
+## Layout: h_flex / v_flex vs div
+
+`h_flex()` and `v_flex()` from `gpui_component` are pre-configured flex containers. They are the preferred layout primitives in all LogiGuard GPUI code.
+
+```rust
+// ✅ Prefer
+h_flex().gap(px(8.)).items_center().child(a).child(b)
+v_flex().gap(px(12.)).child(row1).child(row2)
+
+// ❌ Avoid — more verbose, same result
+div().flex().flex_row().gap(px(8.)).items_center().child(a).child(b)
+```
+
+`div()` is reserved for:
+- A non-flex block (e.g. a colored dot, a divider, a wrapper that only needs bg/border/sizing)
+- A container that uses `flex_col` via explicit `.flex_col()` when `v_flex` is not imported or not appropriate
+
+---
+
+## Project Design-System Layer (`components/ds.rs`)
+
+LogiGuard wraps the lowest-level GPUI/gpui-component primitives in `apps/gpui/src/components/ds.rs`. Always check `ds.rs` before writing inline UI atoms.
+
+### Available Primitives
+
+| Function | Signature | Purpose |
+|---|---|---|
+| `badge` | `badge(text, color: Hsla) -> AnyElement` | Read-only colored pill chip (bg tint + alpha border) |
+| `chip` | `chip(id, label, selected, on_click) -> AnyElement` | Interactive toggle chip (primary fill when active) |
+| `dest_text` | `dest_text(dest: &DestinationMatcher) -> String` | Human-readable destination string for any matcher variant |
+| `dest_kind_label` | `dest_kind_label(dest: &DestinationMatcher) -> &str` | Short type tag (`"IP"`, `"CIDR"`, `"DOMAIN"`, …) |
+| `cidr_picker` | `cidr_picker(ip: &str, active_octets: u8, state_weak) -> AnyElement` | Interactive CIDR octet picker (4 fixed-width chips + `/prefix` badge) |
+| `label_row` | `label_row(label, content: AnyElement) -> AnyElement` | 72px muted label + right-side content — standard form row layout |
+
+### badge vs chip vs Label
+
+| Need | Use |
+|---|---|
+| Read-only colored tag (Action, Duration, Protocol) | `ds::badge` |
+| Interactive toggle (scope selection) | `ds::chip` |
+| Plain read-only text (table cell, summary) | `gpui_component::label::Label` |
+| Custom interactive element | `div().id(...).on_click(...)` |
+
+### label_row layout contract
+
+Every "label + interactive content" row in the decision dialog and settings panels must use `label_row`. This keeps the 72px left column aligned across all rows:
+
+```rust
+ds::label_row("Process",     chips.into_any_element())
+ds::label_row("Destination", cidr_or_domain_chips.into_any_element())
+ds::label_row("Duration",    scope_toggle(...))
+ds::label_row("Route via",   egress_selector(...))
+```
+
+### cidr_picker interaction model
+
+- 4 octet chips, each 38px wide, center-aligned text
+- Active octet: primary color background + border, real value displayed
+- Masked octet: dim border, strikethrough `0`
+- Clicking active octet N → masks it and all after (min 1 active)
+- Clicking masked octet N → activates it and all before
+- `/prefix` badge (32px fixed) updates live: active_octets × 8
+- State is stored in `AppState.dest_scope = DestScope::IpCidr(active_octets)`
+
+### dest_text output examples
+
+| DestinationMatcher | Output |
+|---|---|
+| `Any` | `"any destination"` |
+| `IpExact("1.1.1.1")` | `"1.1.1.1"` |
+| `Cidr("10.0.0.0/8")` | `"10.0.0.0/8"` |
+| `DomainExact("google.com")` | `"google.com"` |
+| `DomainWildcard("google.com")` | `"*.google.com"` |
+
+---
+
+## Domain Apex Extraction
+
+When computing a wildcard label from a destination domain, the apex depends on the number of dots:
+
+```rust
+fn domain_apex(domain: &str) -> String {
+    let dot_count = domain.chars().filter(|&c| c == '.').count();
+    if dot_count >= 2 {
+        // "accounts.google.com" → "google.com" (strip leftmost label)
+        domain.splitn(2, '.').nth(1).unwrap_or(domain).to_string()
+    } else {
+        // "google.com" → "google.com" (already the apex)
+        domain.to_string()
+    }
+}
+```
+
+**Rule:** Never use `.splitn(2, '.').nth(1)` alone — it produces `"com"` from `"google.com"`. Always guard with a dot-count check.
+
+Wildcard chips: `*.{apex}`. The `DomainWildcard` variant in the rule stores just the apex (without the `*.` prefix), and the policy-engine's `wildcard_matches` prepends `*.` when matching.

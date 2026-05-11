@@ -15,6 +15,7 @@ fn wildcard_matches(pattern: &str, host: &str) -> bool {
 
 fn destination_matches(rule: &Rule, flow: &FlowContext) -> bool {
     match &rule.destination {
+        DestinationMatcher::Any => true,
         DestinationMatcher::IpExact(ip) => flow.destination_ip == *ip,
         DestinationMatcher::Cidr(prefix) => flow.destination_ip.starts_with(prefix),
         DestinationMatcher::DomainExact(domain) => flow.destination_domain.as_ref() == Some(domain),
@@ -36,6 +37,7 @@ fn process_matches(rule: &Rule, flow: &FlowContext) -> bool {
 
 fn specificity(rule: &Rule) -> u8 {
     let base = match rule.destination {
+        DestinationMatcher::Any => 1,
         DestinationMatcher::IpExact(_) | DestinationMatcher::DomainExact(_) => 3,
         DestinationMatcher::Cidr(_) | DestinationMatcher::DomainWildcard(_) => 2,
     };

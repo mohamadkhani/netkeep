@@ -141,13 +141,25 @@ fn connect_upstream(
 pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), String> {
     let (host, port) = parse_socks5_target(&mut stream)?;
     let parsed_ip = host.parse::<IpAddr>().ok();
+    // When the target is a domain name, resolve it to get the actual destination IP.
+    // Falls back to 0.0.0.0 only if DNS fails.
+    let (destination_ip, destination_domain) = if let Some(ip) = parsed_ip {
+        (ip.to_string(), None)
+    } else {
+        use std::net::ToSocketAddrs;
+        let resolved_ip = format!("{host}:{port}")
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+            .map(|addr| addr.ip().to_string())
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        (resolved_ip, Some(host.clone()))
+    };
     let flow = FlowContext {
         process_name: Some("socks-client".to_string()),
-        destination_ip: parsed_ip
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "0.0.0.0".to_string()),
+        destination_ip,
         destination_port: port,
-        destination_domain: if parsed_ip.is_none() { Some(host.clone()) } else { None },
+        destination_domain,
         protocol: TransportProtocol::Tcp,
         direction: FlowDirection::Outbound,
         device_label: None,

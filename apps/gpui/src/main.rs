@@ -24,7 +24,7 @@ use tray_icon::{Icon, TrayIconBuilder};
 
 use app::DecisionApp;
 use settings::{SettingsApp, SettingsState};
-use state::AppState;
+use state::{AppState, DestScope, ProcessScope};
 
 fn tray_pixel_icon() -> Icon {
     tray_icon_with_color(0x14b8a6) // teal for default (enabled state)
@@ -274,6 +274,16 @@ fn run_gui(pending_id: String) {
         fonts::apply_design_fonts(cx);
 
         let egresses = daemon::detect_egresses();
+        let process_scope = if item.flow.process_name.is_some() {
+            ProcessScope::Specific
+        } else {
+            ProcessScope::Specific // locked: shown as "unknown", cannot switch to All
+        };
+        let dest_scope = if item.flow.destination_domain.is_some() {
+            DestScope::DomainExact
+        } else {
+            DestScope::IpCidr(4) // default: exact IP (/32)
+        };
         let state: Entity<AppState> = cx.new(|_| AppState {
             item,
             now_secs: daemon::unix_now(),
@@ -281,13 +291,15 @@ fn run_gui(pending_id: String) {
             pending_count: 0,
             egresses,
             selected_egress_index: 0,
+            process_scope,
+            dest_scope,
         });
 
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                     None,
-                    size(px(420.), px(488.)),
+                    size(px(440.), px(580.)),
                     cx,
                 ))),
                 titlebar: Some(gpui::TitlebarOptions {

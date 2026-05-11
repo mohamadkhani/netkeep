@@ -306,6 +306,7 @@ fn i64_to_duration(v: i64) -> Option<RuleDuration> {
 
 fn destination_to_parts(destination: &DestinationMatcher) -> (i64, &str) {
     match destination {
+        DestinationMatcher::Any => (0, ""),
         DestinationMatcher::IpExact(v) => (1, v.as_str()),
         DestinationMatcher::Cidr(v) => (2, v.as_str()),
         DestinationMatcher::DomainExact(v) => (3, v.as_str()),
@@ -315,6 +316,7 @@ fn destination_to_parts(destination: &DestinationMatcher) -> (i64, &str) {
 
 fn parts_to_destination(kind: i64, value: String) -> Option<DestinationMatcher> {
     match kind {
+        0 => Some(DestinationMatcher::Any),
         1 => Some(DestinationMatcher::IpExact(value)),
         2 => Some(DestinationMatcher::Cidr(value)),
         3 => Some(DestinationMatcher::DomainExact(value)),
