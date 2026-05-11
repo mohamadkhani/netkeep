@@ -305,11 +305,14 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
             udp_timeout_secs,
             quic_timeout_secs,
             other_timeout_secs,
+            nfqueue_enabled,
+            nfqueue_num,
         } => Ok(format!(
             "ready={ready} fail_close_active={fail_close_active} \
              pending_limit={pending_limit} default_timeout_secs={default_timeout_secs} \
              tcp={tcp_timeout_secs}s udp={udp_timeout_secs}s \
-             quic={quic_timeout_secs}s other={other_timeout_secs}s"
+             quic={quic_timeout_secs}s other={other_timeout_secs}s \
+             nfqueue={nfqueue_enabled} nfqueue_num={nfqueue_num:?}"
         )),
         ControlResponse::Unlocked => Ok("unlocked: nftables rules removed".to_string()),
         ControlResponse::Error(err) => Err(err),
@@ -360,6 +363,9 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
                     .join("\n");
                 Ok(body)
             }
+        }
+        ControlResponse::NfqueueStatus { enabled, queue_num } => {
+            Ok(format!("nfqueue enabled={enabled} queue_num={queue_num:?}"))
         }
     }
 }

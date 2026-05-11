@@ -604,6 +604,10 @@ fn handle_client(
             // No nftables active — nothing to tear down.
             ControlResponse::Unlocked
         }
+    } else if matches!(request, ControlRequest::SetNfqueueEnabled { .. }) {
+        // Update NFQUEUE state in service
+        let mut svc = service.lock().map_err(|_| "service lock poisoned".to_string())?;
+        svc.handle(request)
     } else if let ControlRequest::OpenRoutedTcp { host, port, target } = request {
         match open_routed_tcp(host, port, target, db_path.to_string()) {
             Ok(listen_addr) => ControlResponse::RoutedTcpReady { listen_addr },

@@ -28,6 +28,8 @@ pub enum ControlRequest {
     UpsertProxy(ProxyConfig),
     DeleteProxy { id: String },
     ListProxies,
+    // NFQUEUE management
+    SetNfqueueEnabled { enabled: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +56,8 @@ pub enum ControlResponse {
         udp_timeout_secs: u64,
         quic_timeout_secs: u64,
         other_timeout_secs: u64,
+        nfqueue_enabled: bool,
+        nfqueue_num: Option<u16>,
     },
     Unlocked,
     SubscriptionAck,  // NEW: Confirms subscription established
@@ -63,6 +67,10 @@ pub enum ControlResponse {
     Error(String),
     EgressList(Vec<Egress>),
     ProxyList(Vec<ProxyConfig>),
+    NfqueueStatus {
+        enabled: bool,
+        queue_num: Option<u16>,
+    },
 }
 
 // NEW: Push notifications sent from daemon to subscribers

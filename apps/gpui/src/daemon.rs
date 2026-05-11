@@ -135,3 +135,31 @@ pub fn merge_egress_availability(mut stored: Vec<Egress>) -> Vec<Egress> {
     }
     stored
 }
+
+/// Get current NFQUEUE status from daemon.
+pub fn get_nfqueue_status() -> anyhow::Result<(bool, Option<u16>)> {
+    let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
+        .unwrap_or_else(|_| SOCKET_PATH.to_string());
+
+    match send_request(&socket_path, &ControlRequest::Health)? {
+        ControlResponse::Health {
+            nfqueue_enabled,
+            nfqueue_num,
+            ..
+        } => Ok((nfqueue_enabled, nfqueue_num)),
+        ControlResponse::Error(e) => Err(anyhow::anyhow!("daemon error: {e}")),
+        other => Err(anyhow::anyhow!("unexpected response: {other:?}")),
+    }
+}
+
+/// Toggle NFQUEUE on or off.
+pub fn set_nfqueue_enabled(enabled: bool) -> anyhow::Result<()> {
+    let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
+        .unwrap_or_else(|_| SOCKET_PATH.to_string());
+
+    match send_request(&socket_path, &ControlRequest::SetNfqueueEnabled { enabled })? {
+        ControlResponse::Ok => Ok(()),
+        ControlResponse::Error(e) => Err(anyhow::anyhow!("daemon error: {e}")),
+        other => Err(anyhow::anyhow!("unexpected response: {other:?}")),
+    }
+}

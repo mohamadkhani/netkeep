@@ -43,12 +43,18 @@ where
             let verdict = match parse_raw_packet(msg.get_payload()) {
                 None => Verdict::Drop,
                 Some(raw) => {
-                    let flow = self.classifier.classify(&raw);
-                    match self.registrar.register(flow, now_secs) {
-                        FlowDecision::Immediate(RuleAction::Allow) => Verdict::Accept,
-                        // Deny rule, Ask without resolution, queue overflow, or pending →
-                        // drop the current packet; the app will retransmit after the decision.
-                        _ => Verdict::Drop,
+                    // Defense-in-depth: never intercept loopback traffic even if the
+                    // nftables rule has an edge case (e.g. startup race, kernel quirk).
+                    if is_loopback(&raw.dst_ip) {
+                        Verdict::Accept
+                    } else {
+                        let flow = self.classifier.classify(&raw);
+                        match self.registrar.register(flow, now_secs) {
+                            FlowDecision::Immediate(RuleAction::Allow) => Verdict::Accept,
+                            // Deny rule, Ask without resolution, queue overflow, or pending →
+                            // drop the current packet; the app will retransmit after the decision.
+                            _ => Verdict::Drop,
+                        }
                     }
                 }
             };
@@ -57,6 +63,18 @@ where
             self.queue.verdict(msg)?;
         }
     }
+}
+
+fn is_loopback(ip: &str) -> bool {
+    // IPv4 loopback: 127.0.0.0/8
+    if let Ok(v4) = ip.parse::<std::net::Ipv4Addr>() {
+        return v4.octets()[0] == 127;
+    }
+    // IPv6 loopback: ::1
+    if let Ok(v6) = ip.parse::<std::net::Ipv6Addr>() {
+        return v6.is_loopback();
+    }
+    false
 }
 
 /// Parse a raw IP-layer payload (as delivered by NFQUEUE) into a `RawPacket`.

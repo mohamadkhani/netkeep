@@ -27,12 +27,24 @@ use settings::{SettingsApp, SettingsState};
 use state::AppState;
 
 fn tray_pixel_icon() -> Icon {
-    // StatusNotifier / libappindicator often scales tiny flat icons to nothing; use 64×64 with contrast.
+    tray_icon_with_color(0x14b8a6) // teal for default (enabled state)
+}
+
+fn tray_icon_disabled() -> Icon {
+    tray_icon_with_color(0x6b7280) // gray for disabled state
+}
+
+fn tray_icon_with_color(color_rgb: u32) -> Icon {
     const S: u32 = 64;
     let mut rgba = vec![0u8; (S * S * 4) as usize];
     let cx = S as f32 / 2.0;
     let cy = S as f32 / 2.0;
     let r = S as f32 * 0.38;
+    let (r0, g0, b0) = (
+        ((color_rgb >> 16) & 0xff) as u8,
+        ((color_rgb >> 8) & 0xff) as u8,
+        (color_rgb & 0xff) as u8,
+    );
     for y in 0..S {
         for x in 0..S {
             let i = ((y * S + x) * 4) as usize;
@@ -40,9 +52,9 @@ fn tray_pixel_icon() -> Icon {
             let dy = y as f32 - cy;
             let inside = dx * dx + dy * dy <= r * r;
             if inside {
-                rgba[i] = 0x14;
-                rgba[i + 1] = 0xb8;
-                rgba[i + 2] = 0xa6;
+                rgba[i] = r0;
+                rgba[i + 1] = g0;
+                rgba[i + 2] = b0;
                 rgba[i + 3] = 0xff;
             } else {
                 rgba[i] = 0x21;
@@ -113,6 +125,30 @@ fn run_tray_monitor() {
         // Build menu before the tray so GTK-backed `muda` sees items on the first `gtk_context_menu()`
         // build (see muda gtk/mod.rs: menu children are only populated once).
         let menu = Menu::new();
+
+        // NFQUEUE toggle section
+        menu
+            .append(&MenuItem::with_id(
+                MenuId::new("logiguard-nfqueue-enable"),
+                "Enable Network Interception",
+                true,
+                None,
+            ))
+            .expect("menu nfqueue enable item");
+        menu
+            .append(&MenuItem::with_id(
+                MenuId::new("logiguard-nfqueue-disable"),
+                "Disable Network Interception",
+                true,
+                None,
+            ))
+            .expect("menu nfqueue disable item");
+
+        // Separator
+        menu
+            .append(&MenuItem::new("separator", false, None))
+            .expect("menu separator");
+
         menu
             .append(&MenuItem::with_id(
                 MenuId::new("logiguard-manage"),
@@ -144,10 +180,19 @@ fn run_tray_monitor() {
             .build()
             .expect("system tray");
 
-        // `Application::run`'s callback is `FnOnce`: it runs once and returns. If we drop
-        // `TrayIcon` here, its `Drop` tears down libappindicator (Passive + temp PNG), which
-        // yields an empty tray slot and a blank menu. Keep the indicator for process lifetime.
-        std::mem::forget(tray_icon);
+        // Keep tray icon accessible for dynamic updates.
+        // Wrap in Arc to share with the async task that handles menu events.
+        let tray_icon = Arc::new(tray_icon);
+
+        // Sync icon with current NFQUEUE state on startup.
+        if let Ok((enabled, _)) = daemon::get_nfqueue_status() {
+            let icon = if enabled {
+                tray_pixel_icon()
+            } else {
+                tray_icon_disabled()
+            };
+            let _ = tray_icon.set_icon(Some(icon));
+        }
 
         #[cfg(target_os = "linux")]
         gtk_drain_events();
@@ -155,8 +200,11 @@ fn run_tray_monitor() {
         let sock_mgmt = socket_path.clone();
         let gui_cmd = gui_command.clone();
         let settings_open = Arc::new(AtomicBool::new(false));
+        let tray_icon_task = tray_icon.clone();
         cx.spawn(async move |app| {
             let manage_id = MenuId::new("logiguard-manage");
+            let nfqueue_enable_id = MenuId::new("logiguard-nfqueue-enable");
+            let nfqueue_disable_id = MenuId::new("logiguard-nfqueue-disable");
             let quit_id = MenuId::new("logiguard-quit");
             loop {
                 #[cfg(target_os = "linux")]
@@ -166,7 +214,19 @@ fn run_tray_monitor() {
                     .timer(Duration::from_millis(50))
                     .await;
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
-                    if event.id == manage_id {
+                    if event.id == nfqueue_enable_id {
+                        if let Err(e) = daemon::set_nfqueue_enabled(true) {
+                            eprintln!("failed to enable NFQUEUE: {e}");
+                        } else {
+                            let _ = tray_icon_task.set_icon(Some(tray_pixel_icon()));
+                        }
+                    } else if event.id == nfqueue_disable_id {
+                        if let Err(e) = daemon::set_nfqueue_enabled(false) {
+                            eprintln!("failed to disable NFQUEUE: {e}");
+                        } else {
+                            let _ = tray_icon_task.set_icon(Some(tray_icon_disabled()));
+                        }
+                    } else if event.id == manage_id {
                         // Only one settings window at a time.
                         if settings_open.load(Ordering::Relaxed) {
                             continue;
@@ -250,6 +310,9 @@ fn run_gui(pending_id: String) {
 
         cx.activate(true);
     });
+
+    // Mark decision window as closed when we exit
+    monitor::decision_window_closed();
 }
 
 fn run_settings() {

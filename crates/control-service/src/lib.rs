@@ -4,6 +4,7 @@ use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
 use policy_engine::resolve_action;
 use state_store::Repository;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct ControlService<R: Repository> {
     repo: R,
@@ -14,6 +15,9 @@ pub struct ControlService<R: Repository> {
     event_counter: u64,
     /// Broadcast channel for sending push notifications to subscribers
     notification_tx: tokio::sync::broadcast::Sender<PushNotification>,
+    /// NFQUEUE state (enabled + queue number if active)
+    nfqueue_enabled: AtomicBool,
+    nfqueue_num: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +49,34 @@ impl<R: Repository> ControlService<R> {
             health_config,
             notification_tx,
         )
+    }
+
+    pub fn with_nfqueue(
+        repo: R,
+        nfqueue_enabled: bool,
+        nfqueue_num: Option<u16>,
+    ) -> Self {
+        let default_timeout_secs = 100;
+        let pending_limit = 100;
+        let health_config = HealthConfig {
+            pending_limit,
+            default_timeout_secs,
+            tcp_timeout_secs: default_timeout_secs,
+            udp_timeout_secs: default_timeout_secs,
+            quic_timeout_secs: default_timeout_secs,
+            other_timeout_secs: default_timeout_secs,
+        };
+        let (notification_tx, _) = tokio::sync::broadcast::channel(500);
+        Self {
+            repo,
+            decision_engine: DecisionEngine::new(pending_limit, default_timeout_secs, OverflowPolicy::DenyNew),
+            health_config,
+            now_secs: 0,
+            event_counter: 0,
+            notification_tx,
+            nfqueue_enabled: AtomicBool::new(nfqueue_enabled),
+            nfqueue_num,
+        }
     }
 
     pub fn with_notification_tx(
@@ -96,6 +128,8 @@ impl<R: Repository> ControlService<R> {
             now_secs: 0,
             event_counter: 0,
             notification_tx,
+            nfqueue_enabled: AtomicBool::new(false),
+            nfqueue_num: None,
         }
     }
 
@@ -242,6 +276,10 @@ impl<R: Repository> ControlService<R> {
                     ControlResponse::Error("pending decision not found".to_string())
                 }
             }
+            ControlRequest::SetNfqueueEnabled { enabled } => {
+                self.nfqueue_enabled.store(enabled, Ordering::Relaxed);
+                ControlResponse::Ok
+            }
             ControlRequest::Health => ControlResponse::Health {
                 ready: true,
                 fail_close_active: true,
@@ -251,6 +289,8 @@ impl<R: Repository> ControlService<R> {
                 udp_timeout_secs: self.health_config.udp_timeout_secs,
                 quic_timeout_secs: self.health_config.quic_timeout_secs,
                 other_timeout_secs: self.health_config.other_timeout_secs,
+                nfqueue_enabled: self.nfqueue_enabled.load(Ordering::Relaxed),
+                nfqueue_num: self.nfqueue_num,
             },
             // Unlock is handled by the daemon directly (needs nftables access + console check).
             // The service just acknowledges it; the daemon does the real work.
@@ -562,7 +602,9 @@ mod tests {
                 tcp_timeout_secs: 120,
                 udp_timeout_secs: 15,
                 quic_timeout_secs: 20,
-                other_timeout_secs: 30
+                other_timeout_secs: 30,
+                nfqueue_enabled: false,
+                nfqueue_num: None,
             }
         );
     }

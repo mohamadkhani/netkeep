@@ -247,6 +247,18 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             "add rule inet logiguard output_early ct mark >= {route_mark_base} meta mark set ct mark accept\n",
         ));
         if let Some(q) = queue_num {
+            // Exclude loopback traffic: skip both the loopback interface and the
+            // 127.0.0.0/8 address range (defense-in-depth; the Rust processor also
+            // filters loopback as a second layer).
+            script.push_str(&format!(
+                "add rule inet logiguard output_early oifname \"lo\" accept\n",
+            ));
+            script.push_str(&format!(
+                "add rule inet logiguard output_early ip daddr 127.0.0.0/8 accept\n",
+            ));
+            script.push_str(&format!(
+                "add rule inet logiguard output_early ip6 daddr ::1 accept\n",
+            ));
             script.push_str(&format!(
                 "add rule inet logiguard output_early queue num {q}\n",
             ));
@@ -255,6 +267,16 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             script.push_str(
                 "add chain inet logiguard forward { type filter hook forward priority 0; policy accept; }\n",
             );
+            // Exclude loopback from forward chain
+            script.push_str(
+                "add rule inet logiguard forward oifname \"lo\" accept\n",
+            );
+            script.push_str(&format!(
+                "add rule inet logiguard forward ip daddr 127.0.0.0/8 accept\n",
+            ));
+            script.push_str(&format!(
+                "add rule inet logiguard forward ip6 daddr ::1 accept\n",
+            ));
             script.push_str(&format!(
                 "add rule inet logiguard forward queue num {q}\n",
             ));
