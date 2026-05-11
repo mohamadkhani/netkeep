@@ -22,33 +22,46 @@ pub fn poll_decision_spawner(socket_path: String, gui_command: String) {
         match daemon::send_request(&socket_path, &ControlRequest::ListPending) {
             Ok(ControlResponse::PendingList(items)) => {
                 for item in &items {
-                    if shown_ids.insert(item.id.clone()) {
-                        // Only spawn if no decision window is currently open
-                        if !DECISION_WINDOW_OPEN.load(Ordering::Relaxed) {
-                            eprintln!(
-                                "new pending: {} ({})",
-                                item.id,
-                                item.flow.process_name.as_deref().unwrap_or("unknown")
-                            );
-                            match std::process::Command::new(&gui_command)
-                                .arg("--pending-id")
-                                .arg(&item.id)
-                                .env("LOGIGUARD_SOCKET_PATH", &socket_path)
-                                .spawn()
-                            {
-                                Ok(child) => {
-                                    eprintln!("spawned GUI for {} (pid {})", item.id, child.id());
-                                    DECISION_WINDOW_OPEN.store(true, Ordering::Relaxed);
+                    // Only track ids we actually spawned for. If we insert before a successful
+                    // spawn, deferred items (window already open) or failed spawns would never get
+                    // a dialog: later polls skip them because `insert` returns false.
+                    if shown_ids.contains(&item.id) {
+                        continue;
+                    }
+                    if DECISION_WINDOW_OPEN.load(Ordering::Relaxed) {
+                        eprintln!(
+                            "decision window already open, deferring pending {}",
+                            item.id
+                        );
+                        continue;
+                    }
+                    eprintln!(
+                        "new pending: {} ({})",
+                        item.id,
+                        item.flow.process_name.as_deref().unwrap_or("unknown")
+                    );
+                    match std::process::Command::new(&gui_command)
+                        .arg("--pending-id")
+                        .arg(&item.id)
+                        .env("LOGIGUARD_SOCKET_PATH", &socket_path)
+                        .spawn()
+                    {
+                        Ok(mut child) => {
+                            eprintln!("spawned GUI for {} (pid {})", item.id, child.id());
+                            shown_ids.insert(item.id.clone());
+                            DECISION_WINDOW_OPEN.store(true, Ordering::Relaxed);
+                            // `DECISION_WINDOW_OPEN` is process-local. The child process cannot
+                            // clear the tray's flag (a static in another address space), so we wait
+                            // on the child here and then reopen the gate for the next pending.
+                            std::thread::spawn(move || {
+                                if let Err(e) = child.wait() {
+                                    eprintln!("decision GUI wait failed: {e}");
                                 }
-                                Err(e) => {
-                                    eprintln!("failed to spawn GUI '{gui_command}': {e}");
-                                }
-                            }
-                        } else {
-                            eprintln!(
-                                "decision window already open, deferring pending {}",
-                                item.id
-                            );
+                                decision_window_closed();
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("failed to spawn GUI '{gui_command}': {e}");
                         }
                     }
                 }
@@ -62,7 +75,10 @@ pub fn poll_decision_spawner(socket_path: String, gui_command: String) {
     }
 }
 
-/// Mark the decision window as closed (called when window exits).
+/// Clear the "decision window open" gate in **this** process.
+///
+/// The tray monitor clears this after `wait()` on the spawned `--pending-id` child.
+/// Calling this from the child process has no effect on the tray (separate memory).
 pub fn decision_window_closed() {
     DECISION_WINDOW_OPEN.store(false, Ordering::Relaxed);
 }

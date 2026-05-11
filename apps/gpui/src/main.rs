@@ -310,9 +310,6 @@ fn run_gui(pending_id: String) {
 
         cx.activate(true);
     });
-
-    // Mark decision window as closed when we exit
-    monitor::decision_window_closed();
 }
 
 fn run_settings() {
