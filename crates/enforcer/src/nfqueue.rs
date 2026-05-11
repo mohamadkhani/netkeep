@@ -70,9 +70,16 @@ fn is_loopback(ip: &str) -> bool {
     if let Ok(v4) = ip.parse::<std::net::Ipv4Addr>() {
         return v4.octets()[0] == 127;
     }
-    // IPv6 loopback: ::1
+    // IPv6 loopback: ::1, and IPv4-mapped loopback ::ffff:127.x.x.x (Rust's
+    // `Ipv6Addr::is_loopback` is false for mapped addresses, so those packets
+    // were still queued and produced Ask spam).
     if let Ok(v6) = ip.parse::<std::net::Ipv6Addr>() {
-        return v6.is_loopback();
+        if v6.is_loopback() {
+            return true;
+        }
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            return v4.octets()[0] == 127;
+        }
     }
     false
 }
@@ -174,5 +181,17 @@ mod tests {
     fn malformed_payload_returns_none() {
         assert!(parse_raw_packet(&[0xde, 0xad, 0xbe, 0xef]).is_none());
         assert!(parse_raw_packet(&[]).is_none());
+    }
+
+    #[test]
+    fn loopback_includes_ipv4_mapped_127() {
+        assert!(is_loopback("127.0.0.1"));
+        assert!(is_loopback("127.42.3.4"));
+        assert!(is_loopback("::1"));
+        assert!(is_loopback("::ffff:127.0.0.1"));
+        assert!(is_loopback("::ffff:127.255.0.1"));
+        assert!(!is_loopback("10.0.0.1"));
+        assert!(!is_loopback("::ffff:8.8.8.8"));
+        assert!(!is_loopback("2001:db8::1"));
     }
 }

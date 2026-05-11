@@ -259,6 +259,10 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             script.push_str(&format!(
                 "add rule inet logiguard output_early ip6 daddr ::1 accept\n",
             ));
+            // IPv4-mapped loopback (::ffff:127.0.0.0/8) — not matched by `ip daddr` or `::1`.
+            script.push_str(
+                "add rule inet logiguard output_early ip6 daddr ::ffff:7f00:0000/104 accept\n",
+            );
             script.push_str(&format!(
                 "add rule inet logiguard output_early queue num {q}\n",
             ));
@@ -277,6 +281,9 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             script.push_str(&format!(
                 "add rule inet logiguard forward ip6 daddr ::1 accept\n",
             ));
+            script.push_str(
+                "add rule inet logiguard forward ip6 daddr ::ffff:7f00:0000/104 accept\n",
+            );
             script.push_str(&format!(
                 "add rule inet logiguard forward queue num {q}\n",
             ));
