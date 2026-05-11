@@ -147,18 +147,21 @@ Pending queue and timeout state machine.
 - Queue cap: 100 items (configurable)
 - Timeout: default 100s (configurable per protocol: TCP/UDP/QUIC/Other)
 - UntilRestart rules: expire on daemon startup
+- **Flow deduplication:** `register_unknown_flow` keeps a `FlowKey → pending_id` reverse index. Subsequent packets for an already-pending flow (retransmits, post-SYN data) return the existing `PendingDecision` instead of creating a new one. The index is cleaned up on resolve and on timeout expiry.
+
+**FlowKey** (dedup identity): `(process_name, destination_ip, destination_port, protocol)` — stable across retransmits and domain-inference variance (SNI only present on ClientHello, not on subsequent packets).
 
 **Traits:**
 - `Clock` — deterministic time (system clock in prod, fake in tests)
 - `PendingRepository` — persistence interface
 
 **Functions:**
-- `register_unknown_flow()` → pending ID
-- `resolve_pending()` → apply user decision
-- `expire_timeouts()` → auto-deny expired pendings
+- `register_unknown_flow()` → existing or new pending ID
+- `resolve_pending()` → apply user decision, clears flow index entry
+- `expire_timeouts()` → auto-deny expired pendings, clears flow index entries
 - `purge_session_rules()` → delete UntilRestart rules
 
-**Tests:** Unknown flow, timeout, queue overflow, user resolve, protocol-specific behavior.
+**Tests:** Unknown flow, dedup returns existing pending, separate port = new pending, resolve clears index, expire clears index, timeout, queue overflow, user resolve, protocol-specific behavior.
 
 ### `flow-classifier`
 
@@ -232,6 +235,7 @@ ListFlows { limit }
 RegisterUnknownFlow { flow, now_secs }
 AwaitPendingDecision { pending_id }
 ResolvePending { pending_id, action }
+ResolvePendingWithRule { pending_id, action, rule }   ← atomic: installs rule before resolving
 Health
 Unlock
 OpenRoutedTcp { host, port, target }
@@ -241,6 +245,7 @@ ListEgresses
 UpsertProxy(ProxyConfig)
 DeleteProxy { id }
 ListProxies
+SetNfqueueEnabled { enabled }
 ```
 
 **Responses:**
@@ -310,11 +315,12 @@ GPUI polls ListPending every 1s
             │
             └─→ GPUI renders decision cards with countdown
                   │ User clicks Allow or Deny
-                  └─→ ControlRequest::ResolvePending { pending_id, action }
-                        │
-                        └─→ ControlService::resolve_pending()
-                              │ update PendingRepository
-                              │ if scope == PERMANENTLY: add permanent rule
+                  └─→ ControlRequest::ResolvePendingWithRule { pending_id, action, rule }
+                        │  (single atomic request — rule installed first to close race window)
+                        └─→ ControlService::handle()
+                              │ upsert_rule(rule)         ← rule active immediately
+                              │ resolve_pending(id)       ← pending removed
+                              │ delete_pending(repo)
                               └─→ return PendingResolved { action }
 ```
 

@@ -62,7 +62,7 @@ pub struct PendingDecision {
     pub deadline_at_secs: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TransportProtocol {
     Tcp,
     Udp,

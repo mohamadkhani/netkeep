@@ -13,6 +13,9 @@ pub enum ControlRequest {
     RegisterUnknownFlow { flow: FlowContext, now_secs: u64 },
     AwaitPendingDecision { pending_id: String },
     ResolvePending { pending_id: String, action: RuleAction },
+    /// Resolve a pending decision and atomically install the rule in one request,
+    /// eliminating the race window between two separate ResolvePending + AddRule calls.
+    ResolvePendingWithRule { pending_id: String, action: RuleAction, rule: Rule },
     Health,
     Unlock,
     SubscribeToPending,  // NEW: Subscribe to push notifications

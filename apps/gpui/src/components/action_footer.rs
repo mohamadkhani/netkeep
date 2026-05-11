@@ -616,21 +616,6 @@ fn allow_button(
                         } else {
                             (RuleAction::Allow, RuleAction::Allow, None)
                         };
-                        let pid2 = pid.clone();
-                        let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
-                            .unwrap_or_else(|_| SOCKET_PATH.to_string());
-                        let _ = cx
-                            .background_executor()
-                            .spawn(async move {
-                                daemon::send_request(
-                                    &socket,
-                                    &ControlRequest::ResolvePending {
-                                        pending_id: pid2,
-                                        action: resolve_action,
-                                    },
-                                )
-                            })
-                            .await;
                         let rule = Rule {
                             id: format!("ui-{}", daemon::unix_now()),
                             enabled: true,
@@ -644,14 +629,18 @@ fn allow_button(
                             destination: dest,
                             route_target: rule_target,
                         };
-                        let socket2 = std::env::var("LOGIGUARD_SOCKET_PATH")
+                        let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
                             .unwrap_or_else(|_| SOCKET_PATH.to_string());
                         let _ = cx
                             .background_executor()
                             .spawn(async move {
                                 daemon::send_request(
-                                    &socket2,
-                                    &ControlRequest::AddRule(rule),
+                                    &socket,
+                                    &ControlRequest::ResolvePendingWithRule {
+                                        pending_id: pid,
+                                        action: resolve_action,
+                                        rule,
+                                    },
                                 )
                             })
                             .await;
@@ -712,21 +701,6 @@ fn deny_button(
                     let dest = dest_matcher.clone();
                     let proc = rule_process_name.clone();
                     cx.spawn(async move |cx| {
-                        let pid2 = pid.clone();
-                        let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
-                            .unwrap_or_else(|_| SOCKET_PATH.to_string());
-                        let _ = cx
-                            .background_executor()
-                            .spawn(async move {
-                                daemon::send_request(
-                                    &socket,
-                                    &ControlRequest::ResolvePending {
-                                        pending_id: pid2,
-                                        action: RuleAction::Deny,
-                                    },
-                                )
-                            })
-                            .await;
                         let rule = Rule {
                             id: format!("ui-{}", daemon::unix_now()),
                             enabled: true,
@@ -740,14 +714,18 @@ fn deny_button(
                             destination: dest,
                             route_target: None,
                         };
-                        let socket2 = std::env::var("LOGIGUARD_SOCKET_PATH")
+                        let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
                             .unwrap_or_else(|_| SOCKET_PATH.to_string());
                         let _ = cx
                             .background_executor()
                             .spawn(async move {
                                 daemon::send_request(
-                                    &socket2,
-                                    &ControlRequest::AddRule(rule),
+                                    &socket,
+                                    &ControlRequest::ResolvePendingWithRule {
+                                        pending_id: pid,
+                                        action: RuleAction::Deny,
+                                        rule,
+                                    },
                                 )
                             })
                             .await;

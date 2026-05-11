@@ -36,6 +36,10 @@ Every unit is testable in isolation. All OS/system effects behind traits. No rul
 
 ### `decision-engine`
 - [x] unknown flow creates pending decision
+- [x] duplicate flow (retransmit / domain-inference variance) returns existing pending
+- [x] different destination port creates separate pending
+- [x] resolve cleans up flow dedup index (same flow can be re-prompted after resolve)
+- [x] expire cleans up flow dedup index (same flow can be re-prompted after timeout)
 - [x] pending decision resolved by user allow
 - [x] pending decision resolved by user deny
 - [x] pending timeout → auto-deny at 100s default

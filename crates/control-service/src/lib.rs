@@ -276,6 +276,21 @@ impl<R: Repository> ControlService<R> {
                     ControlResponse::Error("pending decision not found".to_string())
                 }
             }
+            ControlRequest::ResolvePendingWithRule { pending_id, action, rule } => {
+                // Install the rule first so any packets arriving while we resolve
+                // the pending decision already match the rule and skip the queue.
+                self.repo.upsert_rule(rule);
+                if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action) {
+                    self.repo.delete_pending(&pending_id);
+                    let _ = self.notification_tx.send(PushNotification::PendingResolved {
+                        pending_id: pending_id.clone(),
+                        action: chosen.clone(),
+                    });
+                    ControlResponse::PendingResolved { action: chosen }
+                } else {
+                    ControlResponse::Error("pending decision not found".to_string())
+                }
+            }
             ControlRequest::SetNfqueueEnabled { enabled } => {
                 self.nfqueue_enabled.store(enabled, Ordering::Relaxed);
                 ControlResponse::Ok

@@ -279,6 +279,16 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `EgressTarget`, `
 - [x] Fixed IPv6 word byte order in `/proc/net/tcp6`; 6 unit tests
 - [x] Added `docs/process-resolver.md`
 
+### 2026-05-12 (session 16 — repeated-prompt bug fixes)
+- [x] Root cause analysis: three compounding bugs caused flows to re-prompt after user decision
+- [x] **Bug 1 — SNI cache:** daemon used `FakeDnsResolver { result: None }`; packets after the TLS ClientHello had no domain, domain-based rules failed to match. Added `SniDnsCache` (`flow-classifier`) — populated by NFQUEUE run loop on every SNI extraction, shared via `Arc` clone into `FlowClassifier` as its `DnsResolver`. Subsequent packets to same IP now resolve domain from cache.
+- [x] **Bug 2 — Flow dedup:** `register_unknown_flow` had no deduplication; every retransmitted packet created a new `PendingDecision`. Added `FlowKey (process, dst_ip, dst_port, protocol)` reverse index in `DecisionEngine`; returns existing pending for already-pending flows. Index cleaned up on resolve and expire. Added `Hash` derive to `TransportProtocol`. 3 new tests.
+- [x] **Bug 3 — Race window:** UI sent `ResolvePending` + `AddRule` as two separate socket requests; packets in the gap created new pendings before the rule existed. Added `ResolvePendingWithRule { pending_id, action, rule }` to `control-api`; handler installs rule first, then resolves. UI now uses this single atomic request for both Allow and Deny.
+- [x] Updated `docs/architecture.md`: decision-engine description, control-api request list, pending resolution flow diagram
+- [x] Updated `docs/testing.md`: decision-engine test matrix
+- [x] Updated `docs/nfqueue-domain-inference.md`: SNI cache design, thread-safety, remaining gaps
+- [x] Updated `docs/nfqueue-packet-interception.md`: packet path diagram
+
 ### 2026-05-12 (session 15 — rule scope UI + design system)
 - [x] `DestinationMatcher::Any` variant (policy-engine + state-store)
 - [x] `ProcessScope` / `DestScope` in `AppState`, initialized from flow at startup

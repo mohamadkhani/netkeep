@@ -14,9 +14,32 @@ pub enum DecisionOutcome {
     Pending(PendingDecision),
 }
 
+/// Stable identity for a logical flow, independent of ephemeral src_port or
+/// whether the domain was inferred on this particular packet.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FlowKey {
+    process_name: Option<String>,
+    destination_ip: String,
+    destination_port: u16,
+    protocol: TransportProtocol,
+}
+
+impl FlowKey {
+    fn from(flow: &FlowContext) -> Self {
+        Self {
+            process_name: flow.process_name.clone(),
+            destination_ip: flow.destination_ip.clone(),
+            destination_port: flow.destination_port,
+            protocol: flow.protocol,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct DecisionEngine {
     pending: HashMap<String, PendingDecision>,
+    /// Reverse index: FlowKey → pending_id. Kept in sync with `pending`.
+    pending_by_flow: HashMap<FlowKey, String>,
     resolved: HashMap<String, RuleAction>,
     next_id: u64,
     pending_limit: usize,
@@ -31,6 +54,7 @@ impl DecisionEngine {
     pub fn new(pending_limit: usize, default_timeout_secs: u64, overflow_policy: OverflowPolicy) -> Self {
         Self {
             pending: HashMap::new(),
+            pending_by_flow: HashMap::new(),
             resolved: HashMap::new(),
             next_id: 1,
             pending_limit,
@@ -66,6 +90,16 @@ impl DecisionEngine {
     }
 
     pub fn register_unknown_flow(&mut self, flow: FlowContext, now_secs: u64) -> DecisionOutcome {
+        // Dedup: if this flow is already pending, return the existing decision.
+        // This prevents a flood of identical prompts for every retransmitted packet
+        // while the user is looking at the dialog for the same logical connection.
+        let key = FlowKey::from(&flow);
+        if let Some(existing_id) = self.pending_by_flow.get(&key) {
+            if let Some(existing) = self.pending.get(existing_id) {
+                return DecisionOutcome::Pending(existing.clone());
+            }
+        }
+
         if self.pending.len() >= self.pending_limit {
             return match self.overflow_policy {
                 OverflowPolicy::DenyNew => DecisionOutcome::Immediate(RuleAction::Deny),
@@ -81,12 +115,15 @@ impl DecisionEngine {
             flow,
             created_at_secs: now_secs,
         };
+        self.pending_by_flow.insert(key, id.clone());
         self.pending.insert(id, decision.clone());
         DecisionOutcome::Pending(decision)
     }
 
     pub fn resolve_pending(&mut self, pending_id: &str, action: RuleAction) -> Option<RuleAction> {
-        if self.pending.remove(pending_id).is_some() {
+        if let Some(decision) = self.pending.remove(pending_id) {
+            let key = FlowKey::from(&decision.flow);
+            self.pending_by_flow.remove(&key);
             self.resolved.insert(pending_id.to_string(), action.clone());
             Some(action)
         } else {
@@ -109,7 +146,9 @@ impl DecisionEngine {
             .filter_map(|(k, v)| (v.deadline_at_secs <= now_secs).then(|| k.clone()))
             .collect();
         for id in &expired {
-            self.pending.remove(id);
+            if let Some(decision) = self.pending.remove(id) {
+                self.pending_by_flow.remove(&FlowKey::from(&decision.flow));
+            }
         }
         expired
     }
@@ -133,6 +172,8 @@ impl DecisionEngine {
                     self.next_id = n + 1;
                 }
             }
+            let key = FlowKey::from(&d.flow);
+            self.pending_by_flow.insert(key, d.id.clone());
             self.pending.insert(d.id.clone(), d);
         }
     }
@@ -169,15 +210,47 @@ mod tests {
     }
 
     #[test]
-    fn queue_overflow_denies_new_by_default() {
-        let mut engine = DecisionEngine::new(1, 100, OverflowPolicy::DenyNew);
-        let _ = engine.register_unknown_flow(mk_flow(), 0);
-        let out = engine.register_unknown_flow(mk_flow(), 1);
-        assert_eq!(out, DecisionOutcome::Immediate(RuleAction::Deny));
+    fn duplicate_flow_returns_existing_pending() {
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let out1 = engine.register_unknown_flow(mk_flow(), 0);
+        let id1 = match &out1 { DecisionOutcome::Pending(p) => p.id.clone(), _ => panic!() };
+
+        // Same flow key, different src_port / domain variance — still deduped.
+        let mut flow2 = mk_flow();
+        flow2.destination_domain = None; // domain not inferred on this packet
+        let out2 = engine.register_unknown_flow(flow2, 1);
+        let id2 = match &out2 { DecisionOutcome::Pending(p) => p.id.clone(), _ => panic!() };
+
+        assert_eq!(id1, id2, "second packet should reuse the existing pending");
+        assert_eq!(engine.pending_count(), 1, "only one pending should exist");
     }
 
     #[test]
-    fn timeout_expiration_removes_pending() {
+    fn different_destination_port_creates_separate_pending() {
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let _ = engine.register_unknown_flow(mk_flow(), 0);
+        let mut flow2 = mk_flow();
+        flow2.destination_port = 80;
+        let _ = engine.register_unknown_flow(flow2, 0);
+        assert_eq!(engine.pending_count(), 2);
+    }
+
+    #[test]
+    fn resolve_cleans_up_flow_index() {
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let out = engine.register_unknown_flow(mk_flow(), 0);
+        let id = match out { DecisionOutcome::Pending(p) => p.id, _ => panic!() };
+        engine.resolve_pending(&id, RuleAction::Allow);
+
+        // After resolve, the same flow should create a new pending (not deduplicate).
+        let out2 = engine.register_unknown_flow(mk_flow(), 1);
+        let id2 = match out2 { DecisionOutcome::Pending(p) => p.id, _ => panic!() };
+        assert_ne!(id, id2);
+        assert_eq!(engine.pending_count(), 1);
+    }
+
+    #[test]
+    fn expire_cleans_up_flow_index() {
         let mut engine = DecisionEngine::new(10, 100, OverflowPolicy::DenyNew);
         let out = engine.register_unknown_flow(mk_flow(), 5);
         let id = match out {
@@ -187,6 +260,22 @@ mod tests {
         let expired = engine.expire_timeouts(105);
         assert_eq!(expired, vec![id]);
         assert_eq!(engine.pending_count(), 0);
+
+        // After expiry, the same flow creates a fresh pending.
+        let out2 = engine.register_unknown_flow(mk_flow(), 106);
+        assert!(matches!(out2, DecisionOutcome::Pending(_)));
+        assert_eq!(engine.pending_count(), 1);
+    }
+
+    #[test]
+    fn queue_overflow_denies_new_by_default() {
+        let mut engine = DecisionEngine::new(1, 100, OverflowPolicy::DenyNew);
+        let _ = engine.register_unknown_flow(mk_flow(), 0);
+        // Different flow (different port) hits limit.
+        let mut flow2 = mk_flow();
+        flow2.destination_port = 80;
+        let out = engine.register_unknown_flow(flow2, 1);
+        assert_eq!(out, DecisionOutcome::Immediate(RuleAction::Deny));
     }
 
     #[test]
@@ -243,4 +332,3 @@ mod tests {
         assert_eq!(list[1].created_at_secs, 20);
     }
 }
-
