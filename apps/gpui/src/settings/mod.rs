@@ -11,7 +11,7 @@ mod rules_tab;
 use std::sync::{Arc, Mutex};
 
 use control_api::{ControlRequest, ControlResponse};
-use core_types::{DestinationMatcher, Egress, ProxyAuth, ProxyConfig, ProxyProtocol, Rule, RuleAction, RuleDuration};
+use core_types::{DestinationMatcher, Egress, ProxyAuth, ProxyConfig, ProxyProtocol, RouteTarget, Rule, RuleAction, RuleDuration};
 use gpui::{
     div, px, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, StatefulInteractiveElement, Styled, Subscription, Window,
@@ -245,12 +245,16 @@ impl SettingsApp {
         let init_action = existing.as_ref().map(|r| r.action.clone()).unwrap_or(RuleAction::Allow);
         let init_duration = existing.as_ref().map(|r| r.duration).unwrap_or(RuleDuration::Permanent);
         let (init_dest_type, init_dest_value) = match existing.as_ref().map(|r| &r.destination) {
-            Some(DestinationMatcher::IpExact(v))      => ("ip",      v.clone()),
-            Some(DestinationMatcher::Cidr(v))         => ("cidr",    v.clone()),
-            Some(DestinationMatcher::DomainExact(v))  => ("domain",  v.clone()),
+            Some(DestinationMatcher::IpExact(v))        => ("ip",       v.clone()),
+            Some(DestinationMatcher::Cidr(v))           => ("cidr",     v.clone()),
+            Some(DestinationMatcher::DomainExact(v))    => ("domain",   v.clone()),
             Some(DestinationMatcher::DomainWildcard(v)) => ("wildcard", v.clone()),
-            Some(DestinationMatcher::Any) | None      => ("any",     String::new()),
+            Some(DestinationMatcher::Any) | None        => ("any",      String::new()),
         };
+        let init_route = existing.as_ref()
+            .and_then(|r| r.route_target.as_ref())
+            .map(helpers::route_summary)
+            .unwrap_or_default();
 
         let process_input = cx.new(|cx| {
             let mut s = InputState::new(window, cx);
@@ -262,6 +266,11 @@ impl SettingsApp {
             s.set_value(init_dest_value.clone(), window, cx);
             s
         });
+        let route_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(init_route.clone(), window, cx);
+            s
+        });
 
         // Interior-mutable shared state for radio-group selections inside Fn closure.
         let selected_action: Arc<Mutex<RuleAction>> = Arc::new(Mutex::new(init_action));
@@ -270,6 +279,7 @@ impl SettingsApp {
 
         let proc_c    = process_input.clone();
         let dest_c    = dest_input.clone();
+        let route_c   = route_input.clone();
         let action_c  = selected_action.clone();
         let dur_c     = selected_duration.clone();
         let dtype_c   = selected_dest_type.clone();
@@ -284,12 +294,13 @@ impl SettingsApp {
             let cur_dtype    = dtype_c.lock().unwrap().clone();
 
             // Action button colors
-            let (ac_allow, ac_deny, ac_ask) = match cur_action {
-                RuleAction::Allow      => (colors::green(), colors::muted(), colors::muted()),
-                RuleAction::Deny       => (colors::muted(), colors::error(), colors::muted()),
-                RuleAction::Ask        => (colors::muted(), colors::muted(), colors::orange()),
-                RuleAction::Route { .. } => (colors::muted(), colors::muted(), colors::muted()),
+            let (ac_allow, ac_deny, ac_ask, ac_route) = match cur_action {
+                RuleAction::Allow        => (colors::green(),   colors::muted(), colors::muted(), colors::muted()),
+                RuleAction::Deny         => (colors::muted(),   colors::error(), colors::muted(), colors::muted()),
+                RuleAction::Ask          => (colors::muted(),   colors::muted(), colors::orange(), colors::muted()),
+                RuleAction::Route { .. } => (colors::muted(),   colors::muted(), colors::muted(), colors::primary()),
             };
+            let is_route_action = matches!(cur_action, RuleAction::Route { .. });
             // Duration button colors
             let (dc_perm, dc_sess) = match cur_duration {
                 RuleDuration::Permanent    => (colors::primary(), colors::muted()),
@@ -307,6 +318,7 @@ impl SettingsApp {
             // Clones for on_ok
             let proc_i    = proc_c.clone();
             let dest_i    = dest_c.clone();
+            let route_i   = route_c.clone();
             let action_ok = action_c.clone();
             let dur_ok    = dur_c.clone();
             let dtype_ok  = dtype_c.clone();
@@ -318,6 +330,7 @@ impl SettingsApp {
             let act_allow = selected_action.clone();
             let act_deny  = selected_action.clone();
             let act_ask   = selected_action.clone();
+            let act_route = selected_action.clone();
             let dur_perm  = selected_duration.clone();
             let dur_sess  = selected_duration.clone();
             let dt_ip     = selected_dest_type.clone();
@@ -365,9 +378,24 @@ impl SettingsApp {
                                         }))
                                         .child(proto_btn("ASK", ac_ask, ac_ask, move |_, _, _| {
                                             *act_ask.lock().unwrap() = RuleAction::Ask;
+                                        }))
+                                        .child(proto_btn("ROUTE", ac_route, ac_route, move |_, _, _| {
+                                            // Placeholder target; replaced with real value on save.
+                                            *act_route.lock().unwrap() = RuleAction::Route {
+                                                target: RouteTarget::Device(String::new()),
+                                            };
                                         })),
                                 ),
                         )
+                        // Route target input — shown only when action is ROUTE
+                        .when(is_route_action, |el| {
+                            el.child(
+                                v_flex()
+                                    .gap(px(4.))
+                                    .child(field_label("ROUTE TARGET  (tun:wg0 / dev:eth0 / proxy:id)"))
+                                    .child(Input::new(&route_c)),
+                            )
+                        })
                         // Destination type
                         .child(
                             v_flex()
@@ -417,7 +445,8 @@ impl SettingsApp {
                                             *dur_sess.lock().unwrap() = RuleDuration::UntilRestart;
                                         })),
                                 ),
-                        ),
+                        )
+                        ,
                 )
                 .on_ok(move |_, _, cx| {
                     let process_raw = proc_i.read(cx).value().to_string();
@@ -433,8 +462,19 @@ impl SettingsApp {
                         "any"      => DestinationMatcher::Any,
                         _          => DestinationMatcher::IpExact(dest_val),
                     };
+                    let route_raw = route_i.read(cx).value().trim().to_string();
+                    // For ROUTE action: parse the target from the input field and build the
+                    // real action. The placeholder target set by the button is replaced here.
+                    let (action, route_target) = if matches!(action, RuleAction::Route { .. }) {
+                        match helpers::parse_targets_csv(&route_raw).into_iter().next() {
+                            Some(t) => (RuleAction::Route { target: t }, None),
+                            None    => (RuleAction::Allow, None), // fallback if input empty
+                        }
+                    } else {
+                        (action, None)
+                    };
                     let id = eid.clone().unwrap_or_else(|| format!("ui-{}", crate::daemon::unix_now()));
-                    let rule = Rule { id, enabled: true, action, duration, process_name, destination, route_target: None };
+                    let rule = Rule { id, enabled: true, action, duration, process_name, destination, route_target };
                     let to_send  = rule.clone();
                     let sock_c   = sock.clone();
                     let state_wc = state_w.clone();
