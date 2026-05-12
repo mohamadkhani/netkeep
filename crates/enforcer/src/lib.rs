@@ -263,12 +263,14 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             script.push_str(
                 "add rule inet logiguard output_early ip6 daddr ::ffff:7f00:0000/104 accept\n",
             );
-            // Only classify the first packet of each connection. Established/related packets
-            // have already been decided; sending them through NFQUEUE causes repeated
-            // classification with no process name (socket already established in /proc/net)
-            // and floods the pending queue with "unknown" flows.
+            // DNS queries must bypass NFQUEUE. If queued, they appear as flows to the DNS
+            // server IP (not the actual destination) and block name resolution entirely,
+            // preventing any domain from being reached.
             script.push_str(
-                "add rule inet logiguard output_early ct state established,related accept\n",
+                "add rule inet logiguard output_early udp dport 53 accept\n",
+            );
+            script.push_str(
+                "add rule inet logiguard output_early tcp dport 53 accept\n",
             );
             script.push_str(&format!(
                 "add rule inet logiguard output_early queue num {q}\n",
@@ -290,9 +292,6 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             ));
             script.push_str(
                 "add rule inet logiguard forward ip6 daddr ::ffff:7f00:0000/104 accept\n",
-            );
-            script.push_str(
-                "add rule inet logiguard forward ct state established,related accept\n",
             );
             script.push_str(&format!(
                 "add rule inet logiguard forward queue num {q}\n",

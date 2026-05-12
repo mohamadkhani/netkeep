@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use core_types::{RuleAction, TransportProtocol};
@@ -7,20 +8,51 @@ use nfq::{Queue, Verdict};
 
 use crate::{FlowDecision, FlowRegistrar};
 
+/// 5-tuple key for the per-connection verdict cache.
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct ConnectionKey {
+    src_ip:   String,
+    src_port: u16,
+    dst_ip:   String,
+    dst_port: u16,
+    protocol: TransportProtocol,
+}
+
+#[derive(Clone, Copy)]
+struct CachedVerdict {
+    accept:     bool,
+    expires_at: u64,
+}
+
 /// Real packet processor that reads from an NFQUEUE and applies verdicts.
 ///
 /// Open with `NfqueueProcessor::open`, then call `run_loop` on a dedicated thread.
 /// The loop is intentionally blocking — each `recv` call parks the thread until
 /// a packet arrives, so no busy-waiting occurs.
 pub struct NfqueueProcessor<C, FR> {
-    queue: Queue,
+    queue:      Queue,
     classifier: C,
-    registrar: FR,
+    registrar:  FR,
     /// Shared cache updated whenever an SNI is extracted from a ClientHello.
     /// Allows subsequent packets (which carry no SNI) to still be matched
     /// against domain-based rules by IP lookup.
-    dns_cache: SniDnsCache,
+    dns_cache:  SniDnsCache,
+    /// Per-connection verdict cache. Stores the Allow/Deny decision made for the
+    /// first classifiable packet of each connection so that retransmits and
+    /// subsequent packets get the same verdict immediately without going through
+    /// the full classification pipeline. Without this cache, a denied TCP connection
+    /// would still pass through: the SYN is accepted (empty payload), completing the
+    /// handshake and putting conntrack in "established" state, and then nftables
+    /// `ct state established,related accept` would accept all retransmits before
+    /// they reach NFQUEUE again.
+    decided:    HashMap<ConnectionKey, CachedVerdict>,
 }
+
+// Cached decisions expire after 10 minutes. TCP FINs evict the entry early
+// (handled below), so this TTL is mostly a backstop for UDP and long-lived flows.
+const CACHE_TTL_SECS: u64 = 600;
+// Maximum cache entries before a sweep evicts expired entries.
+const CACHE_MAX: usize = 8192;
 
 impl<C, FR> NfqueueProcessor<C, FR>
 where
@@ -30,7 +62,7 @@ where
     pub fn open(queue_num: u16, classifier: C, registrar: FR, dns_cache: SniDnsCache) -> std::io::Result<Self> {
         let mut queue = Queue::open()?;
         queue.bind(queue_num)?;
-        Ok(Self { queue, classifier, registrar, dns_cache })
+        Ok(Self { queue, classifier, registrar, dns_cache, decided: HashMap::new() })
     }
 
     /// Blocks indefinitely, processing one packet per iteration.
@@ -47,32 +79,63 @@ where
             let verdict = match parse_raw_packet(msg.get_payload()) {
                 None => Verdict::Drop,
                 Some(raw) => {
-                    // Pass through loopback (defense-in-depth) and TCP control packets
-                    // (SYN/ACK/FIN) with no payload. Accepting SYNs lets the TCP handshake
-                    // complete so the TLS ClientHello — which carries the SNI — arrives as
-                    // the first classifiable packet.
-                    if is_loopback(&raw.dst_ip) || raw.tcp_payload_empty {
-                        Verdict::Accept
-                    } else {
-                        // Populate the DNS cache whenever we learn a domain from SNI so
-                        // later packets to the same IP can still match domain-based rules.
-                        if let Some(sni) = &raw.sni_hint {
-                            self.dns_cache.insert(&raw.dst_ip, sni);
-                        }
-                        let flow = self.classifier.classify(&raw);
-                        match self.registrar.register(flow, now_secs) {
-                            FlowDecision::Immediate(RuleAction::Allow) => Verdict::Accept,
-                            // Deny rule, Ask without resolution, queue overflow, or pending →
-                            // drop the current packet; the app will retransmit after the decision.
-                            _ => Verdict::Drop,
-                        }
-                    }
+                    self.decide(&raw, now_secs)
                 }
             };
 
             msg.set_verdict(verdict);
             self.queue.verdict(msg)?;
         }
+    }
+
+    fn decide(&mut self, raw: &RawPacket, now_secs: u64) -> Verdict {
+        // Always pass loopback and DNS through without touching the cache.
+        if is_loopback(&raw.dst_ip) || raw.dst_port == 53 {
+            return Verdict::Accept;
+        }
+
+        let key = ConnectionKey {
+            src_ip:   raw.src_ip.clone(),
+            src_port: raw.src_port,
+            dst_ip:   raw.dst_ip.clone(),
+            dst_port: raw.dst_port,
+            protocol: raw.protocol,
+        };
+
+        // TCP FIN/RST (empty payload, connection closing) — evict cache entry and accept.
+        if raw.tcp_payload_empty {
+            self.decided.remove(&key);
+            return Verdict::Accept;
+        }
+
+        // Fast path: return cached verdict if still valid.
+        if let Some(cached) = self.decided.get(&key) {
+            if cached.expires_at > now_secs {
+                return if cached.accept { Verdict::Accept } else { Verdict::Drop };
+            }
+            self.decided.remove(&key);
+        }
+
+        // Slow path: classify the connection for the first time.
+        if let Some(sni) = &raw.sni_hint {
+            self.dns_cache.insert(&raw.dst_ip, sni);
+        }
+        let flow = self.classifier.classify(raw);
+        let verdict = match self.registrar.register(flow, now_secs) {
+            FlowDecision::Immediate(RuleAction::Allow) => Verdict::Accept,
+            _ => Verdict::Drop,
+        };
+
+        // Cache the decision so retransmits are handled without re-classifying.
+        if self.decided.len() >= CACHE_MAX {
+            self.decided.retain(|_, v| v.expires_at > now_secs);
+        }
+        self.decided.insert(key, CachedVerdict {
+            accept: matches!(verdict, Verdict::Accept),
+            expires_at: now_secs + CACHE_TTL_SECS,
+        });
+
+        verdict
     }
 }
 
