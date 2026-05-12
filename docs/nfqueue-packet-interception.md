@@ -27,7 +27,8 @@ nftables OUTPUT hook  (hook priority -150)
   │
   ├─ loopback? → accept immediately
   ├─ relay socket (fwmark ≥ base)? → accept, restore routing mark
-  └─ everything else → QUEUE to NFQUEUE num N
+  ├─ ct state established,related? → accept immediately (already decided)
+  └─ new connection → QUEUE to NFQUEUE num N
          │
          │  kernel holds packet in queue
          │  blocks application retransmission
@@ -88,13 +89,20 @@ table inet logiguard {
     ip6 daddr ::1 accept
     ip6 daddr ::ffff:7f00:0000/104 accept
 
-    # Queue everything else.
+    # Already-decided connections: skip NFQUEUE entirely.
+    # Without this, every ACK/data packet is re-classified; the socket is
+    # established so /proc/net has no SYN entry, process resolution fails,
+    # and "unknown" pending decisions flood the queue.
+    ct state established,related accept
+
+    # Queue only the first packet of new connections.
     queue num 0
   }
 
   chain forward {
     type filter hook forward priority 0; policy accept;
     oifname "lo" accept
+    ct state established,related accept
     queue num 0
   }
 }

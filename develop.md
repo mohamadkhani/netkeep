@@ -289,6 +289,17 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `EgressTarget`, `
 - [x] Updated `docs/nfqueue-domain-inference.md`: SNI cache design, thread-safety, remaining gaps
 - [x] Updated `docs/nfqueue-packet-interception.md`: packet path diagram
 
+### 2026-05-12 (session 18 — nftables established/related bypass)
+- [x] **Root cause:** every TCP/UDP packet (ACK, data, retransmit) went through NFQUEUE, not just new connections. On follow-up packets the socket is already established so `/proc/net` has no fresh SYN entry → process resolution returns `None` → "unknown" pending dialogs flood the queue.
+- [x] Added `ct state established,related accept` before `queue num N` in both `output_early` and `forward` chains. Only the first packet of each new connection now enters NFQUEUE.
+- [x] Updated `docs/nfqueue-packet-interception.md`: packet path diagram, key rules section.
+
+### 2026-05-12 (session 17 — process resolver improvements + queue sweep)
+- [x] **ProcProcessResolver** hardened: retry loop (0/3/8 ms delays for TOCTOU), exe-basename preferred over comm (kernel truncates comm at 15 chars), parent-process fallback for short names (≤3 chars)
+- [x] **UDP wildcard sockets:** `/proc/net/udp` shows `0.0.0.0:PORT` for unbound sockets; added port-only pass in `find_socket_inode()` as fallback after exact IP match fails. 3 new tests.
+- [x] **UID-filtered /proc scan:** `parse_proc_net` now returns `(inode, uid)`; `find_pid_for_inode` does UID-filtered first pass, full-scan fallback. Reduces O(all_procs×fds) to O(user_procs×fds).
+- [x] **Queue sweep:** `sweep_pending()` called after every rule upsert — auto-resolves any pending decisions already covered by a rule without showing a dialog.
+
 ### 2026-05-12 (session 15 — rule scope UI + design system)
 - [x] `DestinationMatcher::Any` variant (policy-engine + state-store)
 - [x] `ProcessScope` / `DestScope` in `AppState`, initialized from flow at startup
