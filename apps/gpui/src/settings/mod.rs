@@ -458,7 +458,14 @@ impl SettingsApp {
                     let destination = match dest_type.as_str() {
                         "cidr"     => DestinationMatcher::Cidr(dest_val),
                         "domain"   => DestinationMatcher::DomainExact(dest_val),
-                        "wildcard" => DestinationMatcher::DomainWildcard(dest_val),
+                        // Canonical wildcard storage is the apex without the `*.`
+                        // prefix (the display layer in `ds::dest_text` prepends it).
+                        // The matcher in `policy-engine` is lenient and accepts
+                        // both forms, but normalizing on the way in keeps the rule
+                        // table free of `*.*.foo.com`-style render glitches.
+                        "wildcard" => DestinationMatcher::DomainWildcard(
+                            dest_val.strip_prefix("*.").unwrap_or(&dest_val).to_string(),
+                        ),
                         "any"      => DestinationMatcher::Any,
                         _          => DestinationMatcher::IpExact(dest_val),
                     };

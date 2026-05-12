@@ -323,3 +323,24 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `EgressTarget`, `
   - Updated `docs/architecture.md` (decision-engine symmetric dedup, policy-engine fallback, `ProcProcessResolver` cache).
   - Updated `docs/testing.md` (new matrix rows for each layer).
   - Updated `docs/implementation-status.md` (Bug 12 entry, refreshed test counts).
+
+### 2026-05-13 (session 20 — wildcard rules: storage/match format mismatch)
+- [x] **Root cause.** `DomainWildcard` rules created via the decision dialog never matched any flow, so the user got re-prompted on every connection — including subdomains the rule was supposed to cover. The bug was a silent contract violation between three writers and one matcher:
+  - GPUI decision dialog `build_dest_matcher` → `DomainWildcard(domain_apex(d))` (apex-only, no `*.`).
+  - CLI `parse_destination` → `DomainWildcard(rest)` after `strip_prefix("*.")` (apex-only).
+  - Settings form → `DomainWildcard(dest_val)` verbatim (depends on what the user typed).
+  - `policy_engine::wildcard_matches` required `pattern.strip_prefix("*.")` — returned `false` for the apex-only form, which is what production was overwhelmingly writing.
+
+  Net effect: every wildcard rule created through the UI was a no-op rule. The user's report ("wildcard in rules not work, and its subdomain and the domain not allowed") was a faithful description of the symptom.
+- [x] **Fix.** Single change in the matcher, single normalization at the form:
+  - `wildcard_matches` strips `*.` if present and treats the remainder as the apex. Empty patterns (including `"*."` alone) still match nothing.
+  - Settings form (`apps/gpui/src/settings/mod.rs`) strips `*.` on save so user-typed `*.foo.com` and `foo.com` both store as `DomainWildcard("foo.com")` — keeps the rule table free of `*.*.foo.com` render glitches (display layer prepends `*.`).
+  - Apex-not-matched semantic preserved: `*.example.com` matches subdomains only. Allowing the apex still requires a separate `DomainExact` rule (per `docs/decision-dialog-ux.md`). Flagged as possible future UX work — a `DomainSuffix` variant or an "apex + subdomains" chip could remove the need for two rules.
+- [x] **Tests:** 3 new tests in `policy-engine`. Workspace total **123 → 126**.
+  - `wildcard_matches_with_apex_only_storage_form` — locks in the production storage form.
+  - `wildcard_matches_both_storage_forms_identically` — `"foo.com"` and `"*.foo.com"` resolve identically.
+  - `wildcard_empty_pattern_matches_nothing` — defensive guard against malformed imports.
+- [x] **Documentation:**
+  - Updated `docs/decision-dialog-ux.md` with a "Canonical storage form" section that names every writer, the display convention, and the past bug so the same contract isn't broken again.
+  - Updated `docs/testing.md` (3 new policy-engine rows).
+  - Updated `docs/implementation-status.md` (Bug 13 entry, refreshed test counts).

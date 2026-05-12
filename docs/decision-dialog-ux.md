@@ -96,6 +96,19 @@ Default: exact subdomain (narrowest scope, safest default).
 
 **Note on wildcard semantics:** `*.google.com` does NOT match `google.com` itself. If the user wants to cover both, they need two rules. The UI label `*.google.com` is shown verbatim so this is honest.
 
+#### Canonical storage form
+
+`DomainWildcard` stores **the apex without the `*.` prefix** — e.g. `DomainWildcard("google.com")`, not `DomainWildcard("*.google.com")`. The `*.` is a UI/display convention only:
+
+- The decision dialog (`apps/gpui/src/components/action_footer.rs::build_dest_matcher`) computes `domain_apex(domain)` and stores the result directly.
+- The CLI (`apps/cli/src/main.rs::parse_destination`) strips `*.` before storing.
+- The settings form (`apps/gpui/src/settings/mod.rs`) strips `*.` on save so user-typed `*.foo.com` and `foo.com` produce the same rule.
+- `ds::dest_text` and the rule table prepend `*.` for display.
+
+The matcher in `policy-engine::wildcard_matches` is intentionally **lenient** and accepts both `"foo.com"` and `"*.foo.com"` so rules created by any of the above paths — and any rules that may have been persisted with the prefix in older builds — all match identically. This is covered by `wildcard_matches_both_storage_forms_identically` and `wildcard_matches_with_apex_only_storage_form` in `crates/policy-engine/src/lib.rs`.
+
+> **Past bug:** before the lenient matcher, the writers (decision dialog, CLI) stored apex-only while the matcher required the `*.` prefix. Every dialog-installed wildcard rule silently failed to match, so the user got re-prompted for the same subdomain on every connection. Fixed 2026-05-13. The lenient matcher means future writers don't need to agree on a single form — they just need to be a valid apex.
+
 #### Case B — Domain unknown, IP only
 
 When no domain is available, the user selects the CIDR prefix by clicking directly on the IP octets:

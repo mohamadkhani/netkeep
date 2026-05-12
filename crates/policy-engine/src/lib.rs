@@ -6,11 +6,25 @@ pub struct ResolvedRule {
     pub action: RuleAction,
 }
 
+/// Wildcard match for `DomainWildcard(pattern)` against a flow's `destination_domain`.
+///
+/// The stored pattern is the apex (e.g. `"example.com"`) — the GPUI decision
+/// dialog and the CLI both strip the `*.` prefix before persisting. However
+/// rules created via the settings form, the JSON-RPC, or imported from a
+/// previous schema may still carry the `*.` prefix. This function is
+/// intentionally lenient and accepts both `"foo.com"` and `"*.foo.com"` so we
+/// don't silently fail to match real rules.
+///
+/// Semantics: matches *proper* subdomains only. `"example.com"` matches
+/// `"api.example.com"` and `"a.b.example.com"` but **not** `"example.com"`
+/// itself (the apex). Allowing the apex requires a separate `DomainExact`
+/// rule — this matches the documented contract in `docs/decision-dialog-ux.md`.
 fn wildcard_matches(pattern: &str, host: &str) -> bool {
-    if let Some(rest) = pattern.strip_prefix("*.") {
-        return host.ends_with(&format!(".{rest}"));
+    let apex = pattern.strip_prefix("*.").unwrap_or(pattern);
+    if apex.is_empty() {
+        return false;
     }
-    false
+    host.ends_with(&format!(".{apex}"))
 }
 
 fn destination_matches(rule: &Rule, flow: &FlowContext) -> bool {
@@ -135,6 +149,127 @@ mod tests {
         );
         assert_eq!(resolve_action(&[rule.clone()], &flow_sub).map(|r| r.action), Some(RuleAction::Allow));
         assert_eq!(resolve_action(&[rule], &flow_apex), None);
+    }
+
+    /// Production storage form: the GPUI decision dialog and the CLI both
+    /// strip the `*.` prefix before persisting (see
+    /// `apps/gpui/src/components/action_footer.rs::build_dest_matcher` and
+    /// `apps/cli/src/main.rs::parse_destination`). Before the lenient
+    /// matcher, `wildcard_matches` returned `false` for these rules and
+    /// every dialog-installed wildcard silently failed.
+    #[test]
+    fn wildcard_matches_with_apex_only_storage_form() {
+        let flow_sub = FlowContext {
+            process_name: None,
+            destination_ip: "1.1.1.1".to_string(),
+            destination_port: 443,
+            destination_domain: Some("api.example.com".to_string()),
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+        };
+        let flow_deep = FlowContext {
+            destination_domain: Some("a.b.c.example.com".to_string()),
+            ..flow_sub.clone()
+        };
+        let flow_apex = FlowContext {
+            destination_domain: Some("example.com".to_string()),
+            ..flow_sub.clone()
+        };
+        let flow_unrelated = FlowContext {
+            destination_domain: Some("notexample.com".to_string()),
+            ..flow_sub.clone()
+        };
+        let rule = mk_rule(
+            "wildcard-apex-form",
+            RuleAction::Allow,
+            None,
+            // No `*.` prefix — what the decision dialog actually writes.
+            DestinationMatcher::DomainWildcard("example.com".to_string()),
+        );
+        assert_eq!(
+            resolve_action(&[rule.clone()], &flow_sub).map(|r| r.action),
+            Some(RuleAction::Allow),
+            "subdomain must match apex-only wildcard storage"
+        );
+        assert_eq!(
+            resolve_action(&[rule.clone()], &flow_deep).map(|r| r.action),
+            Some(RuleAction::Allow),
+            "deep subdomain must match apex-only wildcard storage"
+        );
+        assert_eq!(
+            resolve_action(&[rule.clone()], &flow_apex), None,
+            "apex must still NOT match wildcard (separate rule required)"
+        );
+        assert_eq!(
+            resolve_action(&[rule], &flow_unrelated), None,
+            "wildcard must not be substring-fooled by `notexample.com`"
+        );
+    }
+
+    /// Both storage forms — `"example.com"` and `"*.example.com"` — must be
+    /// accepted by the matcher so rules created via the GPUI dialog (no
+    /// prefix) and via the legacy settings form (with prefix) behave
+    /// identically.
+    #[test]
+    fn wildcard_matches_both_storage_forms_identically() {
+        let flow = FlowContext {
+            process_name: None,
+            destination_ip: "1.1.1.1".to_string(),
+            destination_port: 443,
+            destination_domain: Some("api.example.com".to_string()),
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+        };
+        let with_prefix = mk_rule(
+            "p",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::DomainWildcard("*.example.com".to_string()),
+        );
+        let without_prefix = mk_rule(
+            "n",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::DomainWildcard("example.com".to_string()),
+        );
+        assert_eq!(
+            resolve_action(&[with_prefix], &flow).map(|r| r.action),
+            Some(RuleAction::Allow)
+        );
+        assert_eq!(
+            resolve_action(&[without_prefix], &flow).map(|r| r.action),
+            Some(RuleAction::Allow)
+        );
+    }
+
+    /// Empty pattern (defensive): must never match anything, otherwise a
+    /// malformed import or empty form field could turn into an
+    /// allow-everything rule.
+    #[test]
+    fn wildcard_empty_pattern_matches_nothing() {
+        let flow = FlowContext {
+            process_name: None,
+            destination_ip: "1.1.1.1".to_string(),
+            destination_port: 443,
+            destination_domain: Some("api.example.com".to_string()),
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+        };
+        for pat in ["", "*.", "*."] {
+            let rule = mk_rule(
+                "empty",
+                RuleAction::Allow,
+                None,
+                DestinationMatcher::DomainWildcard(pat.to_string()),
+            );
+            assert!(
+                resolve_action(&[rule], &flow).is_none(),
+                "empty pattern `{pat}` must not match anything"
+            );
+        }
     }
 
     #[test]

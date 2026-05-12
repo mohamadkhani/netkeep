@@ -27,6 +27,9 @@ Every unit is testable in isolation. All OS/system effects behind traits. No rul
 - [x] exact domain match
 - [x] wildcard subdomain match
 - [x] wildcard does not match apex
+- [x] **wildcard matcher accepts production storage form** (`DomainWildcard("foo.com")` with no `*.` prefix — the form actually written by the GPUI decision dialog and the CLI)
+- [x] **wildcard matcher accepts both storage forms identically** (`"foo.com"` and `"*.foo.com"` resolve the same)
+- [x] **wildcard empty / `"*."` pattern matches nothing** (defensive guard against malformed imports)
 - [x] process + destination combined match
 - [x] precedence: specific beats general
 - [x] action precedence: deny beats allow for same specificity

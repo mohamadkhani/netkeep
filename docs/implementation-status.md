@@ -1,6 +1,6 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 123 tests passing (`cargo test --workspace`)
+**Test Status:** 126 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
 **Last Updated:** 2026-05-13
 
@@ -168,6 +168,27 @@
   2. `DecisionEngine::register_unknown_flow` fallback dedup is now **symmetric**: when an "unknown" pending exists and a later packet with a real process name arrives for the same `(dst_ip, dst_port, protocol)`, the pending is **upgraded in place** (index re-keyed, `flow.process_name` patched). Two distinct *known* names still produce two pendings.
   3. `policy_engine::process_matches((Some, None))` now returns `true` when the rule's destination is `IpExact` or `DomainExact`. Broad rules (`Any`/`Cidr`/`Wildcard`) still require a strict process match so they cannot be silently piggy-backed by an unattributed packet.
 - **Tests:** 12 new tests (3 in `flow-classifier`, 3 in `decision-engine`, 6 in `policy-engine` including safety negatives).
+
+## Bug Fixes (wildcard rules, 2026-05-13)
+
+**Bug 13:** `DomainWildcard` rules created via the decision dialog never matched. Every connection re-prompted the user, including subdomains the wildcard rule was supposed to cover. Apex requests were also un-matched (by design, but indistinguishable from the wildcard-broken case for the user).
+
+- **Root cause — storage / match format mismatch.** Three writers stored the wildcard pattern in two different forms:
+  - GPUI decision dialog (`apps/gpui/src/components/action_footer.rs::build_dest_matcher`) wrote `DomainWildcard(domain_apex(d))` — apex-only, no `*.` prefix.
+  - CLI (`apps/cli/src/main.rs::parse_destination`) stripped `*.` before writing — also apex-only.
+  - Settings form (`apps/gpui/src/settings/mod.rs`) wrote `dest_val` verbatim — sometimes with the prefix, sometimes without, depending on what the user typed.
+
+  But `policy_engine::wildcard_matches` required the `*.` prefix (`pattern.strip_prefix("*.")` returned `None` otherwise and the function returned `false`). The two most common writers (decision dialog + CLI) silently produced rules that could never match. The bug had been latent since the wildcard chip was introduced.
+
+- **Fix:**
+  1. `wildcard_matches` now strips `*.` if present and treats the remainder as the apex (`pattern.strip_prefix("*.").unwrap_or(pattern)`). Empty patterns (including `"*."` alone) still match nothing — defensive guard against malformed imports.
+  2. Settings form now strips `*.` on save so user-typed `*.foo.com` and `foo.com` produce identical rules. The display layer in `ds::dest_text` prepends `*.` for rendering, so the rule table shows `*.foo.com` regardless.
+  3. Apex-not-matched semantic is preserved (per `docs/decision-dialog-ux.md`) — `*.example.com` matches subdomains only. Allowing the apex still requires a separate `DomainExact` rule. Flagged as a possible UX follow-up.
+
+- **Tests:** 3 new tests in `policy-engine`:
+  - `wildcard_matches_with_apex_only_storage_form` — locks in the production storage form (no prefix) for subdomain matches, deep-subdomain matches, apex non-match, and `notexample.com`-style substring safety.
+  - `wildcard_matches_both_storage_forms_identically` — both `"foo.com"` and `"*.foo.com"` resolve to the same outcome.
+  - `wildcard_empty_pattern_matches_nothing` — defensive guard.
 
 ## Bug Fixes (routing, 2026-05-09)
 
@@ -418,7 +439,7 @@ LOGIGUARD_NFQUEUE=0 \
 ### Current
 
 - Workspace compiles cleanly
-- 123 tests passing (`cargo test --workspace`)
+- 126 tests passing (`cargo test --workspace`)
 - No CI pipeline set up yet
 
 ### Planned
