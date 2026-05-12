@@ -11,10 +11,11 @@ mod rules_tab;
 use std::sync::{Arc, Mutex};
 
 use control_api::{ControlRequest, ControlResponse};
-use core_types::{Egress, ProxyAuth, ProxyConfig, ProxyProtocol};
+use core_types::{DestinationMatcher, Egress, ProxyAuth, ProxyConfig, ProxyProtocol, Rule, RuleAction, RuleDuration};
 use gpui::{
     div, px, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, StatefulInteractiveElement, Styled, Subscription, Window,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::tab::{Tab, TabBar};
@@ -57,6 +58,8 @@ pub struct SettingsState {
     pub egress_edit_request: Option<Egress>,
     /// Set by the Edit button in the proxy table; drained by SettingsApp observer.
     pub proxy_edit_request: Option<ProxyConfig>,
+    /// Set by double-clicking a rule row; drained by SettingsApp observer.
+    pub rule_edit_request: Option<Rule>,
 }
 
 impl SettingsState {
@@ -71,6 +74,7 @@ impl SettingsState {
             active_tab: SettingsTab::Rules,
             egress_edit_request: None,
             proxy_edit_request: None,
+            rule_edit_request: None,
         }
     }
 }
@@ -117,6 +121,7 @@ impl SettingsApp {
 
         // Subscribe to table events (double-click opens dialog)
         let mut subscriptions = Vec::new();
+        subscriptions.push(cx.subscribe_in(&rules_table, window, Self::on_rules_table_event));
         subscriptions.push(cx.subscribe_in(&egress_table, window, Self::on_egress_table_event));
         subscriptions.push(cx.subscribe_in(&proxy_table, window, Self::on_proxy_table_event));
 
@@ -124,6 +129,16 @@ impl SettingsApp {
         // Note: do NOT call cx.notify() when clearing request fields — that would re-trigger this observer.
         cx.observe_in(&state, window, |this, _, window, cx| {
             this.sync_tables(cx);
+
+            // Drain rule edit request → open pre-filled rule form.
+            let rule_edit = this.state.read(cx).rule_edit_request.clone();
+            if let Some(rule) = rule_edit {
+                let _ = cx.update_entity(&this.state, |s, _cx| {
+                    s.rule_edit_request = None;
+                });
+                this.open_rule_form_dialog(Some(rule), window, cx);
+                return;
+            }
 
             // Drain egress edit request → open pre-filled egress form.
             let egress_edit = this.state.read(cx).egress_edit_request.clone();
@@ -191,6 +206,278 @@ impl SettingsApp {
             table.delegate_mut().proxies = proxies;
             table.delegate_mut().state_weak = weak.clone();
             table.delegate_mut().socket_path = socket.clone();
+        });
+    }
+
+    /// Handle rules table events — double-click opens edit form.
+    fn on_rules_table_event(
+        &mut self,
+        _table: &Entity<TableState<RulesDelegate>>,
+        event: &TableEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let TableEvent::DoubleClickedRow(row_ix) = event {
+            let rules = &self.state.read(cx).rules;
+            if let Some(rule) = rules.get(*row_ix) {
+                let rule = rule.clone();
+                self.open_rule_form_dialog(Some(rule), window, cx);
+            }
+        }
+    }
+
+    /// Open the rule form dialog for adding (existing = None) or editing (existing = Some).
+    fn open_rule_form_dialog(
+        &mut self,
+        existing: Option<Rule>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state_weak = self.state.downgrade();
+        let socket_path = self.state.read(cx).socket_path.clone();
+
+        let is_edit = existing.is_some();
+        let existing_id = existing.as_ref().map(|r| r.id.clone());
+
+        let init_process = existing.as_ref()
+            .and_then(|r| r.process_name.clone())
+            .unwrap_or_default();
+        let init_action = existing.as_ref().map(|r| r.action.clone()).unwrap_or(RuleAction::Allow);
+        let init_duration = existing.as_ref().map(|r| r.duration).unwrap_or(RuleDuration::Permanent);
+        let (init_dest_type, init_dest_value) = match existing.as_ref().map(|r| &r.destination) {
+            Some(DestinationMatcher::IpExact(v))      => ("ip",      v.clone()),
+            Some(DestinationMatcher::Cidr(v))         => ("cidr",    v.clone()),
+            Some(DestinationMatcher::DomainExact(v))  => ("domain",  v.clone()),
+            Some(DestinationMatcher::DomainWildcard(v)) => ("wildcard", v.clone()),
+            Some(DestinationMatcher::Any) | None      => ("any",     String::new()),
+        };
+
+        let process_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(init_process.clone(), window, cx);
+            s
+        });
+        let dest_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(init_dest_value.clone(), window, cx);
+            s
+        });
+
+        // Interior-mutable shared state for radio-group selections inside Fn closure.
+        let selected_action: Arc<Mutex<RuleAction>> = Arc::new(Mutex::new(init_action));
+        let selected_duration: Arc<Mutex<RuleDuration>> = Arc::new(Mutex::new(init_duration));
+        let selected_dest_type: Arc<Mutex<String>> = Arc::new(Mutex::new(init_dest_type.to_string()));
+
+        let proc_c    = process_input.clone();
+        let dest_c    = dest_input.clone();
+        let action_c  = selected_action.clone();
+        let dur_c     = selected_duration.clone();
+        let dtype_c   = selected_dest_type.clone();
+
+        let hdr_icon  = if is_edit { "✏" } else { "⊕" };
+        let hdr_title = if is_edit { "EDIT RULE" } else { "ADD RULE" };
+        let ok_label  = if is_edit { "Save" } else { "Add Rule" };
+
+        window.open_dialog(cx, move |dialog, _, _cx| {
+            let cur_action   = action_c.lock().unwrap().clone();
+            let cur_duration = dur_c.lock().unwrap().clone();
+            let cur_dtype    = dtype_c.lock().unwrap().clone();
+
+            // Action button colors
+            let (ac_allow, ac_deny, ac_ask) = match cur_action {
+                RuleAction::Allow      => (colors::green(), colors::muted(), colors::muted()),
+                RuleAction::Deny       => (colors::muted(), colors::error(), colors::muted()),
+                RuleAction::Ask        => (colors::muted(), colors::muted(), colors::orange()),
+                RuleAction::Route { .. } => (colors::muted(), colors::muted(), colors::muted()),
+            };
+            // Duration button colors
+            let (dc_perm, dc_sess) = match cur_duration {
+                RuleDuration::Permanent    => (colors::primary(), colors::muted()),
+                RuleDuration::UntilRestart => (colors::muted(), colors::orange()),
+            };
+            // Dest type button colors
+            let dtype_color = |t: &str| if cur_dtype == t { colors::primary() } else { colors::muted() };
+            let (dtc_ip, dtc_cidr, dtc_dom, dtc_wild, dtc_any) = (
+                dtype_color("ip"), dtype_color("cidr"), dtype_color("domain"),
+                dtype_color("wildcard"), dtype_color("any"),
+            );
+
+            let show_dest_input = cur_dtype != "any";
+
+            // Clones for on_ok
+            let proc_i    = proc_c.clone();
+            let dest_i    = dest_c.clone();
+            let action_ok = action_c.clone();
+            let dur_ok    = dur_c.clone();
+            let dtype_ok  = dtype_c.clone();
+            let state_w   = state_weak.clone();
+            let sock      = socket_path.clone();
+            let eid       = existing_id.clone();
+
+            // Clones for buttons
+            let act_allow = selected_action.clone();
+            let act_deny  = selected_action.clone();
+            let act_ask   = selected_action.clone();
+            let dur_perm  = selected_duration.clone();
+            let dur_sess  = selected_duration.clone();
+            let dt_ip     = selected_dest_type.clone();
+            let dt_cidr   = selected_dest_type.clone();
+            let dt_dom    = selected_dest_type.clone();
+            let dt_wild   = selected_dest_type.clone();
+            let dt_any    = selected_dest_type.clone();
+
+            dialog
+                .p(px(0.))
+                .close_button(false)
+                .title(modal_header(hdr_icon, hdr_title))
+                .w(px(480.))
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text(ok_label)
+                        .cancel_text("Cancel"),
+                )
+                .footer(|ok, cancel, w, cx| vec![modal_footer(cancel(w, cx), ok(w, cx))])
+                .child(
+                    v_flex()
+                        .px(px(16.))
+                        .py(px(16.))
+                        .gap(px(16.))
+                        // Process
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("PROCESS  (leave empty to match all)"))
+                                .child(Input::new(&proc_c)),
+                        )
+                        // Action
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("ACTION"))
+                                .child(
+                                    h_flex()
+                                        .gap(px(8.))
+                                        .child(proto_btn("ALLOW", ac_allow, ac_allow, move |_, _, _| {
+                                            *act_allow.lock().unwrap() = RuleAction::Allow;
+                                        }))
+                                        .child(proto_btn("DENY", ac_deny, ac_deny, move |_, _, _| {
+                                            *act_deny.lock().unwrap() = RuleAction::Deny;
+                                        }))
+                                        .child(proto_btn("ASK", ac_ask, ac_ask, move |_, _, _| {
+                                            *act_ask.lock().unwrap() = RuleAction::Ask;
+                                        })),
+                                ),
+                        )
+                        // Destination type
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("DESTINATION TYPE"))
+                                .child(
+                                    h_flex()
+                                        .gap(px(6.))
+                                        .child(proto_btn("IP", dtc_ip, dtc_ip, move |_, _, _| {
+                                            *dt_ip.lock().unwrap() = "ip".into();
+                                        }))
+                                        .child(proto_btn("CIDR", dtc_cidr, dtc_cidr, move |_, _, _| {
+                                            *dt_cidr.lock().unwrap() = "cidr".into();
+                                        }))
+                                        .child(proto_btn("DOMAIN", dtc_dom, dtc_dom, move |_, _, _| {
+                                            *dt_dom.lock().unwrap() = "domain".into();
+                                        }))
+                                        .child(proto_btn("WILDCARD", dtc_wild, dtc_wild, move |_, _, _| {
+                                            *dt_wild.lock().unwrap() = "wildcard".into();
+                                        }))
+                                        .child(proto_btn("ANY", dtc_any, dtc_any, move |_, _, _| {
+                                            *dt_any.lock().unwrap() = "any".into();
+                                        })),
+                                ),
+                        )
+                        // Destination value (hidden for Any)
+                        .when(show_dest_input, |el| {
+                            el.child(
+                                v_flex()
+                                    .gap(px(4.))
+                                    .child(field_label("DESTINATION VALUE"))
+                                    .child(Input::new(&dest_c)),
+                            )
+                        })
+                        // Duration
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("DURATION"))
+                                .child(
+                                    h_flex()
+                                        .gap(px(8.))
+                                        .child(proto_btn("PERMANENT", dc_perm, dc_perm, move |_, _, _| {
+                                            *dur_perm.lock().unwrap() = RuleDuration::Permanent;
+                                        }))
+                                        .child(proto_btn("SESSION", dc_sess, dc_sess, move |_, _, _| {
+                                            *dur_sess.lock().unwrap() = RuleDuration::UntilRestart;
+                                        })),
+                                ),
+                        ),
+                )
+                .on_ok(move |_, _, cx| {
+                    let process_raw = proc_i.read(cx).value().to_string();
+                    let process_name = if process_raw.trim().is_empty() { None } else { Some(process_raw.trim().to_string()) };
+                    let dest_val = dest_i.read(cx).value().trim().to_string();
+                    let action   = action_ok.lock().unwrap().clone();
+                    let duration = dur_ok.lock().unwrap().clone();
+                    let dest_type = dtype_ok.lock().unwrap().clone();
+                    let destination = match dest_type.as_str() {
+                        "cidr"     => DestinationMatcher::Cidr(dest_val),
+                        "domain"   => DestinationMatcher::DomainExact(dest_val),
+                        "wildcard" => DestinationMatcher::DomainWildcard(dest_val),
+                        "any"      => DestinationMatcher::Any,
+                        _          => DestinationMatcher::IpExact(dest_val),
+                    };
+                    let id = eid.clone().unwrap_or_else(|| format!("ui-{}", crate::daemon::unix_now()));
+                    let rule = Rule { id, enabled: true, action, duration, process_name, destination, route_target: None };
+                    let to_send  = rule.clone();
+                    let sock_c   = sock.clone();
+                    let state_wc = state_w.clone();
+                    let editing  = eid.is_some();
+                    cx.spawn(async move |cx| {
+                        let res = cx
+                            .background_executor()
+                            .spawn(async move {
+                                crate::daemon::send_request(&sock_c, &ControlRequest::AddRule(to_send))
+                            })
+                            .await;
+                        if let Some(st) = state_wc.upgrade() {
+                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                match res {
+                                    Ok(ControlResponse::Ok) => {
+                                        if editing {
+                                            if let Some(r) = s.rules.iter_mut().find(|r| r.id == rule.id) {
+                                                *r = rule;
+                                            }
+                                            s.status = Some("Rule updated.".into());
+                                        } else {
+                                            s.rules.push(rule);
+                                            s.status = Some("Rule added.".into());
+                                        }
+                                        s.load_generation = s.load_generation.saturating_add(1);
+                                    }
+                                    Ok(ControlResponse::Error(msg)) => {
+                                        s.status = Some(format!("save failed: {msg}"));
+                                    }
+                                    Err(e) => {
+                                        s.status = Some(format!("save failed: {e}"));
+                                    }
+                                    _ => {
+                                        s.status = Some("unexpected response".into());
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                    true
+                })
         });
     }
 
@@ -648,8 +935,28 @@ impl Render for SettingsApp {
                 .into_any_element(),
         };
 
-        // Add button for egress/proxies tabs
+        // Add button for all tabs
         let add_button: Option<gpui::AnyElement> = match active_tab {
+            SettingsTab::Rules => Some(
+                div()
+                    .id(gpui::ElementId::Name("add-rule-btn".into()))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .bg(colors::primary())
+                    .text_color(colors::bg())
+                    .px(px(12.))
+                    .py(px(6.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_size(px(10.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_rule_form_dialog(None, window, cx);
+                    }))
+                    .child("+ ADD RULE")
+                    .into_any_element(),
+            ),
             SettingsTab::Egress => Some(
                 div()
                     .id(gpui::ElementId::Name("add-egress-btn".into()))
@@ -690,7 +997,6 @@ impl Render for SettingsApp {
                     .child("+ ADD PROXY")
                     .into_any_element(),
             ),
-            SettingsTab::Rules => None,
         };
 
         let status_el: Option<gpui::AnyElement> = status.map(|msg| {
