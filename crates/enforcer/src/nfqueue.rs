@@ -204,8 +204,14 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
     let (src_port, dst_port, protocol, sni_hint, tcp_payload_empty) = match sliced.transport.as_ref() {
         Some(TransportSlice::Tcp(t)) => {
             let payload = t.payload();
-            let sni = extract_tls_sni(payload);
-            (t.source_port(), t.destination_port(), TransportProtocol::Tcp, sni, payload.is_empty())
+            // TLS SNI is the authoritative source when present (TLS is the
+            // common case). For plaintext HTTP — still common for `curl host`,
+            // captive-portal pages, package mirrors, and old internal apps
+            // — fall back to the HTTP `Host:` header so the user actually
+            // sees a domain in the decision dialog. Without this fallback,
+            // any HTTP-only flow shows IP-only and looks like a daemon bug.
+            let domain_hint = extract_tls_sni(payload).or_else(|| extract_http_host(payload));
+            (t.source_port(), t.destination_port(), TransportProtocol::Tcp, domain_hint, payload.is_empty())
         }
         Some(TransportSlice::Udp(u)) => {
             let (sp, dp) = (u.source_port(), u.destination_port());
@@ -316,6 +322,134 @@ fn extract_tls_sni(payload: &[u8]) -> Option<String> {
     None
 }
 
+/// Extract the `Host` header value from a plaintext HTTP/1.x request payload.
+///
+/// Used as a fallback for flows that don't have TLS SNI (e.g. `curl
+/// example.com` over port 80) so the user sees a real domain in the
+/// decision dialog instead of just the IP.
+///
+/// Bounds and safety:
+/// * Only scans the first 4 KiB of the payload — bounded cost per packet, and
+///   real HTTP requests' header blocks are well under this in practice.
+/// * Rejects payloads that don't start with a known HTTP method, so we don't
+///   waste cycles substring-searching arbitrary TCP traffic.
+/// * Strips an optional `:port` suffix (e.g. `Host: example.com:8080` →
+///   `example.com`) because that's what users mean by "the destination".
+/// * Lowercases the result (DNS / SNI / `Host` are all case-insensitive).
+/// * Returns `None` for anything that isn't ASCII-clean — both for safety and
+///   because anything else isn't a legal HTTP/1.x Host header anyway.
+fn extract_http_host(payload: &[u8]) -> Option<String> {
+    if !starts_with_http_method(payload) {
+        return None;
+    }
+
+    // 4 KiB is plenty for the request line + headers in any realistic HTTP/1.x
+    // request. Anything beyond that is either malicious or oversized and not
+    // worth blocking the packet decision on.
+    let scan = &payload[..payload.len().min(4096)];
+
+    // Headers end at the first \r\n\r\n (or end-of-payload for partial reads).
+    let header_end = scan
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(scan.len());
+    let headers = &scan[..header_end];
+
+    // Look for "\r\nHost:" (case-insensitive). Skipping the first request line
+    // means we don't get tricked by an absolute-form URL on the request line
+    // (e.g. `GET http://example.com/ HTTP/1.1`) — we want the actual Host
+    // header value.
+    let needle = b"\r\nhost:";
+    let mut start = None;
+    for i in 0..headers.len().saturating_sub(needle.len()) {
+        if headers[i..i + needle.len()].eq_ignore_ascii_case(needle) {
+            start = Some(i + needle.len());
+            break;
+        }
+    }
+    let value_start = start?;
+
+    // Take until end of line (CRLF or LF or end-of-headers).
+    let line_end = headers[value_start..]
+        .iter()
+        .position(|&b| b == b'\r' || b == b'\n')
+        .map(|i| value_start + i)
+        .unwrap_or(headers.len());
+
+    let raw = &headers[value_start..line_end];
+
+    // Trim ASCII whitespace.
+    let trimmed = trim_ascii(raw);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let s = std::str::from_utf8(trimmed).ok()?;
+
+    // Reject anything that isn't a plausible hostname (rough RFC 952/1123
+    // shape — letters, digits, dots, hyphens, optional `:port`, optional
+    // IPv6 literal in brackets). Catches non-HTTP traffic that happens to
+    // contain a `\r\nHost:` byte sequence by coincidence.
+    if !looks_like_host_value(s) {
+        return None;
+    }
+
+    // Strip optional :port suffix. Handles both `example.com:8080` and
+    // bracketed IPv6 `[::1]:8080` (the bracketed form is what HTTP requires
+    // for IPv6 Host headers).
+    let host = if let Some(rest) = s.strip_prefix('[') {
+        // IPv6 literal: take until the closing `]`.
+        let end = rest.find(']')?;
+        &rest[..end]
+    } else if let Some((h, _port)) = s.rsplit_once(':') {
+        // Only treat the trailing colon as a port separator when what's
+        // after it is all digits — otherwise this could mangle a literal
+        // IPv6 (which should have been in brackets, but be lenient).
+        if _port.bytes().all(|b| b.is_ascii_digit()) {
+            h
+        } else {
+            s
+        }
+    } else {
+        s
+    };
+
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+/// HTTP/1.x request methods we care about. We only need a quick early-reject
+/// for "this payload doesn't look like HTTP at all" — the full method set
+/// isn't required for correctness, just for avoiding a `\r\nHost:` substring
+/// search on arbitrary binary TCP payloads.
+fn starts_with_http_method(payload: &[u8]) -> bool {
+    const METHODS: &[&[u8]] = &[
+        b"GET ", b"POST ", b"PUT ", b"HEAD ", b"DELETE ", b"OPTIONS ",
+        b"PATCH ", b"CONNECT ", b"TRACE ",
+    ];
+    METHODS.iter().any(|m| payload.starts_with(m))
+}
+
+fn trim_ascii(s: &[u8]) -> &[u8] {
+    let start = s.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(s.len());
+    let end = s.iter().rposition(|b| !b.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(start);
+    &s[start..end]
+}
+
+fn looks_like_host_value(s: &str) -> bool {
+    // Conservative: at least one char, and every char is in the
+    // hostname-or-port-or-bracket set. Length-cap to avoid accepting huge
+    // malformed values.
+    if s.is_empty() || s.len() > 253 {
+        return false;
+    }
+    s.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +554,112 @@ mod tests {
     fn sni_not_present_in_non_tls_payload() {
         assert_eq!(extract_tls_sni(b"GET / HTTP/1.1\r\n"), None);
         assert_eq!(extract_tls_sni(&[]), None);
+    }
+
+    // ----- HTTP Host header extraction (the `curl google.com` fallback) -----
+
+    #[test]
+    fn http_host_extracted_from_get_request() {
+        let payload = b"GET / HTTP/1.1\r\nHost: google.com\r\nUser-Agent: curl/8.0\r\n\r\n";
+        assert_eq!(extract_http_host(payload), Some("google.com".to_string()));
+    }
+
+    #[test]
+    fn http_host_extracted_case_insensitive() {
+        // Header names are case-insensitive per RFC 7230 §3.2.
+        let payload = b"GET / HTTP/1.1\r\nHOST: Example.COM\r\n\r\n";
+        assert_eq!(extract_http_host(payload), Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn http_host_strips_port_suffix() {
+        // Hosts with explicit port — what we want in the rule is the host,
+        // not the host:port pair. Otherwise wildcard rules `*.example.com`
+        // wouldn't match a flow with `Host: api.example.com:8080`.
+        let payload = b"POST / HTTP/1.1\r\nHost: api.example.com:8080\r\n\r\n";
+        assert_eq!(extract_http_host(payload), Some("api.example.com".to_string()));
+    }
+
+    #[test]
+    fn http_host_strips_ipv6_bracket_port() {
+        let payload = b"GET / HTTP/1.1\r\nHost: [2001:db8::1]:8443\r\n\r\n";
+        assert_eq!(extract_http_host(payload), Some("2001:db8::1".to_string()));
+    }
+
+    #[test]
+    fn http_host_returns_none_for_non_http_payload() {
+        // Random TCP payload that happens to contain `\r\nHost:` bytes by
+        // coincidence — must NOT be picked up as an HTTP host. The early
+        // method-prefix check is what prevents the false positive.
+        assert_eq!(extract_http_host(b"\x00\x01\x02\r\nHost: tricked.com\r\n\x05"), None);
+    }
+
+    #[test]
+    fn http_host_returns_none_for_tls_payload() {
+        // TLS ClientHello shouldn't accidentally match as HTTP.
+        let hello = build_tls_client_hello("example.com");
+        assert_eq!(extract_http_host(&hello), None);
+    }
+
+    #[test]
+    fn http_host_returns_none_when_header_missing() {
+        // Malformed HTTP/1.0 request with no Host header is still legal
+        // for HTTP/1.0 — we just have no domain to report.
+        let payload = b"GET / HTTP/1.0\r\nUser-Agent: weird\r\n\r\n";
+        assert_eq!(extract_http_host(payload), None);
+    }
+
+    #[test]
+    fn http_host_rejects_non_hostname_garbage() {
+        // Defensive: if a malicious client sends `Host: <huge binary blob>`
+        // we shouldn't treat that as a domain. The `looks_like_host_value`
+        // guard rejects anything outside the host-character set.
+        let mut payload = b"GET / HTTP/1.1\r\nHost: ".to_vec();
+        payload.extend_from_slice(&[0xff; 16]);
+        payload.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(extract_http_host(&payload), None);
+    }
+
+    #[test]
+    fn http_host_handles_multiple_headers_before_host() {
+        // Real curl puts `User-Agent` and `Accept` before `Host` only some
+        // of the time, but we should find Host regardless of position.
+        let payload =
+            b"GET /path HTTP/1.1\r\nUser-Agent: curl/8.0\r\nAccept: */*\r\nHost: example.org\r\n\r\n";
+        assert_eq!(extract_http_host(payload), Some("example.org".to_string()));
+    }
+
+    #[test]
+    fn http_host_truncated_payload_returns_none_safely() {
+        // Don't panic on a payload that ends mid-Host-header.
+        let payload = b"GET / HTTP/1.1\r\nHost: example.com"; // no CRLF after value
+        // We accept the unfinished value — it's still useful information.
+        assert_eq!(extract_http_host(payload), Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn http_connect_method_extracts_host() {
+        // HTTPS proxies negotiate via CONNECT; the request line carries
+        // `CONNECT host:port HTTP/1.1`. The Host header is still present
+        // and that's what we extract (we don't need the request line).
+        let payload = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+        assert_eq!(extract_http_host(payload), Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn parsed_tcp_packet_with_http_request_populates_sni_hint_with_host() {
+        // End-to-end: a parsed TCP packet whose payload is a plaintext
+        // HTTP GET request should expose the Host as `sni_hint`.
+        // (Field name `sni_hint` is historical — it now holds any extracted
+        // domain hint, SNI *or* HTTP Host.)
+        let body = b"GET / HTTP/1.1\r\nHost: google.com\r\nUser-Agent: curl/8\r\n\r\n";
+        let mut buf = Vec::new();
+        PacketBuilder::ipv4([10, 0, 0, 1], [1, 1, 1, 1], 64)
+            .tcp(54321, 80, 0, 65535)
+            .write(&mut buf, body)
+            .unwrap();
+        let pkt = parse_raw_packet(&buf).expect("parsed");
+        assert_eq!(pkt.sni_hint.as_deref(), Some("google.com"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 126 tests passing (`cargo test --workspace`)
+**Test Status:** 142 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
 **Last Updated:** 2026-05-13
 
@@ -189,6 +189,43 @@
   - `wildcard_matches_with_apex_only_storage_form` — locks in the production storage form (no prefix) for subdomain matches, deep-subdomain matches, apex non-match, and `notexample.com`-style substring safety.
   - `wildcard_matches_both_storage_forms_identically` — both `"foo.com"` and `"*.foo.com"` resolve to the same outcome.
   - `wildcard_empty_pattern_matches_nothing` — defensive guard.
+
+## Bug Fixes (HTTP Host fallback for domain detection, 2026-05-13)
+
+**Bug 16:** Plain HTTP flows (e.g. `curl google.com` on port 80) showed up in the decision dialog with no domain — just the destination IP.
+
+- **Root cause:** Two compounding gaps in the domain-inference pipeline:
+  1. `parse_raw_packet` in `crates/enforcer/src/nfqueue.rs` only called `extract_tls_sni`, so anything without a TLS ClientHello produced `sni_hint = None`.
+  2. The nftables `output_early` chain unconditionally bypasses DNS (`udp dport 53 accept` / `tcp dport 53 accept`), so the daemon never sees DNS responses to populate `SniDnsCache` from there either.
+
+  The net effect was an HTTP-only flow had no source of truth for its destination domain. Rules like `allow curl → google.com` couldn't match because `destination_domain = None`. (HTTPS always worked via SNI extraction; this was specifically a plaintext HTTP gap.)
+
+- **Fix:** New `extract_http_host(payload)` in `crates/enforcer/src/nfqueue.rs` parses the `Host:` header from plaintext HTTP/1.x requests and feeds it into the same `sni_hint → SniDnsCache` pipeline that SNI uses. The parser:
+  - Early-rejects payloads that don't start with a known HTTP method (`GET `, `POST `, `HEAD `, `OPTIONS `, `PATCH `, `CONNECT `, `TRACE `, …) so we don't substring-search arbitrary binary TCP.
+  - Scans the first 4 KiB only (bounded cost; well above realistic HTTP header sizes).
+  - Searches for `\r\nhost:` case-insensitively, skipping the request line so absolute-form URLs don't shadow the actual header.
+  - Strips optional `:port` suffix and bracketed IPv6 literals (`[2001:db8::1]:8443` → `2001:db8::1`).
+  - Validates against a conservative hostname character set to reject coincidental `\r\nHost:` byte sequences in non-HTTP traffic.
+  - Lowercases the result so wildcard matching is stable.
+
+  Once `sni_hint` is populated by either source, `SniDnsCache` records `dst_ip → host` so subsequent connections to the same IP — HTTPS or HTTP — also resolve. TLS SNI still wins when present (more authoritative); HTTP is the fallback.
+
+- **Tests:** 12 new tests in `nfqueue::tests::http_host_*` covering the happy path, case-insensitivity, IPv4/IPv6 port stripping, CONNECT proxies, multi-header ordering, truncation safety, garbage rejection, and explicit negatives against TLS payloads and non-HTTP TCP bytes.
+
+- **Field rename:** kept the historical `RawPacket.sni_hint` and `FlowContext.sni_hint` field name (would have rippled through too many crates for an incidental rename); updated the doc-comment in `crates/flow-classifier/src/lib.rs` to call out that the field now holds either source.
+
+- **Still uncovered:** QUIC (SNI is encrypted), plain UDP services, non-HTTP/non-TLS TCP (SSH, raw protocols). Those would need a DNS snoop cache — flagged in [`docs/nfqueue-domain-inference.md`](nfqueue-domain-inference.md).
+
+## Bug Fixes (settings resize + NFQUEUE tray toggle, 2026-05-13)
+
+**Bug 14:** Settings window pinned at its initial 960×720 with no way to resize.
+- **Root cause:** On GNOME / Mutter (Wayland), the compositor refuses `xdg-decoration` server-side requests and forces client-side decorations. The settings root view rendered `gpui_component::TitleBar` but never wrapped its content in `gpui_component::window_border()`, so there was no edge hitbox calling `window.start_window_resize(edge)` and the cursor never switched on the edges.
+- **Fix:** Wrapped the settings root in `window_border()`; explicitly requested `WindowDecorations::Client` and `is_resizable: true` in `WindowOptions`; set `window_min_size = 640×420` to keep table headers and the tab bar usable. No new tests — manual resize confirms the fix.
+
+**Bug 15:** "Enable Network Interception" tray menu item appeared to do nothing.
+- **Root cause:** The `SetNfqueueEnabled` handler flipped an `AtomicBool` in `ControlService` and returned `Ok`. Nothing about nftables, the running `NfqueueProcessor`, or the kernel changed — but `Health` reported the new flag, so the GUI claimed the toggle had worked. Symptom looked "unreliable" because actual interception state was determined entirely by whether `LOGIGUARD_NFQUEUE` was set at boot.
+- **Fix:** The handler now re-applies the `inet logiguard` nftables table via `NftablesBootstrap::setup(queue, route_mark_base)` — `Some(n)` adds `queue num n` rules, `None` removes them — and only commits the cached flag in `ControlService` after the kernel update succeeds. A new pure helper `plan_nfqueue_toggle(bootstrap_present, nfqueue_num, enabled) -> NfqueueToggleAction` decides between `Apply` and `Reject` so the (bootstrap, queue, enabled) matrix is exhaustive and unit-testable. Two reject paths: nftables didn't install at boot, or `enabled=true` was requested without `LOGIGUARD_NFQUEUE` (which would queue packets to a number nobody is draining → kernel drops everything). Each reject returns an actionable error message; no state mutates on reject.
+- **Tests:** 4 new tests in `apps/daemon/src/main.rs::tests` covering both reject paths and both apply paths. First unit tests this binary has ever had.
 
 ## Bug Fixes (routing, 2026-05-09)
 
@@ -439,7 +476,7 @@ LOGIGUARD_NFQUEUE=0 \
 ### Current
 
 - Workspace compiles cleanly
-- 126 tests passing (`cargo test --workspace`)
+- 142 tests passing (`cargo test --workspace`)
 - No CI pipeline set up yet
 
 ### Planned

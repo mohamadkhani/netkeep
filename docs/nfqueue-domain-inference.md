@@ -131,10 +131,32 @@ The cache stores `dst_ip → domain`. `FlowClassifier` uses it as its `DnsResolv
 
 **Thread safety:** `SniDnsCache` wraps `Arc<Mutex<HashMap<String, String>>>`. The daemon creates one instance and `.clone()`s it (cheap — just clones the `Arc`) into both the classifier (reader) and the processor (writer).
 
-**Remaining gaps** (DNS snoop cache, not yet implemented):
-- Plain UDP flows to non-HTTPS services
-- QUIC/HTTP3 where SNI is encrypted in the packet payload
-- Non-TLS TCP services
+**Plaintext HTTP Host header fallback** (implemented 2026-05-13):
+
+For plain HTTP/1.x traffic — `curl example.com`, captive-portal pages, package mirrors, old internal apps — there's no TLS ClientHello to read SNI from, and DNS is bypassed in nftables (`udp dport 53 accept`), so the daemon never sees the resolver response. Without a fallback, every HTTP flow shows IP-only in the decision dialog.
+
+`extract_http_host` in `crates/enforcer/src/nfqueue.rs` parses the HTTP/1.x `Host:` header from plaintext TCP payloads and feeds the result into the same `sni_hint → SniDnsCache` pipeline:
+
+```rust
+let domain_hint = extract_tls_sni(payload).or_else(|| extract_http_host(payload));
+```
+
+The parser:
+1. Early-rejects payloads that don't start with a known HTTP method (`GET `, `POST `, …) so we don't substring-search arbitrary binary TCP traffic.
+2. Scans the first 4 KiB only — bounded cost, well above realistic HTTP request header sizes.
+3. Searches for `\r\nhost:` case-insensitively (skipping the request line so an absolute-form URL like `GET http://example.com/ HTTP/1.1` doesn't shadow the actual `Host:` header).
+4. Strips an optional `:port` suffix and bracketed IPv6 literals (`[2001:db8::1]:8443` → `2001:db8::1`).
+5. Validates the result against a conservative hostname character set (alphanumeric + `.` `-` `:` `[` `]`) so coincidental `\r\nHost:` byte sequences in non-HTTP traffic don't generate false-positive domains.
+6. Returns the lowercased host so wildcard rules match consistently.
+
+Once `extract_http_host` populates `sni_hint`, the `SniDnsCache` records `dst_ip → host` and every subsequent connection to the same IP — HTTP or HTTPS — also resolves to a domain. The TLS SNI path still wins when present (TLS is more authoritative); HTTP is the fallback.
+
+12 unit tests in `nfqueue::tests::http_host_*` cover the happy path, case-insensitivity, port stripping (both IPv4 and bracketed IPv6), CONNECT-method proxies, multi-header ordering, truncation safety, garbage rejection, and explicit no-match against TLS ClientHello / non-HTTP payloads.
+
+**Still uncovered** (would need a DNS snoop cache):
+- Plain UDP flows to non-HTTPS services.
+- QUIC/HTTP3 where SNI is encrypted in the packet payload.
+- Non-HTTP, non-TLS TCP services (SSH, raw protocols, custom apps).
 
 For these, a DNS snoop cache would be needed — intercept UDP packets where `src_port == 53`, parse the DNS response wire format (A/AAAA answers), and populate the same `SniDnsCache`. The race condition (DNS response racing with the first UDP packet) is less critical for UDP since UDP has no handshake and the first packet is already application data.
 

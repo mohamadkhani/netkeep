@@ -169,11 +169,10 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `EgressTarget`, `
 
 ## 4) Open Bugs / Follow-ups
 
-- [ ] **Settings window not resizable** — fixed size, no resize affordance
-- [ ] **NFQUEUE tray toggle unreliable** — enabling from tray doesn't consistently activate interception
+- [x] **Settings window not resizable** — fixed since 2026-05-13 (session 21). Root view now wraps everything in `gpui_component::window_border()` so the resize edges + cursor change work on Linux compositors that use client-side decorations (notably GNOME / Mutter, which refuses xdg-decoration server-side requests). Also explicitly requests `WindowDecorations::Client` and sets `window_min_size = 640×420` so the user can't accidentally collapse the table headers.
+- [x] **NFQUEUE tray toggle unreliable** — fixed since 2026-05-13 (session 21). The previous handler just flipped a status bit in `ControlService` and never touched the kernel; the toggle was a no-op. Now `SetNfqueueEnabled` re-applies the nftables protection chains via `NftablesBootstrap::setup(queue, route_mark_base)` — `Some(n)` adds `queue num n` rules, `None` removes them. The cached flag is only committed *after* nftables actually applied. Gate logic is in the pure `plan_nfqueue_toggle` helper with 4 new unit tests covering the (bootstrap present, queue configured, enabled requested) matrix, including the case where the daemon was started without `LOGIGUARD_NFQUEUE` (rejected with an actionable error pointing the operator at the systemd unit). Workspace 126 → 130 tests.
 - [ ] **Tray toggle should be single item** — currently two separate enable/disable menu items; should be one checked/unchecked toggle
 - [ ] **Add Egress / Add Proxy button styling** — full-width, doesn't match design spec
-- [ ] **Session rules not visible in settings** — until-restart rules not surfaced or differentiated from permanent rules
 
 ## 5) Definition of Done (MVP)
 
@@ -344,3 +343,48 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `EgressTarget`, `
   - Updated `docs/decision-dialog-ux.md` with a "Canonical storage form" section that names every writer, the display convention, and the past bug so the same contract isn't broken again.
   - Updated `docs/testing.md` (3 new policy-engine rows).
   - Updated `docs/implementation-status.md` (Bug 13 entry, refreshed test counts).
+
+### 2026-05-13 (session 21 — settings resize + NFQUEUE tray toggle)
+
+Two long-standing follow-up items from `## 4) Open Bugs / Follow-ups` (lines 172–173) closed in one session. Both root causes turned out to be cases where the existing code did *almost* the right thing but stopped one step short of being observable to the user.
+
+- [x] **Settings window not resizable.**
+  - **Root cause.** The settings window opened on GNOME / Mutter (Wayland), which refuses `xdg-decoration` server-side decorations and forces the app to draw its own chrome. `gpui_component::TitleBar` was rendered, but the root view never wrapped its content in `gpui_component::window_border()` — so there was no shadow hitbox calling `window.start_window_resize(edge)`, and the cursor never switched to a resize cursor on the edges. From the user's POV the window was simply pinned at 960×720.
+  - **Fix.** Two changes in `apps/gpui/src/`:
+    - `settings/mod.rs`: wrap the whole root in `window_border().child(v_flex()...)` — this is the official `gpui-component` helper for CSD windows (it's a no-op on systems that have real SSD, so KWin/macOS/Windows pay no cost).
+    - `main.rs`: open the settings window with `window_decorations: Some(WindowDecorations::Client)`, `is_resizable: true` (explicit; defaults to `true` already), and `window_min_size: Some(640×420)` so the user can't accidentally collapse the table headers and tab bar past the point of being usable.
+  - **No new tests** — GPUI window plumbing isn't unit-testable from this side; the build + manual resize confirms the fix.
+
+- [x] **NFQUEUE tray toggle unreliable.**
+  - **Root cause.** The `SetNfqueueEnabled { enabled }` handler in `apps/daemon/src/main.rs` just forwarded the request to `ControlService::handle`, which set an `AtomicBool` and returned `Ok`. Nothing about nftables, the kernel, or the running `NfqueueProcessor` changed. `Health` *reported* the new flag, so the GUI thought the toggle had worked, but actual interception was unchanged. The "unreliable" symptom was really "always a no-op" — depending on whether `LOGIGUARD_NFQUEUE` was set at boot, the user saw either always-on or always-off, never actually toggled.
+  - **Fix.** The handler now does what its name implies:
+    - New `DaemonRuntime { bootstrap, nfqueue_num, route_mark_base }` plumbs the boot config to `handle_client` instead of free-floating parameters.
+    - New pure helper `plan_nfqueue_toggle(bootstrap_present, nfqueue_num, enabled) -> NfqueueToggleAction` decides whether to re-apply nftables (`Apply { queue }`) or refuse with an actionable error (`Reject(msg)`). Splitting the gate from the side effect makes the (bootstrap, queue, enabled) matrix testable without faking a `UnixStream`.
+    - On `Apply`, the handler calls `bootstrap.setup(queue, route_mark_base)` (which is idempotent — it tears down and re-applies the whole `inet logiguard` table), and *only on success* commits the cached flag in `ControlService`. A kernel failure can't leave `Health` lying about whether interception is on.
+    - On `Reject`, no state changes anywhere. Two reject paths today:
+      - `bootstrap_present = false`: daemon failed to install nftables at boot (usually not root). Error suggests `nft list ruleset`.
+      - `enabled = true && nfqueue_num = None`: daemon was started without `LOGIGUARD_NFQUEUE`, so no `NfqueueProcessor` is running. Adding `queue num N` rules with nobody draining the queue would *drop every packet* (no `bypass` flag in the rules), which is far worse than refusing the toggle. Error points the operator at the systemd unit.
+  - **Tests:** 4 new unit tests in `apps/daemon/src/main.rs::tests`, the first tests this binary has ever had:
+    - `toggle_rejected_when_bootstrap_missing` — both directions reject if nftables didn't install.
+    - `enable_rejected_when_no_queue_configured` — and the error message names the env var.
+    - `disable_always_applies_with_no_queue` — disabling is always safe.
+    - `enable_applies_with_configured_queue` — the production systemd happy path (`LOGIGUARD_NFQUEUE=0`).
+  - Workspace **126 → 130 tests** passing, no regressions.
+
+- [x] **Documentation:** updated the two open-bug entries in `## 4) Open Bugs / Follow-ups` to `[x]` with a one-line summary each, refreshed test counts.
+
+### 2026-05-13 (session 22 — HTTP Host fallback for domain detection)
+
+User-reported regression that turned out to be a long-standing pre-existing gap, not caused by recent changes. Worth its own session entry because it closes a real usability hole for plaintext HTTP flows.
+
+- [x] **Root cause.** `curl google.com` (port 80, no TLS) showed up in the dialog with `process_name = "curl"` but `destination_domain = None`. The pipeline had two cooperating gaps:
+  - `parse_raw_packet` only called `extract_tls_sni`, so any payload without a TLS ClientHello produced `sni_hint = None`.
+  - DNS is bypassed in the nftables `output_early` chain (`udp dport 53 accept` / `tcp dport 53 accept`), so the daemon never sees DNS responses to populate `SniDnsCache` from there.
+
+  Net effect: HTTP-only flows had no source of truth for the destination domain, and rules like `allow curl → google.com` couldn't match.
+
+- [x] **Fix.** New `extract_http_host(payload)` in `crates/enforcer/src/nfqueue.rs`, wired in as the fallback when SNI is absent — `extract_tls_sni(payload).or_else(|| extract_http_host(payload))`. Parser is defensive by design — early-reject by HTTP method prefix, 4 KiB scan cap, conservative hostname charset, port stripping (incl. bracketed IPv6), case-insensitive `\r\nhost:` search starting after the request line, lowercased output. TLS SNI still wins when present.
+
+- [x] **Tests.** 12 new tests in `nfqueue::tests::http_host_*` — happy path, case-insensitivity, IPv4/IPv6 port stripping, CONNECT proxies, multi-header ordering, truncation safety, garbage rejection, explicit negatives against TLS and non-HTTP TCP. Workspace **130 → 142** tests.
+
+- [x] **Documentation.** Expanded `docs/nfqueue-domain-inference.md` with a full "Plaintext HTTP Host header fallback" section that explains every defensive guard and what's still uncovered (QUIC, plain UDP services, non-HTTP/non-TLS TCP). Updated `docs/implementation-status.md` with a Bug 16 entry. Updated the doc-comment on `FlowContext.sni_hint` / `RawPacket.sni_hint` to call out that the field now holds either source (no rename — too many touch points for an incidental change).

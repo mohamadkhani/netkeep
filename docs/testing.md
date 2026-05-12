@@ -72,6 +72,17 @@ Every unit is testable in isolation. All OS/system effects behind traits. No rul
 - [x] `/proc/net/tcp` IPv4/IPv6 parsing, port-only UDP wildcard fallback, IPv6 word byte order
 - [x] **`ProcProcessResolver` cache:** cache hit short-circuits `/proc` reads; cache misses on different port or protocol; expired entries are not served
 
+### `enforcer` — HTTP Host fallback (session 22)
+- [x] **HTTP `Host:` header populates `sni_hint`** for plaintext HTTP/1.x — closes the `curl example.com` (port 80) domain-detection gap.
+- [x] HTTP Host extraction is case-insensitive (`HOST:`, `host:`, `Host:` all work).
+- [x] HTTP Host extraction strips trailing `:port` (IPv4) and bracketed IPv6 literals (`[2001:db8::1]:8443`).
+- [x] HTTP Host extraction rejects non-HTTP TCP payloads that happen to contain `\r\nHost:` byte sequences (early method-prefix check).
+- [x] HTTP Host extraction explicitly returns `None` for TLS ClientHello payloads (SNI path wins).
+- [x] HTTP CONNECT-method proxies expose the host via the Host header.
+- [x] Truncated HTTP requests (no CRLF after value) still produce the partial host — no panic.
+- [x] Garbage byte sequences after `Host:` are rejected by the `looks_like_host_value` charset guard.
+- [x] End-to-end: a parsed TCP packet whose payload is a plaintext HTTP `GET` populates `RawPacket.sni_hint`.
+
 ### `enforcer`
 - [x] nftables programming success path (SystemNftablesBootstrap + FakeBootstrap)
 - [x] nftables apply failure handled fail-close (FakeBootstrap fail=true)

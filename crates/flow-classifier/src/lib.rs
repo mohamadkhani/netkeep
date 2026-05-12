@@ -46,7 +46,17 @@ pub struct RawPacket {
     pub dst_ip: String,
     pub dst_port: u16,
     pub protocol: TransportProtocol,
-    /// TLS SNI value extracted from ClientHello, if available.
+    /// Domain hint extracted from the packet payload.
+    ///
+    /// For HTTPS / TLS this is the SNI value from the ClientHello. For
+    /// plaintext HTTP/1.x it's the `Host:` header value (with `:port`
+    /// suffix stripped and lowercased). Both feed the same `SniDnsCache`
+    /// so that later packets in the same connection — and any other
+    /// connections to the same IP — also resolve to a domain.
+    ///
+    /// The field name is `sni_hint` for historical reasons; both
+    /// `extract_tls_sni` and `extract_http_host` in
+    /// `crates/enforcer/src/nfqueue.rs` write to it.
     pub sni_hint: Option<String>,
     /// Network interface the packet arrived on (populated for gateway/routed traffic).
     pub ingress_interface: Option<String>,
