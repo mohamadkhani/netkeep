@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build-daemon",
+            "type": "shell",
+            "command": "cargo build -p logiguard-daemon",
+            "group": "build",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "start-lldb-server",
+            "type": "shell",
+            "command": "sudo -E /home/mohamad/.vscode-oss/extensions/vadimcn.vscode-lldb-1.12.2/lldb/bin/lldb-server platform --listen 127.0.0.1:2345 --server",
+            "dependsOn": "build-daemon",
+            "isBackground": true,
+            "problemMatcher": {
+                "pattern": { "regexp": "^$" },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^Listening",
+                    "endsPattern": "^$"
+                }
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        }
+    ]
+}

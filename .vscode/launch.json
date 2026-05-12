@@ -1,0 +1,24 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "logiguard-daemon",
+            "program": "${workspaceFolder}/target/debug/logiguard-daemon",
+            "args": [],
+            "env": {
+                "LOGIGUARD_ROUTE_MARK_BASE": "20000",
+                "RUST_LOG": "debug"
+            },
+            "initCommands": [
+                "platform select remote-linux",
+                "platform connect connect://127.0.0.1:2345"
+            ],
+            "preLaunchTask": "start-lldb-server"
+        }
+    ]
+}

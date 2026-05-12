@@ -15,7 +15,7 @@ StateDirectoryMode=0750
 Environment=LOGIGUARD_SOCKET_PATH=/run/logiguard/logiguard.sock
 Environment=LOGIGUARD_DB_PATH=/var/lib/logiguard/logiguard.db
 # Uncomment when you want kernel interception (requires nft rules + NFQUEUE):
-# Environment=LOGIGUARD_NFQUEUE=0
+Environment=LOGIGUARD_NFQUEUE=0
 ExecStart=/usr/bin/logiguardd
 Restart=on-failure
 RestartSec=2

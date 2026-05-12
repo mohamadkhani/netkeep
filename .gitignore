@@ -4,7 +4,6 @@
 
 # IDE / OS
 .idea/
-.vscode/
 .DS_Store
 *.swp
 *~
@@ -14,3 +13,8 @@ packaging/archlinux/pkg/
 packaging/archlinux/src/
 packaging/archlinux/*.pkg.tar.*
 packaging/archlinux/*.log
+
+# Binaries
+logiguard-daemon
+logiguard-gpui
+logiguard-emulator
