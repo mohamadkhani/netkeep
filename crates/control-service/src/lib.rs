@@ -185,6 +185,7 @@ impl<R: Repository> ControlService<R> {
         match request {
             ControlRequest::AddRule(rule) => {
                 self.repo.upsert_rule(rule);
+                self.sweep_pending();
                 ControlResponse::Ok
             }
             ControlRequest::ListRules => {
@@ -277,9 +278,11 @@ impl<R: Repository> ControlService<R> {
                 }
             }
             ControlRequest::ResolvePendingWithRule { pending_id, action, rule } => {
-                // Install the rule first so any packets arriving while we resolve
-                // the pending decision already match the rule and skip the queue.
+                // Install the rule first, then sweep: any other pending decisions
+                // already in the queue that the new rule covers are auto-resolved
+                // without showing additional dialogs.
                 self.repo.upsert_rule(rule);
+                self.sweep_pending();
                 if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action) {
                     self.repo.delete_pending(&pending_id);
                     let _ = self.notification_tx.send(PushNotification::PendingResolved {
@@ -352,6 +355,34 @@ impl<R: Repository> ControlService<R> {
                 let mut proxies = self.repo.list_proxies();
                 proxies.sort_by(|a, b| a.id.cmp(&b.id));
                 ControlResponse::ProxyList(proxies)
+            }
+        }
+    }
+
+    /// Re-evaluate all pending decisions against the current rule set.
+    /// Any pending flow that now matches a non-Ask rule is auto-resolved immediately,
+    /// so the user is never shown a dialog for a flow already covered by a rule they
+    /// just created (e.g. "allow chromium → any" sweeps all other chromium pendings).
+    fn sweep_pending(&mut self) {
+        let rules = self.repo.list_rules();
+        let pending = self.decision_engine.list_pending();
+        for p in pending {
+            if let Some(resolved) = resolve_action(&rules, &p.flow) {
+                match resolved.action {
+                    RuleAction::Ask => continue,
+                    action => {
+                        eprintln!(
+                            "sweep_pending: auto-resolving {} ({:?} → {:?})",
+                            p.id, p.flow.process_name, action
+                        );
+                        self.decision_engine.resolve_pending(&p.id, action.clone());
+                        self.repo.delete_pending(&p.id);
+                        let _ = self.notification_tx.send(PushNotification::PendingResolved {
+                            pending_id: p.id,
+                            action,
+                        });
+                    }
+                }
             }
         }
     }

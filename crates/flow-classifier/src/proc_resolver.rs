@@ -7,15 +7,52 @@ use crate::ProcessResolver;
 
 /// Real ProcessResolver that maps (src_ip, src_port, protocol) → process name
 /// by reading /proc/net/{tcp,tcp6,udp,udp6} and /proc/<pid>/fd.
+///
+/// Fallback chain (in order):
+///   1. Direct lookup: inode → pid → /proc/<pid>/comm
+///   2. Retry once after 2ms (TOCTOU: socket may not be in /proc/net yet)
+///   3. Parent process: /proc/<pid>/status PPid → parent comm
+///      (catches browser/Electron subprocess models where the network
+///       child's comm is generic but the parent's is the app name)
+///   4. Executable basename: /proc/<pid>/exe → last path component
+///      (/proc/<pid>/comm is truncated to 15 chars; exe gives the full name)
 pub struct ProcProcessResolver;
 
 impl ProcessResolver for ProcProcessResolver {
     fn resolve(&self, src_ip: &str, src_port: u16, protocol: TransportProtocol) -> Option<String> {
         let ip: IpAddr = src_ip.parse().ok()?;
-        let inode = find_socket_inode(ip, src_port, protocol)?;
-        let pid = find_pid_for_inode(inode)?;
-        read_comm(pid)
+
+        // Attempt 1: direct lookup.
+        let pid = find_socket_pid(ip, src_port, protocol)
+            .or_else(|| {
+                // Attempt 2: retry once — the socket entry may not be visible yet.
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                find_socket_pid(ip, src_port, protocol)
+            })?;
+
+        // Prefer exe basename (not truncated) over comm (15-char limit).
+        let name = read_exe_basename(pid)
+            .or_else(|| read_comm(pid))?;
+
+        // Attempt 3: if the process name looks like a generic launcher or helper
+        // (e.g. a Chromium subprocess comm is still "chromium", but a Java app's
+        // subprocess might be "java" while the parent is "myapp"), try the parent.
+        // Heuristic: if the resolved name contains a path separator or is very short,
+        // walk up to the parent. Otherwise trust the direct result.
+        if name.len() <= 3 || name.contains('/') {
+            if let Some(parent_name) = read_ppid(pid).and_then(read_exe_basename) {
+                return Some(parent_name);
+            }
+        }
+
+        Some(name)
     }
+}
+
+/// Resolve (ip, port, protocol) → pid in one step.
+fn find_socket_pid(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Option<u32> {
+    let inode = find_socket_inode(ip, port, protocol)?;
+    find_pid_for_inode(inode)
 }
 
 /// Find the socket inode from /proc/net/{tcp,tcp6,udp,udp6} for a local address.
@@ -135,10 +172,30 @@ fn find_pid_for_inode(inode: u64) -> Option<u32> {
     None
 }
 
-/// Read /proc/<pid>/comm (process name, newline-trimmed).
+/// Read /proc/<pid>/comm (process name, newline-trimmed, max 15 chars).
 fn read_comm(pid: u32) -> Option<String> {
     let comm = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     Some(comm.trim().to_string())
+}
+
+/// Read the basename of /proc/<pid>/exe (full executable path, not truncated).
+/// Returns None if the symlink is unreadable (process exited or permission denied).
+fn read_exe_basename(pid: u32) -> Option<String> {
+    let exe = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let name = exe.file_name()?.to_string_lossy().to_string();
+    // Strip " (deleted)" suffix that Linux appends when the binary has been replaced.
+    Some(name.trim_end_matches(" (deleted)").to_string())
+}
+
+/// Read the parent PID from /proc/<pid>/status (PPid field).
+fn read_ppid(pid: u32) -> Option<u32> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in status.lines() {
+        if let Some(val) = line.strip_prefix("PPid:\t") {
+            return val.trim().parse().ok();
+        }
+    }
+    None
 }
 
 #[cfg(test)]
