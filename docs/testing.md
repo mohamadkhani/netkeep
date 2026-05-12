@@ -33,6 +33,9 @@ Every unit is testable in isolation. All OS/system effects behind traits. No rul
 - [x] tie-break: equal specificity + equal action rank → greater `rule.id` wins
 - [x] disabled rule ignored
 - [x] invalid rule rejected by validator
+- [x] **unknown-process + specific destination** (`IpExact`/`DomainExact`) → rule matches (proc-attribution race tolerance)
+- [x] **unknown-process safety negatives:** wildcard / `Any` / CIDR rules do **not** apply when the flow's process is unknown
+- [x] known-process *mismatch* (different name) still does not match a specific rule
 
 ### `decision-engine`
 - [x] unknown flow creates pending decision
@@ -40,6 +43,9 @@ Every unit is testable in isolation. All OS/system effects behind traits. No rul
 - [x] different destination port creates separate pending
 - [x] resolve cleans up flow dedup index (same flow can be re-prompted after resolve)
 - [x] expire cleans up flow dedup index (same flow can be re-prompted after timeout)
+- [x] **unknown → named** retransmit upgrades the existing pending (one dialog with the real process name, not two)
+- [x] **named → unknown** retransmit reuses the existing pending (no new dialog)
+- [x] distinct *known* process names to the same destination create separate pendings (chrome vs firefox)
 - [x] pending decision resolved by user allow
 - [x] pending decision resolved by user deny
 - [x] pending timeout → auto-deny at 100s default
@@ -60,6 +66,8 @@ Every unit is testable in isolation. All OS/system effects behind traits. No rul
 - [x] DNS/SNI conflict → IP-only classification
 - [x] QUIC best-effort domain inference fallback to IP/CIDR
 - [x] gateway flow device label attachment
+- [x] `/proc/net/tcp` IPv4/IPv6 parsing, port-only UDP wildcard fallback, IPv6 word byte order
+- [x] **`ProcProcessResolver` cache:** cache hit short-circuits `/proc` reads; cache misses on different port or protocol; expired entries are not served
 
 ### `enforcer`
 - [x] nftables programming success path (SystemNftablesBootstrap + FakeBootstrap)

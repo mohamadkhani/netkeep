@@ -31,7 +31,17 @@ fn process_matches(rule: &Rule, flow: &FlowContext) -> bool {
     match (&rule.process_name, &flow.process_name) {
         (None, _) => true,
         (Some(rp), Some(fp)) => rp == fp,
-        (Some(_), None) => false,
+        // Flow process attribution failed (proc_resolver lost the
+        // /proc/net/tcp race). When the rule pins a *specific* destination
+        // we trust the destination: re-prompting the user for the same
+        // host they already approved is worse UX than letting the rule
+        // apply. Broad destinations (Any / Cidr / Wildcard) still require
+        // an exact process match so a global "allow process X" rule can't
+        // be silently piggy-backed on by a different unattributed process.
+        (Some(_), None) => matches!(
+            rule.destination,
+            DestinationMatcher::IpExact(_) | DestinationMatcher::DomainExact(_)
+        ),
     }
 }
 
@@ -180,6 +190,103 @@ mod tests {
         );
         let resolved = resolve_action(&[allow, deny], &flow).expect("must resolve");
         assert_eq!(resolved.rule_id, "deny");
+    }
+
+    fn flow_unknown_proc(domain: Option<&str>, ip: &str) -> FlowContext {
+        FlowContext {
+            process_name: None,
+            destination_ip: ip.to_string(),
+            destination_port: 443,
+            destination_domain: domain.map(str::to_string),
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+        }
+    }
+
+    #[test]
+    fn unknown_process_matches_specific_destination_rule() {
+        // proc_resolver lost the race on this packet; the user has already
+        // approved curl → example.com. The rule must still apply, otherwise
+        // we'd reprompt for an already-trusted destination.
+        let rule = mk_rule(
+            "allow-curl-example",
+            RuleAction::Allow,
+            Some("curl"),
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+        let flow = flow_unknown_proc(Some("example.com"), "93.184.216.34");
+        let resolved = resolve_action(&[rule], &flow).expect("rule must match");
+        assert_eq!(resolved.rule_id, "allow-curl-example");
+        assert_eq!(resolved.action, RuleAction::Allow);
+    }
+
+    #[test]
+    fn unknown_process_matches_specific_ip_rule() {
+        let rule = mk_rule(
+            "allow-curl-ip",
+            RuleAction::Allow,
+            Some("curl"),
+            DestinationMatcher::IpExact("1.1.1.1".to_string()),
+        );
+        let flow = flow_unknown_proc(None, "1.1.1.1");
+        let resolved = resolve_action(&[rule], &flow).expect("rule must match");
+        assert_eq!(resolved.action, RuleAction::Allow);
+    }
+
+    #[test]
+    fn unknown_process_does_not_piggyback_on_wildcard_rule() {
+        // Broad destination + unknown process must NOT silently apply.
+        // Otherwise a wildcard "allow curl → *.example.com" rule could
+        // permit any unattributed traffic to that wildcard.
+        let rule = mk_rule(
+            "allow-curl-wildcard",
+            RuleAction::Allow,
+            Some("curl"),
+            DestinationMatcher::DomainWildcard("*.example.com".to_string()),
+        );
+        let flow = flow_unknown_proc(Some("api.example.com"), "1.2.3.4");
+        assert!(resolve_action(&[rule], &flow).is_none());
+    }
+
+    #[test]
+    fn unknown_process_does_not_piggyback_on_any_rule() {
+        let rule = mk_rule(
+            "allow-curl-any",
+            RuleAction::Allow,
+            Some("curl"),
+            DestinationMatcher::Any,
+        );
+        let flow = flow_unknown_proc(None, "9.9.9.9");
+        assert!(resolve_action(&[rule], &flow).is_none());
+    }
+
+    #[test]
+    fn unknown_process_does_not_piggyback_on_cidr_rule() {
+        let rule = mk_rule(
+            "allow-curl-cidr",
+            RuleAction::Allow,
+            Some("curl"),
+            DestinationMatcher::Cidr("10.0.0.".to_string()),
+        );
+        let flow = flow_unknown_proc(None, "10.0.0.5");
+        assert!(resolve_action(&[rule], &flow).is_none());
+    }
+
+    #[test]
+    fn known_process_mismatch_still_blocks_specific_rule() {
+        // If proc_resolver succeeded but with a different name, the rule
+        // must still NOT match — the unknown-process fallback only kicks
+        // in when attribution failed entirely.
+        let rule = mk_rule(
+            "allow-curl-example",
+            RuleAction::Allow,
+            Some("curl"),
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+        let mut flow = flow_unknown_proc(Some("example.com"), "93.184.216.34");
+        flow.process_name = Some("evil".to_string());
+        assert!(resolve_action(&[rule], &flow).is_none());
     }
 
     #[test]

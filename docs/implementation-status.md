@@ -1,8 +1,8 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 87 tests passing (`cargo test --workspace`)
+**Test Status:** 123 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
-**Last Updated:** 2026-05-12
+**Last Updated:** 2026-05-13
 
 ## Completed Work
 
@@ -159,6 +159,16 @@
 **Bug 9:** Deny button does not create permanent rule when PERMANENTLY scope selected  
 - **Fix:** Added `make_permanent` and `flow` parameters to `deny_button()`, mirroring the allow button's `AddRule` logic with `RuleAction::Deny`.
 
+## Bug Fixes (process-attribution races, 2026-05-13)
+
+**Bug 12:** Duplicate decision dialogs for the same connection — one with a process name, one labelled `(unknown)`.
+- **Root cause:** A three-layer race between NFQUEUE packet delivery and the kernel publishing socket entries to `/proc/net/{tcp,udp}*`. Two packets of the same connection could yield different `process_name` resolutions; the decision-engine's dedup index (keyed by `process_name`) treated them as different flows; after a rule was installed the policy engine still rejected later unattributed packets because `process_matches((Some, None)) → false`. See [`docs/process-attribution-races.md`](process-attribution-races.md).
+- **Fix (3 layers):**
+  1. `ProcProcessResolver` gained a `(src_ip, src_port, protocol) → name` cache (60 s TTL, 4096-entry cap). Retransmits of the same socket reuse the cached resolution instead of re-racing `/proc`.
+  2. `DecisionEngine::register_unknown_flow` fallback dedup is now **symmetric**: when an "unknown" pending exists and a later packet with a real process name arrives for the same `(dst_ip, dst_port, protocol)`, the pending is **upgraded in place** (index re-keyed, `flow.process_name` patched). Two distinct *known* names still produce two pendings.
+  3. `policy_engine::process_matches((Some, None))` now returns `true` when the rule's destination is `IpExact` or `DomainExact`. Broad rules (`Any`/`Cidr`/`Wildcard`) still require a strict process match so they cannot be silently piggy-backed by an unattributed packet.
+- **Tests:** 12 new tests (3 in `flow-classifier`, 3 in `decision-engine`, 6 in `policy-engine` including safety negatives).
+
 ## Bug Fixes (routing, 2026-05-09)
 
 **Bug 10:** SOCKS `Route` → Tun exited via LAN (Digikala saw Iranian IP / HTTP 200 instead of VPN/geo edge). Daemon reused WireGuard’s discovered fwmark from `ip rule`; that mark often means **split-tunnel bypass**, so marked packets followed **`main`** → **`wlp`**, not the tunnel.
@@ -257,15 +267,16 @@ CREATE TABLE pending_decisions (
 
 | Crate | Tests | Key Coverage |
 |-------|-------|--------------|
-| policy-engine | 6 | Matching, precedence, disabled rules |
-| decision-engine | 8 | Pending lifecycle, timeout, overflow |
-| flow-classifier | 7 | Process/domain attribution |
-| enforcer | 8 | Packet parsing, verdict paths |
-| state-store | 8 | CRUD, persistence |
-| control-api | 5 | Request validation |
-| control-service | 12 | RPC handlers, pending lifecycle |
+| policy-engine | 10 | Matching, precedence, disabled rules, **unknown-process fallback** + safety negatives |
+| decision-engine | 13 | Pending lifecycle, timeout, overflow, **symmetric `(dst_ip, port, proto)` dedup** with name-upgrade |
+| flow-classifier | 19 | Process/domain attribution, `/proc/net` parsing, **per-socket resolver cache** |
+| enforcer | 21 | Packet parsing, verdict paths, SNI, loopback (IPv4-mapped) |
+| state-store | 17 | CRUD, persistence |
+| control-api | 11 | Request validation |
+| control-service | 12 | RPC handlers, pending lifecycle, push notifications |
 | cli | 17 | Command parsing, output formatting |
-| **Total** | **77** | |
+| daemon + emulator integration | 3 | route target switch e2e (2), SOCKS5 allow relay (1) |
+| **Total** | **123** | |
 
 ## CLI Commands
 
@@ -406,8 +417,8 @@ LOGIGUARD_NFQUEUE=0 \
 
 ### Current
 
-- Workspace compiles without warnings
-- 93 tests passing
+- Workspace compiles cleanly
+- 123 tests passing (`cargo test --workspace`)
 - No CI pipeline set up yet
 
 ### Planned
@@ -421,7 +432,7 @@ LOGIGUARD_NFQUEUE=0 \
 
 - **Lines of code (Rust):** ~6,000 (crates + apps)
 - **Test code:** ~2,500 (unit + integration)
-- **Test count:** 77 passing
+- **Test count:** 123 passing
 - **Crates:** 7 (core, policy, decision, flow, enforcer, state, control)
 - **Apps:** 3 (daemon, CLI, GPUI)
 - **Database tables:** 6 (rules, flow_events, pending_decisions, egresses, egress_targets, egress_dns_servers, proxies)

@@ -10,7 +10,8 @@ Read the relevant doc **before** writing code in that area. These docs record le
 | Settings dialogs/tables | [`docs/gpui-settings.md`](docs/gpui-settings.md) — Table/Dialog/delegate patterns, form patterns |
 | NFQUEUE / packet interception | [`docs/nfqueue-packet-interception.md`](docs/nfqueue-packet-interception.md) — queue lifecycle, verdicts, gotchas |
 | Domain inference (SNI/DNS) | [`docs/nfqueue-domain-inference.md`](docs/nfqueue-domain-inference.md) — SNI timing, TLS wire format |
-| Process resolution | [`docs/process-resolver.md`](docs/process-resolver.md) — /proc lookup chain, byte encoding |
+| Process resolution | [`docs/process-resolver.md`](docs/process-resolver.md) — /proc lookup chain, byte encoding, per-socket cache |
+| Proc-attribution races / dedup / policy fallback | [`docs/process-attribution-races.md`](docs/process-attribution-races.md) — the three layers that keep duplicate dialogs from leaking out |
 | Architecture / crate boundaries | [`docs/architecture.md`](docs/architecture.md) — components, data flow, design decisions |
 | GPUI async / entity model | [`docs/gpui-async.md`](docs/gpui-async.md) — spawn, background_executor, WeakEntity |
 | Unix socket protocol | [`docs/unix-sockets.md`](docs/unix-sockets.md) — framing, JSON-lines, request/response schema |
@@ -309,3 +310,16 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `EgressTarget`, `
 - [x] Emulator DNS-resolves domain targets before flow registration (fixes `0.0.0.0` IP)
 - [x] Window height 488→580px; overflow fixed; layout rows separated
 - [x] `docs/gpui-components.md` extended; `docs/testing.md` created; `develop.md` refactored
+
+### 2026-05-13 (session 19 — process-attribution races: three layers of defense)
+- [x] **Root-cause analysis:** Duplicate decision dialogs for the same connection (one with a process name, one labelled `(unknown)`) traced to a three-way race between NFQUEUE packet delivery and the kernel publishing socket entries to `/proc/net/{tcp,udp}*`. The race was previously absorbed by *zero* layers: the resolver had no cache, the dedup index keyed on `process_name` (so two race-different packets created two pendings), and `policy_engine::process_matches((Some, None)) → false` (so any later unattributed packet bypassed the user-approved rule and created another dialog).
+- [x] **Layer 1 — `ProcProcessResolver` per-socket cache.** `(src_ip, src_port, protocol) → name` with 60 s TTL and 4096-entry cap. Successful resolutions are reused across retransmits and follow-up segments of the same socket so the resolver never *changes its mind* mid-connection. 3 new tests.
+- [x] **Layer 2 — symmetric dedup in `DecisionEngine::register_unknown_flow`.** The `(dst_ip, dst_port, protocol)` fallback now fires whenever *at least one* of `(new flow, existing pending)` has `process_name = None`. When a real name arrives for an "unknown" pending, the pending is **upgraded in place** (index re-keyed, `flow.process_name` patched, newly-learned domain/device label filled in). Two distinct *known* names still create two pendings. 3 new tests.
+- [x] **Layer 3 — forgiving `policy_engine::process_matches` for specific destinations.** `(rule.proc=Some, flow.proc=None)` now matches when `rule.destination` is `IpExact` or `DomainExact`. Broad rules (`Any` / `Cidr` / `DomainWildcard`) still require a strict process match so they cannot be silently piggy-backed by an unattributed packet. 6 new tests (including 4 safety negatives).
+- [x] **Tests:** 12 new tests across `flow-classifier`, `decision-engine`, `policy-engine`. Workspace total **77 → 123**.
+- [x] **Documentation:**
+  - **New:** [`docs/process-attribution-races.md`](docs/process-attribution-races.md) — the design post-mortem, top-down explanation of all three layers, and a table of which symptom is caught by which layer (so the next person knows what breaks if any layer is removed).
+  - Updated `docs/process-resolver.md` (cache, two distinct TOCTOU windows, ASCII lookup chain).
+  - Updated `docs/architecture.md` (decision-engine symmetric dedup, policy-engine fallback, `ProcProcessResolver` cache).
+  - Updated `docs/testing.md` (new matrix rows for each layer).
+  - Updated `docs/implementation-status.md` (Bug 12 entry, refreshed test counts).

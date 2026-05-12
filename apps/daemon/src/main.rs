@@ -799,7 +799,7 @@ fn main() {
         if let Some(queue_num) = nfqueue_num {
             let dns_cache = SniDnsCache::new();
             let classifier = FlowClassifier::new(
-                ProcProcessResolver,
+                ProcProcessResolver::new(),
                 dns_cache.clone(),
                 FakeDeviceLabelResolver { result: None },
             );

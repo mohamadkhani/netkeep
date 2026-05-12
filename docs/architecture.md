@@ -135,7 +135,9 @@ Rule matching and precedence logic.
 **Traits:**
 - `RuleRepository` — mock-friendly interface for rule lookups
 
-**Tests:** Exact match, CIDR, domain, wildcard, precedence, deny vs allow, overlapping Route tie-break, disabled rules.
+**Tests:** Exact match, CIDR, domain, wildcard, precedence, deny vs allow, overlapping Route tie-break, disabled rules, unknown-process fallback against specific destinations (with safety negatives for `Any` / `Cidr` / `Wildcard`).
+
+**Unknown-process fallback in `process_matches`:** when the rule pins `process_name=Some(P)` but the live flow has `process_name=None` (proc attribution lost the `/proc` race), the rule still matches **only if** the rule's destination is `IpExact` or `DomainExact`. Broad destinations (`Any`, `Cidr`, `DomainWildcard`) still require a strict process match so a wildcard "allow X" rule cannot be silently piggy-backed on by an unattributed packet. Rationale and tests in [`docs/process-attribution-races.md`](process-attribution-races.md).
 
 ### `decision-engine`
 
@@ -148,6 +150,10 @@ Pending queue and timeout state machine.
 - Timeout: default 100s (configurable per protocol: TCP/UDP/QUIC/Other)
 - UntilRestart rules: expire on daemon startup
 - **Flow deduplication:** `register_unknown_flow` keeps a `FlowKey → pending_id` reverse index. Subsequent packets for an already-pending flow (retransmits, post-SYN data) return the existing `PendingDecision` instead of creating a new one. The index is cleaned up on resolve and on timeout expiry.
+- **Symmetric `(dst_ip, dst_port, protocol)` fallback** for cases where two packets of the *same* connection disagree on the process name (the `/proc` race in `ProcProcessResolver`). The fallback triggers when at least one side has `process_name = None`:
+  - new packet has a name, existing pending was "unknown" → **upgrade** the pending in place (rewrite the index key, patch the stored flow's name + any newly-learned domain/device label), return the (upgraded) pending;
+  - new packet is None, existing pending has a name → return the existing pending verbatim.
+  Two pendings with *distinct, known* process names stay separate (e.g. chrome and firefox simultaneously connecting to the same host:port). See [`docs/process-attribution-races.md`](process-attribution-races.md) for why this exists and how it interacts with the resolver cache and the policy engine.
 
 **FlowKey** (dedup identity): `(process_name, destination_ip, destination_port, protocol)` — stable across retransmits and domain-inference variance (SNI only present on ClientHello, not on subsequent packets).
 
@@ -179,7 +185,9 @@ Process and domain attribution.
 - `SniResolver` — lookup domain from SNI
 - `DeviceLabelResolver` — attach device labels (e.g., "vpn-work")
 
-**Implementation:** Currently uses fake resolvers for testing. Real implementations need OS integration (read `/proc/net/tcp`, extract SNI from QUIC Initial packet).
+**Implementation:**
+- `ProcProcessResolver` reads `/proc/net/{tcp,tcp6,udp,udp6}` → inode → `/proc/*/fd/*` → `/proc/<pid>/exe`/`comm`, with a UID-filtered first pass and a parent-exe fallback for short generic names. Successful resolutions are cached by `(src_ip, src_port, protocol)` (60 s TTL, 4096-entry cap) so retransmits of the same socket do not re-race the kernel. See [`docs/process-resolver.md`](process-resolver.md) and [`docs/process-attribution-races.md`](process-attribution-races.md).
+- TLS SNI extraction is in `enforcer::nfqueue::extract_tls_sni`; domains discovered from SNI populate the shared `SniDnsCache` consumed by `FlowClassifier`. QUIC SNI is not yet parsed.
 
 ### `enforcer`
 

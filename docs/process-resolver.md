@@ -2,6 +2,8 @@
 
 This document explains how LogiGuard identifies which process owns an intercepted network connection, using only the Linux `/proc` filesystem — no external tools or libraries required.
 
+> **Adjacent reading.** Race interactions between this resolver, the decision engine, and the policy engine — and the three layers of defense that absorb them — are in [`docs/process-attribution-races.md`](process-attribution-races.md). Read that doc *too* if you are touching the resolver and the failure modes are not just an isolated parse bug.
+
 ---
 
 ## The Problem
@@ -21,20 +23,33 @@ You do **not** have the process name. The kernel knows which process opened the 
 (src_ip, src_port, protocol)
         │
         ▼
+┌────────────────────────────────────────────────┐
+│  per-socket cache  (60 s TTL, 4096 entries)   │
+│  hit → return cached name, skip everything    │
+└──────────────────────┬─────────────────────────┘
+                       │ miss
+                       ▼
 /proc/net/{tcp,tcp6,udp,udp6}
   find row where local_address matches
+  retry [0, 3, 8] ms — TOCTOU with kernel publishing
         │
-        └── inode number
+        └── inode + uid
                 │
                 ▼
         /proc/*/fd/*
           scan symlinks for socket:[inode]
+          UID-filtered first pass, full scan fallback
                 │
                 └── pid
                         │
                         ▼
-                /proc/<pid>/comm
+                /proc/<pid>/exe  (preferred)
+                /proc/<pid>/comm (fallback — kernel truncates to 15 chars)
+                parent-process exe basename for short names (≤3 chars)
                   process name
+                        │
+                        ▼
+            insert into per-socket cache
 ```
 
 ---
@@ -134,7 +149,7 @@ for entry in fs::read_dir("/proc")? {
 }
 ```
 
-**Performance note:** This is an O(processes × fds) scan. On a desktop system with typical process counts (<500 processes, <50 fds each), it completes in under a millisecond. It is called only once per new flow, not per packet — subsequent packets on the same connection hit the allow/deny rule cache.
+**Performance note:** This is an O(processes × fds) scan, hot-path-reduced by a UID-filtered first pass (see `find_pid_for_inode`). On a desktop system with typical process counts (<500 processes, <50 fds each), it completes in under a millisecond. It is also called at most once per `(src_ip, src_port, protocol)` socket within the per-socket cache's TTL — retransmits and follow-up segments hit the cache; the NFQUEUE 5-tuple verdict cache further short-circuits subsequent packets at the enforcement layer.
 
 ---
 
@@ -156,15 +171,26 @@ For the full executable path, `/proc/<pid>/exe` is a symlink to the binary. For 
 
 ## Race Conditions
 
-There is an inherent TOCTOU window: between the packet arriving at NFQUEUE and the `/proc` lookup, the process could exit. In that case:
+There are **two** TOCTOU windows that produce `process_name = None`:
 
-- The inode disappears from `/proc/net/tcp*`
-- The socket fd symlink is gone from `/proc/<pid>/fd/`
-- `find_socket_inode` or `find_pid_for_inode` returns `None`
-- The flow is classified with `process_name: None`
-- The rule engine falls back to destination-only matching
+1. **Kernel-publishing race.** The kernel writes the socket entry to `/proc/net/{tcp,udp}*` asynchronously. NFQUEUE can hand a packet to userspace before the row is visible. The retry loop in `retry_find_socket` (`[0, 3, 8]` ms) closes most of this window; under load or for very fast resolvers some packets still miss.
+2. **Process-exit race.** Between packet delivery and `/proc` lookup the process exits: the inode disappears from `/proc/net/tcp*`, the fd symlink under `/proc/<pid>/fd/` is gone, and the lookup returns `None`.
 
-This is acceptable — a process that exits while its packet is in-flight is an edge case with no security consequence. The flow is still subject to destination-based rules.
+Both look identical from the resolver's perspective — `Option<String>` returns `None` — but their *frequencies* differ. The kernel-publishing race fires on the **first packet of a brand-new connection** under contention. The process-exit race fires on **packets in flight after the process has died** and is uncommon.
+
+### Per-socket cache (in-memory, 60 s TTL)
+
+To stop the kernel-publishing race from producing inconsistent results *across retransmits of the same connection*, every successful resolution is cached by `(src_ip, src_port, protocol)`. A retransmit of the same socket within the TTL returns the cached name without re-reading `/proc/net/*`. Implementation lives in `ProcProcessResolver::cache` (`Mutex<HashMap<SocketKey, CachedName>>`); entries past TTL are evicted lazily on the next insert that crosses the 4096-entry cap.
+
+Even with this cache, the **first** packet of a *new* connection still has to win or lose the `/proc` race on its own. The fallback paths in `decision-engine` and `policy-engine` absorb that residual loss; see [`docs/process-attribution-races.md`](process-attribution-races.md) for the full picture.
+
+### What happens when attribution fails outright
+
+A packet that loses the kernel race *and* gets no help from any later layer is still safe:
+
+- The flow is classified with `process_name: None`.
+- The rule engine falls back to destination-only matching (rules with `process_name=None` apply; rules with a specific process name only apply when the destination matcher is `IpExact` or `DomainExact` — see `policy-engine::process_matches`).
+- If no rule matches, the flow enters the pending queue under `process_name = None` and the user is prompted with `(unknown)` in the dialog.
 
 ---
 

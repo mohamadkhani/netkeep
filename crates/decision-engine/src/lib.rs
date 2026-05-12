@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use core_types::{FlowContext, FlowDirection, PendingDecision, RuleAction, TransportProtocol};
+use core_types::{FlowContext, PendingDecision, RuleAction, TransportProtocol};
+#[cfg(test)]
+use core_types::FlowDirection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverflowPolicy {
@@ -100,23 +102,52 @@ impl DecisionEngine {
             }
         }
 
-        // Process-name fallback dedup: if process resolution failed (None), check
-        // for an existing pending for the same (dst_ip, dst_port, protocol) with
-        // any process name. A second packet from the same connection should not
-        // create a second dialog just because /proc lookup was slower this time.
-        if flow.process_name.is_none() {
-            let dst_ip = &flow.destination_ip;
-            let dst_port = flow.destination_port;
-            let protocol = flow.protocol;
-            if let Some((_, existing_id)) = self.pending_by_flow.iter().find(|(k, _)| {
-                k.destination_ip == *dst_ip
+        // Process-name fallback dedup. proc_resolver loses the /proc/net/tcp
+        // race for the first few packets of a new connection: the kernel hasn't
+        // written the socket entry yet, so the first packet classifies as
+        // process_name=None and later retransmits classify as Some("real-name").
+        // Without this, every retransmit that finally learns the name would
+        // spawn a fresh dialog. Dedup must be symmetric:
+        //   * new packet without process_name → reuse existing pending for the
+        //     same (dst_ip, dst_port, protocol).
+        //   * new packet WITH process_name → reuse and *upgrade* an existing
+        //     "unknown" pending so the dialog shows the real process name.
+        // Two pendings with distinct known process_names are kept separate
+        // (e.g. chrome and firefox to the same host:port at the same time).
+        let dst_ip = flow.destination_ip.clone();
+        let dst_port = flow.destination_port;
+        let protocol = flow.protocol;
+        let fallback = self
+            .pending_by_flow
+            .iter()
+            .find(|(k, _)| {
+                k.destination_ip == dst_ip
                     && k.destination_port == dst_port
                     && k.protocol == protocol
-            }) {
-                let existing_id = existing_id.clone();
-                if let Some(existing) = self.pending.get(&existing_id) {
+                    && (flow.process_name.is_none() || k.process_name.is_none())
+            })
+            .map(|(k, id)| (k.clone(), id.clone()));
+        if let Some((existing_key, existing_id)) = fallback {
+            // Upgrade path: rekey the index and patch the stored decision so
+            // subsequent polls see the real process name. Also fill in newly
+            // learned domain / device label if the original entry lacked them.
+            if flow.process_name.is_some() && existing_key.process_name.is_none() {
+                self.pending_by_flow.remove(&existing_key);
+                if let Some(existing) = self.pending.get_mut(&existing_id) {
+                    existing.flow.process_name = flow.process_name.clone();
+                    if existing.flow.destination_domain.is_none() {
+                        existing.flow.destination_domain = flow.destination_domain.clone();
+                    }
+                    if existing.flow.device_label.is_none() {
+                        existing.flow.device_label = flow.device_label.clone();
+                    }
+                    let new_key = FlowKey::from(&existing.flow);
+                    self.pending_by_flow.insert(new_key, existing_id.clone());
                     return DecisionOutcome::Pending(existing.clone());
                 }
+            }
+            if let Some(existing) = self.pending.get(&existing_id) {
+                return DecisionOutcome::Pending(existing.clone());
             }
         }
 
@@ -243,6 +274,84 @@ mod tests {
 
         assert_eq!(id1, id2, "second packet should reuse the existing pending");
         assert_eq!(engine.pending_count(), 1, "only one pending should exist");
+    }
+
+    #[test]
+    fn unknown_then_named_packet_reuses_and_upgrades_pending() {
+        // Reproduces the duplicate-dialog bug: first packet loses the
+        // /proc/net/tcp race (process_name=None), retransmit wins it
+        // (process_name=Some("electron")). Both packets must collapse to a
+        // single pending and the pending must end up carrying the real name.
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let mut first = mk_flow();
+        first.process_name = None;
+        first.destination_domain = None;
+        let out1 = engine.register_unknown_flow(first, 0);
+        let id1 = match out1 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+
+        let second = mk_flow();
+        let out2 = engine.register_unknown_flow(second, 1);
+        let pending2 = match out2 {
+            DecisionOutcome::Pending(p) => p,
+            _ => panic!("expected pending"),
+        };
+
+        assert_eq!(pending2.id, id1, "retransmit must reuse the existing pending");
+        assert_eq!(engine.pending_count(), 1, "no second pending should be created");
+        assert_eq!(pending2.flow.process_name.as_deref(), Some("curl"));
+        assert_eq!(pending2.flow.destination_domain.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn named_then_unknown_packet_reuses_pending() {
+        // Reverse order of the upgrade case: the existing pending already has
+        // a process name, a later packet without one must still dedup.
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let out1 = engine.register_unknown_flow(mk_flow(), 0);
+        let id1 = match out1 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+
+        let mut second = mk_flow();
+        second.process_name = None;
+        let out2 = engine.register_unknown_flow(second, 1);
+        let pending2 = match out2 {
+            DecisionOutcome::Pending(p) => p,
+            _ => panic!("expected pending"),
+        };
+
+        assert_eq!(pending2.id, id1);
+        assert_eq!(engine.pending_count(), 1);
+        assert_eq!(pending2.flow.process_name.as_deref(), Some("curl"));
+    }
+
+    #[test]
+    fn distinct_named_processes_to_same_destination_are_not_deduped() {
+        // Chrome and Firefox both opening google.com:443 at the same moment
+        // must remain two independent decisions; the upgrade fallback must
+        // never collapse them.
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let mut chrome = mk_flow();
+        chrome.process_name = Some("chrome".to_string());
+        let mut firefox = mk_flow();
+        firefox.process_name = Some("firefox".to_string());
+
+        let out1 = engine.register_unknown_flow(chrome, 0);
+        let out2 = engine.register_unknown_flow(firefox, 0);
+        let id1 = match out1 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+        let id2 = match out2 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+        assert_ne!(id1, id2);
+        assert_eq!(engine.pending_count(), 2);
     }
 
     #[test]

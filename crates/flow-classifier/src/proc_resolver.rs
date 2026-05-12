@@ -1,5 +1,8 @@
+use std::collections::HashMap;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use core_types::TransportProtocol;
 
@@ -8,18 +11,75 @@ use crate::ProcessResolver;
 /// Real ProcessResolver: (src_ip, src_port, protocol) → process name.
 ///
 /// Lookup pipeline:
-///   1. Read /proc/net/{tcp,tcp6,udp,udp6} — exact (ip, port) match → inode + uid
-///   2. UDP fallback: port-only match for wildcard-bound sockets (0.0.0.0:port)
-///   3. Retry up to 3× with short delays — socket may not be in /proc/net yet (TOCTOU)
-///   4. UID-filtered /proc/*/fd/ scan — skip processes owned by wrong UID (fast path)
-///   5. Prefer exe basename over comm (comm is truncated to 15 chars by the kernel)
-///   6. Parent process exe basename — handles Electron/subprocess models where the
+///   1. Per-socket cache hit — successful resolutions are cached for a short
+///      TTL so retransmits / follow-up segments of the same connection do not
+///      re-race `/proc/net/tcp`.
+///   2. Read /proc/net/{tcp,tcp6,udp,udp6} — exact (ip, port) match → inode + uid
+///   3. UDP fallback: port-only match for wildcard-bound sockets (0.0.0.0:port)
+///   4. Retry with short delays — socket may not be in /proc/net yet (TOCTOU)
+///   5. UID-filtered /proc/*/fd/ scan — skip processes owned by wrong UID (fast path)
+///   6. Prefer exe basename over comm (comm is truncated to 15 chars by the kernel)
+///   7. Parent process exe basename — handles Electron/subprocess models where the
 ///      network child has a short or generic name
-pub struct ProcProcessResolver;
+pub struct ProcProcessResolver {
+    /// (src_ip, src_port, protocol) → (name, inserted_at). Avoids re-reading
+    /// /proc/net on every retransmit of the same socket, which otherwise
+    /// re-triggers the TOCTOU race and yields inconsistent process names
+    /// across packets of the same logical connection.
+    cache: Mutex<HashMap<SocketKey, CachedName>>,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+struct SocketKey {
+    ip: IpAddr,
+    port: u16,
+    protocol: TransportProtocol,
+}
+
+#[derive(Clone)]
+struct CachedName {
+    name: String,
+    inserted_at: Instant,
+}
+
+/// How long a resolved `(src_ip, src_port, protocol) → name` mapping stays
+/// in the cache. Long enough to cover typical TCP connection lifetimes and
+/// HTTP keep-alive idle periods, short enough that an OS port reuse for a
+/// different process gets a fresh lookup.
+const CACHE_TTL: Duration = Duration::from_secs(60);
+/// Cap on cache size. When exceeded we evict expired entries on the next
+/// insert; the cap is a defense against pathological resolver-failure storms.
+const CACHE_MAX: usize = 4096;
+
+impl ProcProcessResolver {
+    pub fn new() -> Self {
+        Self { cache: Mutex::new(HashMap::new()) }
+    }
+}
+
+impl Default for ProcProcessResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ProcessResolver for ProcProcessResolver {
     fn resolve(&self, src_ip: &str, src_port: u16, protocol: TransportProtocol) -> Option<String> {
         let ip: IpAddr = src_ip.parse().ok()?;
+        let key = SocketKey { ip, port: src_port, protocol };
+
+        // Cache fast path — a successful resolution within the TTL is reused
+        // verbatim. This is what stops a retransmit whose /proc/net entry
+        // briefly vanished (or hasn't been written this poll) from yielding
+        // process_name=None when we already learned it a moment ago.
+        let now = Instant::now();
+        if let Ok(cache) = self.cache.lock() {
+            if let Some(entry) = cache.get(&key) {
+                if now.duration_since(entry.inserted_at) < CACHE_TTL {
+                    return Some(entry.name.clone());
+                }
+            }
+        }
 
         // Retry loop: TOCTOU — the socket entry may lag behind the packet by a few ms.
         let (inode, uid) = retry_find_socket(ip, src_port, protocol)?;
@@ -29,10 +89,17 @@ impl ProcessResolver for ProcProcessResolver {
         let name = read_exe_basename(pid).or_else(|| read_comm(pid))?;
 
         // Walk to parent when the direct name is very short (likely a generic helper).
-        if name.len() <= 3 {
-            if let Some(parent_name) = read_ppid(pid).and_then(read_exe_basename) {
-                return Some(parent_name);
+        let name = if name.len() <= 3 {
+            read_ppid(pid).and_then(read_exe_basename).unwrap_or(name)
+        } else {
+            name
+        };
+
+        if let Ok(mut cache) = self.cache.lock() {
+            if cache.len() >= CACHE_MAX {
+                cache.retain(|_, v| now.duration_since(v.inserted_at) < CACHE_TTL);
             }
+            cache.insert(key, CachedName { name: name.clone(), inserted_at: now });
         }
 
         Some(name)
@@ -322,6 +389,74 @@ mod tests {
     #[test]
     fn port_only_returns_none_for_wrong_port() {
         assert_eq!(parse_proc_net_port_only(UDP_WILDCARD_SAMPLE, 9999), None);
+    }
+
+    #[test]
+    fn cache_hit_returns_name_without_touching_proc() {
+        // Pre-populate the cache; if resolve() reads /proc/net, it would
+        // fail (no real socket on this port). A correct cache short-circuit
+        // returns the cached name regardless.
+        let resolver = ProcProcessResolver::new();
+        let key = SocketKey {
+            ip: "10.20.30.40".parse().unwrap(),
+            port: 65000,
+            protocol: TransportProtocol::Tcp,
+        };
+        resolver.cache.lock().unwrap().insert(
+            key,
+            CachedName { name: "curl".to_string(), inserted_at: Instant::now() },
+        );
+        assert_eq!(
+            resolver.resolve("10.20.30.40", 65000, TransportProtocol::Tcp).as_deref(),
+            Some("curl"),
+        );
+    }
+
+    #[test]
+    fn cache_misses_for_different_port_or_protocol() {
+        let resolver = ProcProcessResolver::new();
+        let key = SocketKey {
+            ip: "10.20.30.40".parse().unwrap(),
+            port: 65000,
+            protocol: TransportProtocol::Tcp,
+        };
+        resolver.cache.lock().unwrap().insert(
+            key,
+            CachedName { name: "curl".to_string(), inserted_at: Instant::now() },
+        );
+        // Different port → no hit (returns None because /proc has no entry).
+        assert_eq!(
+            resolver.resolve("10.20.30.40", 65001, TransportProtocol::Tcp),
+            None,
+        );
+        // Different protocol → no hit.
+        assert_eq!(
+            resolver.resolve("10.20.30.40", 65000, TransportProtocol::Udp),
+            None,
+        );
+    }
+
+    #[test]
+    fn cache_entry_expires_after_ttl() {
+        let resolver = ProcProcessResolver::new();
+        let key = SocketKey {
+            ip: "10.20.30.40".parse().unwrap(),
+            port: 65000,
+            protocol: TransportProtocol::Tcp,
+        };
+        let stale = Instant::now()
+            .checked_sub(CACHE_TTL + Duration::from_secs(1))
+            .expect("clock is too young for this test");
+        resolver
+            .cache
+            .lock()
+            .unwrap()
+            .insert(key, CachedName { name: "curl".to_string(), inserted_at: stale });
+        // Stale entry must not be served; fallback to /proc fails → None.
+        assert_eq!(
+            resolver.resolve("10.20.30.40", 65000, TransportProtocol::Tcp),
+            None,
+        );
     }
 
     #[test]
