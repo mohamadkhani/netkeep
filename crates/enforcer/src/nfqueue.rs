@@ -21,6 +21,7 @@ struct ConnectionKey {
 #[derive(Clone, Copy)]
 struct CachedVerdict {
     accept:     bool,
+    fwmark:     Option<u32>,
     expires_at: u64,
 }
 
@@ -76,22 +77,25 @@ where
                 .unwrap_or_default()
                 .as_secs();
 
-            let verdict = match parse_raw_packet(msg.get_payload()) {
-                None => Verdict::Drop,
+            let (verdict, fwmark) = match parse_raw_packet(msg.get_payload()) {
+                None => (Verdict::Drop, None),
                 Some(raw) => {
                     self.decide(&raw, now_secs)
                 }
             };
 
+            if let Some(mark) = fwmark {
+                msg.set_nfmark(mark);
+            }
             msg.set_verdict(verdict);
             self.queue.verdict(msg)?;
         }
     }
 
-    fn decide(&mut self, raw: &RawPacket, now_secs: u64) -> Verdict {
+    fn decide(&mut self, raw: &RawPacket, now_secs: u64) -> (Verdict, Option<u32>) {
         // Always pass loopback and DNS through without touching the cache.
         if is_loopback(&raw.dst_ip) || raw.dst_port == 53 {
-            return Verdict::Accept;
+            return (Verdict::Accept, None);
         }
 
         let key = ConnectionKey {
@@ -105,13 +109,14 @@ where
         // TCP FIN/RST (empty payload, connection closing) — evict cache entry and accept.
         if raw.tcp_payload_empty {
             self.decided.remove(&key);
-            return Verdict::Accept;
+            return (Verdict::Accept, None);
         }
 
         // Fast path: return cached verdict if still valid.
         if let Some(cached) = self.decided.get(&key) {
             if cached.expires_at > now_secs {
-                return if cached.accept { Verdict::Accept } else { Verdict::Drop };
+                let v = if cached.accept { Verdict::Accept } else { Verdict::Drop };
+                return (v, cached.fwmark);
             }
             self.decided.remove(&key);
         }
@@ -121,21 +126,43 @@ where
             self.dns_cache.insert(&raw.dst_ip, sni);
         }
         let flow = self.classifier.classify(raw);
-        let verdict = match self.registrar.register(flow, now_secs) {
-            FlowDecision::Immediate(RuleAction::Allow) => Verdict::Accept,
+        let decision = self.registrar.register(flow, now_secs);
+
+        // Only cache definitive decisions. Pending/Ask flows must NOT be cached:
+        // sweep_pending will resolve them shortly and the next retransmit must
+        // re-classify to pick up the newly installed rule.
+        let should_cache = matches!(
+            &decision,
+            FlowDecision::Immediate(RuleAction::Allow)
+                | FlowDecision::Immediate(RuleAction::Route { .. })
+                | FlowDecision::Immediate(RuleAction::Deny)
+        );
+
+        let fwmark = match &decision {
+            FlowDecision::Immediate(RuleAction::Route { target }) => {
+                self.registrar.route_mark(target)
+            }
+            _ => None,
+        };
+
+        let verdict = match decision {
+            FlowDecision::Immediate(RuleAction::Allow)
+            | FlowDecision::Immediate(RuleAction::Route { .. }) => Verdict::Accept,
             _ => Verdict::Drop,
         };
 
-        // Cache the decision so retransmits are handled without re-classifying.
-        if self.decided.len() >= CACHE_MAX {
-            self.decided.retain(|_, v| v.expires_at > now_secs);
+        if should_cache {
+            if self.decided.len() >= CACHE_MAX {
+                self.decided.retain(|_, v| v.expires_at > now_secs);
+            }
+            self.decided.insert(key, CachedVerdict {
+                accept: matches!(verdict, Verdict::Accept),
+                fwmark,
+                expires_at: now_secs + CACHE_TTL_SECS,
+            });
         }
-        self.decided.insert(key, CachedVerdict {
-            accept: matches!(verdict, Verdict::Accept),
-            expires_at: now_secs + CACHE_TTL_SECS,
-        });
 
-        verdict
+        (verdict, fwmark)
     }
 }
 

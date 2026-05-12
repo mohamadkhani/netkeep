@@ -58,6 +58,10 @@ pub enum FlowDecision {
 /// Implemented by `ControlService` in the daemon.
 pub trait FlowRegistrar {
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision;
+    /// Return (and lazily install) the fwmark for a route target.
+    /// Used by the NFQUEUE processor to set the packet mark on routed verdicts
+    /// so the kernel's policy routing tables steer the traffic correctly.
+    fn route_mark(&mut self, target: &RouteTarget) -> Option<u32>;
 }
 
 // ---------------------------------------------------------------------------
@@ -241,10 +245,18 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         script.push_str(
             "add chain inet logiguard output_early { type filter hook output priority -150; policy accept; }\n",
         );
-        // Restore routing mark from ct mark (set by output_nat) and accept to skip NFQUEUE.
-        // Note: ct mark >= route_mark_base means this is our routed traffic that was bypassed.
+        // Accept packets already carrying a routing mark (set by a previous NFQUEUE verdict
+        // or by our relay sockets). The mark was saved to ct mark by output_nat the first
+        // time the packet traversed that chain; restore it here so policy routing is stable.
         script.push_str(&format!(
             "add rule inet logiguard output_early ct mark >= {route_mark_base} meta mark set ct mark accept\n",
+        ));
+        // Save fwmark to ct mark when a routed packet first passes through this chain
+        // (output_nat already ran and saw meta mark=0 before NFQUEUE set it, so we
+        // must save it here on the accept-with-mark path). Subsequent packets then
+        // hit the ct mark rule above and bypass NFQUEUE entirely.
+        script.push_str(&format!(
+            "add rule inet logiguard output_early meta mark >= {route_mark_base} ct mark set meta mark accept\n",
         ));
         if let Some(q) = queue_num {
             // Exclude loopback traffic: skip both the loopback interface and the
@@ -544,6 +556,10 @@ impl FlowRegistrar for FakeFlowRegistrar {
         } else {
             self.decisions.remove(0)
         }
+    }
+
+    fn route_mark(&mut self, _target: &RouteTarget) -> Option<u32> {
+        None
     }
 }
 

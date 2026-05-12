@@ -1,5 +1,5 @@
 use control_api::{validate_request, ControlRequest, ControlResponse, PushNotification};
-use core_types::{FlowContext, FlowEvent, FlowState, RuleAction};
+use core_types::{FlowContext, FlowEvent, FlowState, RouteTarget, RuleAction};
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
 use policy_engine::resolve_action;
@@ -18,6 +18,9 @@ pub struct ControlService<R: Repository> {
     /// NFQUEUE state (enabled + queue number if active)
     nfqueue_enabled: AtomicBool,
     nfqueue_num: Option<u16>,
+    /// Lazily install and return the fwmark for a RouteTarget.
+    /// Set by the daemon to call `ensure_route_mark`; None in tests.
+    route_mark_fn: Option<Box<dyn Fn(&RouteTarget) -> Option<u32> + Send>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,7 +79,14 @@ impl<R: Repository> ControlService<R> {
             notification_tx,
             nfqueue_enabled: AtomicBool::new(nfqueue_enabled),
             nfqueue_num,
+            route_mark_fn: None,
         }
+    }
+
+    /// Set the function used to install/retrieve fwmarks for route targets.
+    /// Must be called before the NFQUEUE processor starts.
+    pub fn set_route_mark_fn(&mut self, f: impl Fn(&RouteTarget) -> Option<u32> + Send + 'static) {
+        self.route_mark_fn = Some(Box::new(f));
     }
 
     pub fn with_notification_tx(
@@ -130,6 +140,7 @@ impl<R: Repository> ControlService<R> {
             notification_tx,
             nfqueue_enabled: AtomicBool::new(false),
             nfqueue_num: None,
+            route_mark_fn: None,
         }
     }
 
@@ -398,6 +409,10 @@ impl<R: Repository> FlowRegistrar for SharedService<R> {
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
         self.0.lock().expect("service lock poisoned").register(flow, now_secs)
     }
+
+    fn route_mark(&mut self, target: &RouteTarget) -> Option<u32> {
+        self.0.lock().expect("service lock poisoned").route_mark(target)
+    }
 }
 
 impl<R: Repository> FlowRegistrar for ControlService<R> {
@@ -442,6 +457,10 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                 }
             }
         }
+    }
+
+    fn route_mark(&mut self, target: &RouteTarget) -> Option<u32> {
+        self.route_mark_fn.as_ref().and_then(|f| f(target))
     }
 }
 

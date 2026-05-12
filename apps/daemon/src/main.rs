@@ -748,6 +748,7 @@ fn main() {
     {
         let mut svc = service.lock().expect("service lock");
         svc.restore_pending(live_pending);
+        svc.set_route_mark_fn(|target| ensure_route_mark(target).ok());
     }
 
     let health = {

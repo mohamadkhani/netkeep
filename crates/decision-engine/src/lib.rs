@@ -100,6 +100,26 @@ impl DecisionEngine {
             }
         }
 
+        // Process-name fallback dedup: if process resolution failed (None), check
+        // for an existing pending for the same (dst_ip, dst_port, protocol) with
+        // any process name. A second packet from the same connection should not
+        // create a second dialog just because /proc lookup was slower this time.
+        if flow.process_name.is_none() {
+            let dst_ip = &flow.destination_ip;
+            let dst_port = flow.destination_port;
+            let protocol = flow.protocol;
+            if let Some((_, existing_id)) = self.pending_by_flow.iter().find(|(k, _)| {
+                k.destination_ip == *dst_ip
+                    && k.destination_port == dst_port
+                    && k.protocol == protocol
+            }) {
+                let existing_id = existing_id.clone();
+                if let Some(existing) = self.pending.get(&existing_id) {
+                    return DecisionOutcome::Pending(existing.clone());
+                }
+            }
+        }
+
         if self.pending.len() >= self.pending_limit {
             return match self.overflow_policy {
                 OverflowPolicy::DenyNew => DecisionOutcome::Immediate(RuleAction::Deny),
