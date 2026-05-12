@@ -360,6 +360,8 @@ Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 
 8. **Per-egress DNS in UI:** DNS servers are persisted and can be edited manually in SQLite, but GPUI DNS management views are not yet implemented.
 
+9. **libayatana-appindicator deprecation warning:** The system tray prints a startup warning (`libayatana-appindicator is deprecated. Please use libayatana-appindicator-glib in newly written code.`). This is cosmetic — the tray works correctly. Migration to the newer library or the `ksni` approach is blocked on upstream Rust crate stabilization.
+
 ## Build and Run
 
 ### Build All Crates

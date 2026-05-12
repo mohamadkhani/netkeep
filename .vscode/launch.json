@@ -7,7 +7,7 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "logiguard-daemon",
+            "name": "logiguard-daemon (debug)",
             "program": "${workspaceFolder}/target/debug/logiguard-daemon",
             "args": [],
             "env": {
@@ -19,6 +19,95 @@
                 "platform connect connect://127.0.0.1:2345"
             ],
             "preLaunchTask": "start-lldb-server"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "logiguard-gpui (debug)",
+            "program": "${workspaceFolder}/target/debug/logiguard-gpui",
+            "args": [],
+            "env": {
+                "RUST_LOG": "debug"
+            },
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build-gpui"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "logiguard-emulator (debug)",
+            "program": "${workspaceFolder}/target/debug/logiguard-emulator",
+            "args": [],
+            "env": {
+                "RUST_LOG": "debug"
+            },
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build-emulator"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "logiguard-daemon (run)",
+            "program": "${workspaceFolder}/target/debug/logiguard-daemon",
+            "args": [],
+            "env": {
+                "LOGIGUARD_ROUTE_MARK_BASE": "20000",
+                "RUST_LOG": "debug"
+            },
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build-daemon"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "logiguard-gpui (run)",
+            "program": "${workspaceFolder}/target/debug/logiguard-gpui",
+            "args": [],
+            "env": {
+                "RUST_LOG": "debug"
+            },
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build-gpui"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "logiguard-emulator (run)",
+            "program": "${workspaceFolder}/target/debug/logiguard-emulator",
+            "args": [],
+            "env": {
+                "RUST_LOG": "debug"
+            },
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build-emulator"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "logiguard-all (run)",
+            "configurations": [
+                "logiguard-daemon (run)",
+                "logiguard-gpui (run)",
+                "logiguard-emulator (run)"
+            ],
+            "stopAll": true
+        },
+        {
+            "name": "logiguard-daemon+gpui (run)",
+            "configurations": [
+                "logiguard-daemon (run)",
+                "logiguard-gpui (run)"
+            ],
+            "stopAll": true
+        },
+        {
+            "name": "logiguard-all (debug)",
+            "configurations": [
+                "logiguard-daemon (debug)",
+                "logiguard-gpui (debug)",
+                "logiguard-emulator (debug)"
+            ],
+            "stopAll": true
         }
     ]
 }

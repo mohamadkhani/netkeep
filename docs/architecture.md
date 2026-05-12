@@ -436,6 +436,22 @@ Prevents remote unlock attempts.
 - **Packet processing:** O(n) rule lookup per packet. Expect <100 µs per verdict.
 - **SQLite writes:** Async journaling. Should not block packet processing.
 
+## Desktop Compatibility
+
+The GPUI tray icon uses `tray-icon` (via `libappindicator`), which implements the freedesktop **StatusNotifierItem** (SNI) / **DBusMenu** protocol. This is the same standard used by KDE Plasma's system tray.
+
+| Desktop Environment | Status | Notes |
+|---|---|---|
+| **KDE Plasma** | Works out of the box | Native SNI support |
+| **GNOME** | Requires extension | Install "AppIndicator and KStatusNotifierItem Support" (or KStatusNotifierItem) from extensions.gnome.org |
+| **XFCE** | Works out of the box | Uses `xfce4-statusnotifier-plugin` |
+| **Cinnamon** | Works out of the box | Built-in AppIndicator support |
+| **Sway / Hyprland** | Partial | Requires a tray bar like `waybar` with SNI support |
+
+**Known issue:** `libayatana-appindicator` prints a deprecation warning at startup (`libayatana-appindicator is deprecated. Please use libayatana-appindicator-glib`). This is cosmetic and does not affect functionality. The migration to `libayatana-appindicator-glib` (or the modern `ksni` approach) is tracked as a future enhancement pending upstream crate stabilization.
+
+**GTK requirement:** On Linux, `gtk::init()` must be called before creating the tray icon and menu. GPUI does not run a GTK main loop, so the app manually drains pending GTK events via `gtk::events_pending()` / `gtk::main_iteration_do()` on a 50ms polling timer. This ensures the AppIndicator menu updates correctly.
+
 ## Settings Window Architecture
 
 The settings window (`--settings` flag) runs as a separate GPUI process. It uses gpui-component's `Table` and `Dialog` components for data management.

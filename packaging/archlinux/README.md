@@ -14,20 +14,22 @@ Requirements: `base-devel`, `rust` (stable), and the `makedepends` from the PKGB
 
 ## After install
 
-1. **Daemon (root, systemd)**  
+1. **Daemon (root, systemd)**
    ```bash
    sudo systemctl enable --now logiguardd.service
    ```
    Default paths: socket `/run/logiguard/logiguard.sock`, database `/var/lib/logiguard/logiguard.db`.
 
-2. **Kernel interception (optional)**  
+2. **Kernel interception (optional)**
    Edit `/usr/lib/systemd/system/logiguardd.service` (or use a drop-in) to set e.g. `Environment=LOGIGUARD_NFQUEUE=0`, then `sudo systemctl daemon-reload && sudo systemctl restart logiguardd`.
 
-3. **Desktop / tray GUI**  
+3. **Desktop / tray GUI**
    A `.desktop` entry installs as **LogiGuard** with icon `io.logicamp.LogiGuard`. It uses the packaged socket path via `/etc/environment.d/logiguard.conf`; log out/in or reboot so the session picks it up, or set `LOGIGUARD_SOCKET_PATH` yourself.
 
-4. **CLI**  
-   `logiguard-cli` is on `PATH`. Alias if you want a shorter name:  
+   **Desktop compatibility:** The system tray icon works on both **KDE Plasma** (native support) and **GNOME** (requires the "AppIndicator and KStatusNotifierItem Support" extension, or equivalent). Other desktops implementing the freedesktop StatusNotifierItem specification are also supported.
+
+4. **CLI**
+   `logiguard-cli` is on `PATH`. Alias if you want a shorter name:
    `alias logiguard=logiguard-cli`
 
 ## AUR / publishing
