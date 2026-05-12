@@ -11,11 +11,13 @@ mod rules_tab;
 use std::sync::{Arc, Mutex};
 
 use control_api::{ControlRequest, ControlResponse};
-use core_types::{DestinationMatcher, Egress, ProxyAuth, ProxyConfig, ProxyProtocol, RouteTarget, Rule, RuleAction, RuleDuration};
+use core_types::{
+    DestinationMatcher, Egress, ProxyAuth, ProxyConfig, ProxyProtocol, RouteTarget, Rule,
+    RuleAction, RuleDuration,
+};
 use gpui::{
-    div, px, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Subscription, Window,
-    prelude::FluentBuilder as _,
+    div, prelude::FluentBuilder as _, px, AppContext as _, Context, Entity, InteractiveElement,
+    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::tab::{Tab, TabBar};
@@ -239,19 +241,27 @@ impl SettingsApp {
         let is_edit = existing.is_some();
         let existing_id = existing.as_ref().map(|r| r.id.clone());
 
-        let init_process = existing.as_ref()
+        let init_process = existing
+            .as_ref()
             .and_then(|r| r.process_name.clone())
             .unwrap_or_default();
-        let init_action = existing.as_ref().map(|r| r.action.clone()).unwrap_or(RuleAction::Allow);
-        let init_duration = existing.as_ref().map(|r| r.duration).unwrap_or(RuleDuration::Permanent);
+        let init_action = existing
+            .as_ref()
+            .map(|r| r.action.clone())
+            .unwrap_or(RuleAction::Allow);
+        let init_duration = existing
+            .as_ref()
+            .map(|r| r.duration)
+            .unwrap_or(RuleDuration::Permanent);
         let (init_dest_type, init_dest_value) = match existing.as_ref().map(|r| &r.destination) {
-            Some(DestinationMatcher::IpExact(v))        => ("ip",       v.clone()),
-            Some(DestinationMatcher::Cidr(v))           => ("cidr",     v.clone()),
-            Some(DestinationMatcher::DomainExact(v))    => ("domain",   v.clone()),
+            Some(DestinationMatcher::IpExact(v)) => ("ip", v.clone()),
+            Some(DestinationMatcher::Cidr(v)) => ("cidr", v.clone()),
+            Some(DestinationMatcher::DomainExact(v)) => ("domain", v.clone()),
             Some(DestinationMatcher::DomainWildcard(v)) => ("wildcard", v.clone()),
-            Some(DestinationMatcher::Any) | None        => ("any",      String::new()),
+            Some(DestinationMatcher::Any) | None => ("any", String::new()),
         };
-        let init_route = existing.as_ref()
+        let init_route = existing
+            .as_ref()
             .and_then(|r| r.route_target.as_ref())
             .map(helpers::route_summary)
             .unwrap_or_default();
@@ -275,69 +285,99 @@ impl SettingsApp {
         // Interior-mutable shared state for radio-group selections inside Fn closure.
         let selected_action: Arc<Mutex<RuleAction>> = Arc::new(Mutex::new(init_action));
         let selected_duration: Arc<Mutex<RuleDuration>> = Arc::new(Mutex::new(init_duration));
-        let selected_dest_type: Arc<Mutex<String>> = Arc::new(Mutex::new(init_dest_type.to_string()));
+        let selected_dest_type: Arc<Mutex<String>> =
+            Arc::new(Mutex::new(init_dest_type.to_string()));
 
-        let proc_c    = process_input.clone();
-        let dest_c    = dest_input.clone();
-        let route_c   = route_input.clone();
-        let action_c  = selected_action.clone();
-        let dur_c     = selected_duration.clone();
-        let dtype_c   = selected_dest_type.clone();
+        let proc_c = process_input.clone();
+        let dest_c = dest_input.clone();
+        let route_c = route_input.clone();
+        let action_c = selected_action.clone();
+        let dur_c = selected_duration.clone();
+        let dtype_c = selected_dest_type.clone();
 
-        let hdr_icon  = if is_edit { "✏" } else { "⊕" };
+        let hdr_icon = if is_edit { "✏" } else { "⊕" };
         let hdr_title = if is_edit { "EDIT RULE" } else { "ADD RULE" };
-        let ok_label  = if is_edit { "Save" } else { "Add Rule" };
+        let ok_label = if is_edit { "Save" } else { "Add Rule" };
 
         window.open_dialog(cx, move |dialog, _, _cx| {
-            let cur_action   = action_c.lock().unwrap().clone();
+            let cur_action = action_c.lock().unwrap().clone();
             let cur_duration = dur_c.lock().unwrap().clone();
-            let cur_dtype    = dtype_c.lock().unwrap().clone();
+            let cur_dtype = dtype_c.lock().unwrap().clone();
 
             // Action button colors
             let (ac_allow, ac_deny, ac_ask, ac_route) = match cur_action {
-                RuleAction::Allow        => (colors::green(),   colors::muted(), colors::muted(), colors::muted()),
-                RuleAction::Deny         => (colors::muted(),   colors::error(), colors::muted(), colors::muted()),
-                RuleAction::Ask          => (colors::muted(),   colors::muted(), colors::orange(), colors::muted()),
-                RuleAction::Route { .. } => (colors::muted(),   colors::muted(), colors::muted(), colors::primary()),
+                RuleAction::Allow => (
+                    colors::green(),
+                    colors::muted(),
+                    colors::muted(),
+                    colors::muted(),
+                ),
+                RuleAction::Deny => (
+                    colors::muted(),
+                    colors::error(),
+                    colors::muted(),
+                    colors::muted(),
+                ),
+                RuleAction::Ask => (
+                    colors::muted(),
+                    colors::muted(),
+                    colors::orange(),
+                    colors::muted(),
+                ),
+                RuleAction::Route { .. } => (
+                    colors::muted(),
+                    colors::muted(),
+                    colors::muted(),
+                    colors::primary(),
+                ),
             };
             let is_route_action = matches!(cur_action, RuleAction::Route { .. });
             // Duration button colors
             let (dc_perm, dc_sess) = match cur_duration {
-                RuleDuration::Permanent    => (colors::primary(), colors::muted()),
+                RuleDuration::Permanent => (colors::primary(), colors::muted()),
                 RuleDuration::UntilRestart => (colors::muted(), colors::orange()),
             };
             // Dest type button colors
-            let dtype_color = |t: &str| if cur_dtype == t { colors::primary() } else { colors::muted() };
+            let dtype_color = |t: &str| {
+                if cur_dtype == t {
+                    colors::primary()
+                } else {
+                    colors::muted()
+                }
+            };
             let (dtc_ip, dtc_cidr, dtc_dom, dtc_wild, dtc_any) = (
-                dtype_color("ip"), dtype_color("cidr"), dtype_color("domain"),
-                dtype_color("wildcard"), dtype_color("any"),
+                dtype_color("ip"),
+                dtype_color("cidr"),
+                dtype_color("domain"),
+                dtype_color("wildcard"),
+                dtype_color("any"),
             );
 
             let show_dest_input = cur_dtype != "any";
 
             // Clones for on_ok
-            let proc_i    = proc_c.clone();
-            let dest_i    = dest_c.clone();
-            let route_i   = route_c.clone();
+            let proc_i = proc_c.clone();
+            let dest_i = dest_c.clone();
+            let route_i = route_c.clone();
             let action_ok = action_c.clone();
-            let dur_ok    = dur_c.clone();
-            let dtype_ok  = dtype_c.clone();
-            let state_w   = state_weak.clone();
-            let sock      = socket_path.clone();
-            let eid       = existing_id.clone();
+            let dur_ok = dur_c.clone();
+            let dtype_ok = dtype_c.clone();
+            let state_w = state_weak.clone();
+            let sock = socket_path.clone();
+            let eid = existing_id.clone();
 
             // Clones for buttons
             let act_allow = selected_action.clone();
-            let act_deny  = selected_action.clone();
-            let act_ask   = selected_action.clone();
+            let act_deny = selected_action.clone();
+            let act_ask = selected_action.clone();
             let act_route = selected_action.clone();
-            let dur_perm  = selected_duration.clone();
-            let dur_sess  = selected_duration.clone();
-            let dt_ip     = selected_dest_type.clone();
-            let dt_cidr   = selected_dest_type.clone();
-            let dt_dom    = selected_dest_type.clone();
-            let dt_wild   = selected_dest_type.clone();
-            let dt_any    = selected_dest_type.clone();
+            let dur_perm = selected_duration.clone();
+            let dur_sess = selected_duration.clone();
+            let dt_ip = selected_dest_type.clone();
+            let dt_cidr = selected_dest_type.clone();
+            let dt_dom = selected_dest_type.clone();
+            let dt_wild = selected_dest_type.clone();
+            let dt_any = selected_dest_type.clone();
 
             dialog
                 .p(px(0.))
@@ -364,35 +404,44 @@ impl SettingsApp {
                         )
                         // Action
                         .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(field_label("ACTION"))
-                                .child(
-                                    h_flex()
-                                        .gap(px(8.))
-                                        .child(proto_btn("ALLOW", ac_allow, ac_allow, move |_, _, _| {
+                            v_flex().gap(px(4.)).child(field_label("ACTION")).child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .child(proto_btn(
+                                        "ALLOW",
+                                        ac_allow,
+                                        ac_allow,
+                                        move |_, _, _| {
                                             *act_allow.lock().unwrap() = RuleAction::Allow;
-                                        }))
-                                        .child(proto_btn("DENY", ac_deny, ac_deny, move |_, _, _| {
-                                            *act_deny.lock().unwrap() = RuleAction::Deny;
-                                        }))
-                                        .child(proto_btn("ASK", ac_ask, ac_ask, move |_, _, _| {
-                                            *act_ask.lock().unwrap() = RuleAction::Ask;
-                                        }))
-                                        .child(proto_btn("ROUTE", ac_route, ac_route, move |_, _, _| {
+                                        },
+                                    ))
+                                    .child(proto_btn("DENY", ac_deny, ac_deny, move |_, _, _| {
+                                        *act_deny.lock().unwrap() = RuleAction::Deny;
+                                    }))
+                                    .child(proto_btn("ASK", ac_ask, ac_ask, move |_, _, _| {
+                                        *act_ask.lock().unwrap() = RuleAction::Ask;
+                                    }))
+                                    .child(proto_btn(
+                                        "ROUTE",
+                                        ac_route,
+                                        ac_route,
+                                        move |_, _, _| {
                                             // Placeholder target; replaced with real value on save.
                                             *act_route.lock().unwrap() = RuleAction::Route {
                                                 target: RouteTarget::Device(String::new()),
                                             };
-                                        })),
-                                ),
+                                        },
+                                    )),
+                            ),
                         )
                         // Route target input — shown only when action is ROUTE
                         .when(is_route_action, |el| {
                             el.child(
                                 v_flex()
                                     .gap(px(4.))
-                                    .child(field_label("ROUTE TARGET  (tun:wg0 / dev:eth0 / proxy:id)"))
+                                    .child(field_label(
+                                        "ROUTE TARGET  (tun:wg0 / dev:eth0 / proxy:id)",
+                                    ))
                                     .child(Input::new(&route_c)),
                             )
                         })
@@ -407,18 +456,38 @@ impl SettingsApp {
                                         .child(proto_btn("IP", dtc_ip, dtc_ip, move |_, _, _| {
                                             *dt_ip.lock().unwrap() = "ip".into();
                                         }))
-                                        .child(proto_btn("CIDR", dtc_cidr, dtc_cidr, move |_, _, _| {
-                                            *dt_cidr.lock().unwrap() = "cidr".into();
-                                        }))
-                                        .child(proto_btn("DOMAIN", dtc_dom, dtc_dom, move |_, _, _| {
-                                            *dt_dom.lock().unwrap() = "domain".into();
-                                        }))
-                                        .child(proto_btn("WILDCARD", dtc_wild, dtc_wild, move |_, _, _| {
-                                            *dt_wild.lock().unwrap() = "wildcard".into();
-                                        }))
-                                        .child(proto_btn("ANY", dtc_any, dtc_any, move |_, _, _| {
-                                            *dt_any.lock().unwrap() = "any".into();
-                                        })),
+                                        .child(proto_btn(
+                                            "CIDR",
+                                            dtc_cidr,
+                                            dtc_cidr,
+                                            move |_, _, _| {
+                                                *dt_cidr.lock().unwrap() = "cidr".into();
+                                            },
+                                        ))
+                                        .child(proto_btn(
+                                            "DOMAIN",
+                                            dtc_dom,
+                                            dtc_dom,
+                                            move |_, _, _| {
+                                                *dt_dom.lock().unwrap() = "domain".into();
+                                            },
+                                        ))
+                                        .child(proto_btn(
+                                            "WILDCARD",
+                                            dtc_wild,
+                                            dtc_wild,
+                                            move |_, _, _| {
+                                                *dt_wild.lock().unwrap() = "wildcard".into();
+                                            },
+                                        ))
+                                        .child(proto_btn(
+                                            "ANY",
+                                            dtc_any,
+                                            dtc_any,
+                                            move |_, _, _| {
+                                                *dt_any.lock().unwrap() = "any".into();
+                                            },
+                                        )),
                                 ),
                         )
                         // Destination value (hidden for Any)
@@ -432,32 +501,42 @@ impl SettingsApp {
                         })
                         // Duration
                         .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(field_label("DURATION"))
-                                .child(
-                                    h_flex()
-                                        .gap(px(8.))
-                                        .child(proto_btn("PERMANENT", dc_perm, dc_perm, move |_, _, _| {
+                            v_flex().gap(px(4.)).child(field_label("DURATION")).child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .child(proto_btn(
+                                        "PERMANENT",
+                                        dc_perm,
+                                        dc_perm,
+                                        move |_, _, _| {
                                             *dur_perm.lock().unwrap() = RuleDuration::Permanent;
-                                        }))
-                                        .child(proto_btn("SESSION", dc_sess, dc_sess, move |_, _, _| {
+                                        },
+                                    ))
+                                    .child(proto_btn(
+                                        "SESSION",
+                                        dc_sess,
+                                        dc_sess,
+                                        move |_, _, _| {
                                             *dur_sess.lock().unwrap() = RuleDuration::UntilRestart;
-                                        })),
-                                ),
-                        )
-                        ,
+                                        },
+                                    )),
+                            ),
+                        ),
                 )
                 .on_ok(move |_, _, cx| {
                     let process_raw = proc_i.read(cx).value().to_string();
-                    let process_name = if process_raw.trim().is_empty() { None } else { Some(process_raw.trim().to_string()) };
+                    let process_name = if process_raw.trim().is_empty() {
+                        None
+                    } else {
+                        Some(process_raw.trim().to_string())
+                    };
                     let dest_val = dest_i.read(cx).value().trim().to_string();
-                    let action   = action_ok.lock().unwrap().clone();
+                    let action = action_ok.lock().unwrap().clone();
                     let duration = dur_ok.lock().unwrap().clone();
                     let dest_type = dtype_ok.lock().unwrap().clone();
                     let destination = match dest_type.as_str() {
-                        "cidr"     => DestinationMatcher::Cidr(dest_val),
-                        "domain"   => DestinationMatcher::DomainExact(dest_val),
+                        "cidr" => DestinationMatcher::Cidr(dest_val),
+                        "domain" => DestinationMatcher::DomainExact(dest_val),
                         // Canonical wildcard storage is the apex without the `*.`
                         // prefix (the display layer in `ds::dest_text` prepends it).
                         // The matcher in `policy-engine` is lenient and accepts
@@ -466,8 +545,8 @@ impl SettingsApp {
                         "wildcard" => DestinationMatcher::DomainWildcard(
                             dest_val.strip_prefix("*.").unwrap_or(&dest_val).to_string(),
                         ),
-                        "any"      => DestinationMatcher::Any,
-                        _          => DestinationMatcher::IpExact(dest_val),
+                        "any" => DestinationMatcher::Any,
+                        _ => DestinationMatcher::IpExact(dest_val),
                     };
                     let route_raw = route_i.read(cx).value().trim().to_string();
                     // For ROUTE action: parse the target from the input field and build the
@@ -475,22 +554,35 @@ impl SettingsApp {
                     let (action, route_target) = if matches!(action, RuleAction::Route { .. }) {
                         match helpers::parse_targets_csv(&route_raw).into_iter().next() {
                             Some(t) => (RuleAction::Route { target: t }, None),
-                            None    => (RuleAction::Allow, None), // fallback if input empty
+                            None => (RuleAction::Allow, None), // fallback if input empty
                         }
                     } else {
                         (action, None)
                     };
-                    let id = eid.clone().unwrap_or_else(|| format!("ui-{}", crate::daemon::unix_now()));
-                    let rule = Rule { id, enabled: true, action, duration, process_name, destination, route_target };
-                    let to_send  = rule.clone();
-                    let sock_c   = sock.clone();
+                    let id = eid
+                        .clone()
+                        .unwrap_or_else(|| format!("ui-{}", crate::daemon::unix_now()));
+                    let rule = Rule {
+                        id,
+                        enabled: true,
+                        action,
+                        duration,
+                        process_name,
+                        destination,
+                        route_target,
+                    };
+                    let to_send = rule.clone();
+                    let sock_c = sock.clone();
                     let state_wc = state_w.clone();
-                    let editing  = eid.is_some();
+                    let editing = eid.is_some();
                     cx.spawn(async move |cx| {
                         let res = cx
                             .background_executor()
                             .spawn(async move {
-                                crate::daemon::send_request(&sock_c, &ControlRequest::AddRule(to_send))
+                                crate::daemon::send_request(
+                                    &sock_c,
+                                    &ControlRequest::AddRule(to_send),
+                                )
                             })
                             .await;
                         if let Some(st) = state_wc.upgrade() {
@@ -498,7 +590,9 @@ impl SettingsApp {
                                 match res {
                                     Ok(ControlResponse::Ok) => {
                                         if editing {
-                                            if let Some(r) = s.rules.iter_mut().find(|r| r.id == rule.id) {
+                                            if let Some(r) =
+                                                s.rules.iter_mut().find(|r| r.id == rule.id)
+                                            {
                                                 *r = rule;
                                             }
                                             s.status = Some("Rule updated.".into());
@@ -576,13 +670,30 @@ impl SettingsApp {
 
         let is_edit = existing.is_some();
         let existing_id = existing.as_ref().map(|e| e.id.clone());
-        let init_name = existing.as_ref().map(|e| e.name.as_str()).unwrap_or("New Egress").to_string();
-        let init_color = existing.as_ref().map(|e| e.color.as_str()).unwrap_or("#3b82f6").to_string();
+        let init_name = existing
+            .as_ref()
+            .map(|e| e.name.as_str())
+            .unwrap_or("New Egress")
+            .to_string();
+        let init_color = existing
+            .as_ref()
+            .map(|e| e.color.as_str())
+            .unwrap_or("#3b82f6")
+            .to_string();
         let init_targets = existing
             .as_ref()
-            .map(|e| e.targets.iter().map(|t| helpers::route_summary(t)).collect::<Vec<_>>().join(", "))
+            .map(|e| {
+                e.targets
+                    .iter()
+                    .map(|t| helpers::route_summary(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .unwrap_or_else(|| "dev:eth0".to_string());
-        let init_dns = existing.as_ref().map(|e| e.dns_servers.join(", ")).unwrap_or_default();
+        let init_dns = existing
+            .as_ref()
+            .map(|e| e.dns_servers.join(", "))
+            .unwrap_or_default();
 
         let name_input = cx.new(|cx| {
             let mut s = InputState::new(window, cx);
@@ -605,23 +716,23 @@ impl SettingsApp {
             s
         });
 
-        let name_c    = name_input.clone();
-        let color_c   = color_input.clone();
+        let name_c = name_input.clone();
+        let color_c = color_input.clone();
         let targets_c = targets_input.clone();
-        let dns_c     = dns_input.clone();
+        let dns_c = dns_input.clone();
 
-        let hdr_icon  = if is_edit { "✏" } else { "⊕" };
+        let hdr_icon = if is_edit { "✏" } else { "⊕" };
         let hdr_title = if is_edit { "EDIT EGRESS" } else { "ADD EGRESS" };
-        let ok_label  = if is_edit { "Save" } else { "Add Egress" };
+        let ok_label = if is_edit { "Save" } else { "Add Egress" };
 
         window.open_dialog(cx, move |dialog, _, _cx| {
-            let name_i    = name_c.clone();
-            let color_i   = color_c.clone();
+            let name_i = name_c.clone();
+            let color_i = color_c.clone();
             let targets_i = targets_c.clone();
-            let dns_i     = dns_c.clone();
-            let state_w   = state_weak.clone();
-            let sock      = socket_path.clone();
-            let eid       = existing_id.clone();
+            let dns_i = dns_c.clone();
+            let state_w = state_weak.clone();
+            let sock = socket_path.clone();
+            let eid = existing_id.clone();
 
             dialog
                 .p(px(0.))
@@ -633,9 +744,7 @@ impl SettingsApp {
                         .ok_text(ok_label)
                         .cancel_text("Cancel"),
                 )
-                .footer(|ok, cancel, w, cx| {
-                    vec![modal_footer(cancel(w, cx), ok(w, cx))]
-                })
+                .footer(|ok, cancel, w, cx| vec![modal_footer(cancel(w, cx), ok(w, cx))])
                 .child(
                     v_flex()
                         .px(px(16.))
@@ -662,31 +771,43 @@ impl SettingsApp {
                         .child(
                             v_flex()
                                 .gap(px(4.))
-                                .child(field_label("DNS SERVERS  (comma-separated, empty = system)"))
+                                .child(field_label(
+                                    "DNS SERVERS  (comma-separated, empty = system)",
+                                ))
                                 .child(Input::new(&dns_c)),
                         ),
                 )
                 .on_ok(move |_, _, cx| {
-                    let name      = name_i.read(cx).value().to_string();
-                    let color     = color_i.read(cx).value().to_string();
+                    let name = name_i.read(cx).value().to_string();
+                    let color = color_i.read(cx).value().to_string();
                     let targets_s = targets_i.read(cx).value().to_string();
-                    let dns_s     = dns_i.read(cx).value().to_string();
-                    let targets   = helpers::parse_targets_csv(&targets_s);
-                    let dns       = helpers::parse_dns_csv(&dns_s);
-                    let id        = eid.clone().unwrap_or_else(|| format!("eg-{}", crate::daemon::unix_now()));
+                    let dns_s = dns_i.read(cx).value().to_string();
+                    let targets = helpers::parse_targets_csv(&targets_s);
+                    let dns = helpers::parse_dns_csv(&dns_s);
+                    let id = eid
+                        .clone()
+                        .unwrap_or_else(|| format!("eg-{}", crate::daemon::unix_now()));
                     let egress = Egress {
                         id,
-                        name:    if name.trim().is_empty()  { "New Egress".into() } else { name },
-                        color:   if color.trim().is_empty() { "#3b82f6".into()    } else { color },
+                        name: if name.trim().is_empty() {
+                            "New Egress".into()
+                        } else {
+                            name
+                        },
+                        color: if color.trim().is_empty() {
+                            "#3b82f6".into()
+                        } else {
+                            color
+                        },
                         targets,
                         dns_servers: dns,
                         is_system_default: false,
                         is_available: false,
                     };
-                    let to_send  = egress.clone();
-                    let sock_c   = sock.clone();
+                    let to_send = egress.clone();
+                    let sock_c = sock.clone();
                     let state_wc = state_w.clone();
-                    let editing  = eid.is_some();
+                    let editing = eid.is_some();
                     cx.spawn(async move |cx| {
                         let res = cx
                             .background_executor()
@@ -702,7 +823,9 @@ impl SettingsApp {
                                 match res {
                                     Ok(ControlResponse::Ok) => {
                                         if editing {
-                                            if let Some(e) = s.egresses.iter_mut().find(|e| e.id == egress.id) {
+                                            if let Some(e) =
+                                                s.egresses.iter_mut().find(|e| e.id == egress.id)
+                                            {
                                                 *e = egress;
                                             }
                                             s.status = Some("Egress updated.".into());
@@ -744,10 +867,25 @@ impl SettingsApp {
 
         let is_edit = existing.is_some();
         let existing_id = existing.as_ref().map(|p| p.id.clone());
-        let init_name = existing.as_ref().map(|p| p.name.as_str()).unwrap_or("New Proxy").to_string();
-        let init_host = existing.as_ref().map(|p| p.host.as_str()).unwrap_or("127.0.0.1").to_string();
-        let init_port = existing.as_ref().map(|p| p.port).unwrap_or(1080).to_string();
-        let init_proto = existing.as_ref().map(|p| p.protocol.clone()).unwrap_or(ProxyProtocol::Socks5);
+        let init_name = existing
+            .as_ref()
+            .map(|p| p.name.as_str())
+            .unwrap_or("New Proxy")
+            .to_string();
+        let init_host = existing
+            .as_ref()
+            .map(|p| p.host.as_str())
+            .unwrap_or("127.0.0.1")
+            .to_string();
+        let init_port = existing
+            .as_ref()
+            .map(|p| p.port)
+            .unwrap_or(1080)
+            .to_string();
+        let init_proto = existing
+            .as_ref()
+            .map(|p| p.protocol.clone())
+            .unwrap_or(ProxyProtocol::Socks5);
         let init_auth = existing.map(|p| p.auth.clone()).unwrap_or(ProxyAuth::None);
 
         // Create input entities before the Fn dialog closure.
@@ -775,30 +913,30 @@ impl SettingsApp {
         let port_input_c = port_input.clone();
         let proto_c = selected_proto.clone();
 
-        let hdr_icon  = if is_edit { "✏" } else { "⊕" };
+        let hdr_icon = if is_edit { "✏" } else { "⊕" };
         let hdr_title = if is_edit { "EDIT PROXY" } else { "ADD PROXY" };
-        let ok_label  = if is_edit { "Save" } else { "Add Proxy" };
+        let ok_label = if is_edit { "Save" } else { "Add Proxy" };
 
         window.open_dialog(cx, move |dialog, _, _cx| {
             let cur_proto = proto_c.lock().unwrap().clone();
 
             let proto_socks5 = selected_proto.clone();
-            let proto_http   = selected_proto.clone();
-            let proto_ss     = selected_proto.clone();
+            let proto_http = selected_proto.clone();
+            let proto_ss = selected_proto.clone();
             let proto_for_ok = proto_c.clone();
 
             let (sc, hc, sc2) = match cur_proto {
-                ProxyProtocol::Socks5      => (colors::green(),   colors::muted(),   colors::muted()),
-                ProxyProtocol::Http        => (colors::muted(),   colors::primary(), colors::muted()),
-                ProxyProtocol::Shadowsocks => (colors::muted(),   colors::muted(),   colors::teal()),
+                ProxyProtocol::Socks5 => (colors::green(), colors::muted(), colors::muted()),
+                ProxyProtocol::Http => (colors::muted(), colors::primary(), colors::muted()),
+                ProxyProtocol::Shadowsocks => (colors::muted(), colors::muted(), colors::teal()),
             };
 
-            let name_i   = name_input_c.clone();
-            let host_i   = host_input_c.clone();
-            let port_i   = port_input_c.clone();
-            let state_w  = state_weak.clone();
-            let sock     = socket_path.clone();
-            let eid      = existing_id.clone();
+            let name_i = name_input_c.clone();
+            let host_i = host_input_c.clone();
+            let port_i = port_input_c.clone();
+            let state_w = state_weak.clone();
+            let sock = socket_path.clone();
+            let eid = existing_id.clone();
             let auth_val = init_auth.clone();
 
             dialog
@@ -811,9 +949,7 @@ impl SettingsApp {
                         .ok_text(ok_label)
                         .cancel_text("Cancel"),
                 )
-                .footer(|ok, cancel, w, cx| {
-                    vec![modal_footer(cancel(w, cx), ok(w, cx))]
-                })
+                .footer(|ok, cancel, w, cx| vec![modal_footer(cancel(w, cx), ok(w, cx))])
                 .child(
                     v_flex()
                         .px(px(16.))
@@ -826,22 +962,19 @@ impl SettingsApp {
                                 .child(Input::new(&name_input_c)),
                         )
                         .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(field_label("PROTOCOL"))
-                                .child(
-                                    h_flex()
-                                        .gap(px(8.))
-                                        .child(proto_btn("SOCKS5", sc, sc, move |_, _, _| {
-                                            *proto_socks5.lock().unwrap() = ProxyProtocol::Socks5;
-                                        }))
-                                        .child(proto_btn("HTTP", hc, hc, move |_, _, _| {
-                                            *proto_http.lock().unwrap() = ProxyProtocol::Http;
-                                        }))
-                                        .child(proto_btn("SS", sc2, sc2, move |_, _, _| {
-                                            *proto_ss.lock().unwrap() = ProxyProtocol::Shadowsocks;
-                                        })),
-                                ),
+                            v_flex().gap(px(4.)).child(field_label("PROTOCOL")).child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .child(proto_btn("SOCKS5", sc, sc, move |_, _, _| {
+                                        *proto_socks5.lock().unwrap() = ProxyProtocol::Socks5;
+                                    }))
+                                    .child(proto_btn("HTTP", hc, hc, move |_, _, _| {
+                                        *proto_http.lock().unwrap() = ProxyProtocol::Http;
+                                    }))
+                                    .child(proto_btn("SS", sc2, sc2, move |_, _, _| {
+                                        *proto_ss.lock().unwrap() = ProxyProtocol::Shadowsocks;
+                                    })),
+                            ),
                         )
                         .child(
                             h_flex()
@@ -863,25 +996,35 @@ impl SettingsApp {
                         ),
                 )
                 .on_ok(move |_, _, cx| {
-                    let name     = name_i.read(cx).value().to_string();
-                    let host     = host_i.read(cx).value().to_string();
+                    let name = name_i.read(cx).value().to_string();
+                    let host = host_i.read(cx).value().to_string();
                     let port_str = port_i.read(cx).value().to_string();
                     let port: u16 = port_str.trim().parse().unwrap_or(1080);
-                    let proto    = proto_for_ok.lock().unwrap().clone();
-                    let id       = eid.clone().unwrap_or_else(|| format!("px-{}", crate::daemon::unix_now()));
+                    let proto = proto_for_ok.lock().unwrap().clone();
+                    let id = eid
+                        .clone()
+                        .unwrap_or_else(|| format!("px-{}", crate::daemon::unix_now()));
                     let proxy = ProxyConfig {
                         id,
-                        name: if name.trim().is_empty() { "New Proxy".into() } else { name },
+                        name: if name.trim().is_empty() {
+                            "New Proxy".into()
+                        } else {
+                            name
+                        },
                         protocol: proto,
-                        host: if host.trim().is_empty() { "127.0.0.1".into() } else { host },
+                        host: if host.trim().is_empty() {
+                            "127.0.0.1".into()
+                        } else {
+                            host
+                        },
                         port,
                         auth: auth_val.clone(),
                         enabled: true,
                     };
-                    let to_send  = proxy.clone();
-                    let sock_c   = sock.clone();
+                    let to_send = proxy.clone();
+                    let sock_c = sock.clone();
                     let state_wc = state_w.clone();
-                    let editing  = eid.is_some();
+                    let editing = eid.is_some();
                     cx.spawn(async move |cx| {
                         let res = cx
                             .background_executor()
@@ -897,7 +1040,9 @@ impl SettingsApp {
                                 match res {
                                     Ok(ControlResponse::Ok) => {
                                         if editing {
-                                            if let Some(p) = s.proxies.iter_mut().find(|p| p.id == proxy.id) {
+                                            if let Some(p) =
+                                                s.proxies.iter_mut().find(|p| p.id == proxy.id)
+                                            {
                                                 *p = proxy;
                                             }
                                             s.status = Some("Proxy updated.".into());
@@ -1141,5 +1286,3 @@ impl Render for SettingsApp {
             .into_any_element()
     }
 }
-
-

@@ -339,6 +339,17 @@ fn run_settings() {
                     size: size(px(960.), px(720.)),
                 })),
                 titlebar: Some(gpui_component::TitleBar::title_bar_options()),
+                // The Settings UI draws its own title bar via gpui-component's
+                // `TitleBar`, and the root view wraps everything in
+                // `window_border()` so we own the resize hit-areas too. Tell
+                // GPUI explicitly that this is a client-side-decorated window
+                // — on compositors that refuse xdg-decoration SSD (notably
+                // GNOME/Mutter) this is what makes the resize edges work.
+                window_decorations: Some(gpui::WindowDecorations::Client),
+                // Don't let the user collapse the window below the point
+                // where the table headers and tab bar still fit.
+                window_min_size: Some(size(px(640.), px(420.))),
+                is_resizable: true,
                 ..Default::default()
             },
             |window, cx| {
