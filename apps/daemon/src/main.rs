@@ -572,10 +572,64 @@ fn open_routed_tcp(host: String, port: u16, target: RouteTarget, db_path: String
     Ok(listen_addr)
 }
 
+/// Runtime knobs that `handle_client` needs to actually carry out side-effecting
+/// requests like `SetNfqueueEnabled` (which rewrites nftables) and `Unlock`.
+///
+/// Kept as a small struct rather than free-floating parameters so the
+/// `handle_client` signature stays readable as more knobs land.
+#[derive(Clone)]
+struct DaemonRuntime {
+    /// nftables bootstrap, `None` only when nft setup failed at boot (in which
+    /// case there's nothing to toggle).
+    bootstrap: Option<Arc<dyn NftablesBootstrap>>,
+    /// Queue number to use when interception is *enabled*. When `None`, the
+    /// daemon was started without `LOGIGUARD_NFQUEUE` and the tray toggle
+    /// can't bring interception up on its own — there is no userspace
+    /// `NfqueueProcessor` running to drain the queue, so installing
+    /// `queue num N` rules would just drop every packet.
+    nfqueue_num: Option<u16>,
+    route_mark_base: u32,
+}
+
+/// Decision returned by [`plan_nfqueue_toggle`]. Splitting the gate logic from
+/// the side-effecting call keeps the toggle behavior unit-testable.
+#[derive(Debug, PartialEq, Eq)]
+enum NfqueueToggleAction {
+    /// Re-apply nftables with `queue` (`Some(n)` adds `queue num n` rules,
+    /// `None` removes them), then commit the cached flag.
+    Apply { queue: Option<u16> },
+    /// Reject the toggle with this error message; the cached flag stays where
+    /// it was so `Health` keeps reporting the actual kernel state.
+    Reject(String),
+}
+
+/// Decide what to do for a `SetNfqueueEnabled { enabled }` request given the
+/// daemon's current runtime config. Pure function so the table of (bootstrap
+/// present, queue configured, enabled requested) is exhaustive and testable.
+fn plan_nfqueue_toggle(
+    bootstrap_present: bool,
+    nfqueue_num: Option<u16>,
+    enabled: bool,
+) -> NfqueueToggleAction {
+    if !bootstrap_present {
+        return NfqueueToggleAction::Reject(
+            "cannot toggle interception: nftables not active (daemon failed to install rules at boot — re-check root permissions and `nft list ruleset`)".to_string(),
+        );
+    }
+    if enabled && nfqueue_num.is_none() {
+        return NfqueueToggleAction::Reject(
+            "cannot enable interception: daemon was started without LOGIGUARD_NFQUEUE — without a queue number there is no NfqueueProcessor draining packets, so adding `queue num N` rules would drop every flow. Set LOGIGUARD_NFQUEUE (e.g. 0) in the systemd unit and restart logiguardd.".to_string(),
+        );
+    }
+    NfqueueToggleAction::Apply {
+        queue: if enabled { nfqueue_num } else { None },
+    }
+}
+
 fn handle_client(
     stream: UnixStream,
     service: &Arc<Mutex<ControlService<SqliteRuleRepository>>>,
-    bootstrap: Option<&dyn NftablesBootstrap>,
+    runtime: &DaemonRuntime,
     notification_tx: &broadcast::Sender<PushNotification>,
     db_path: &str,
 ) -> Result<(), String> {
@@ -596,7 +650,7 @@ fn handle_client(
             ControlResponse::Error(
                 "unlock rejected: must be run from a physical console (not SSH or pty)".to_string(),
             )
-        } else if let Some(bs) = bootstrap {
+        } else if let Some(bs) = runtime.bootstrap.as_deref() {
             match bs.teardown() {
                 Ok(()) => ControlResponse::Unlocked,
                 Err(e) => ControlResponse::Error(format!("nftables teardown failed: {e}")),
@@ -605,10 +659,34 @@ fn handle_client(
             // No nftables active — nothing to tear down.
             ControlResponse::Unlocked
         }
-    } else if matches!(request, ControlRequest::SetNfqueueEnabled { .. }) {
-        // Update NFQUEUE state in service
-        let mut svc = service.lock().map_err(|_| "service lock poisoned".to_string())?;
-        svc.handle(request)
+    } else if let ControlRequest::SetNfqueueEnabled { enabled } = request {
+        // Previously this just flipped a status bit in the service and never
+        // touched the kernel — which is exactly why the tray toggle felt
+        // "unreliable" (it was a no-op the user couldn't observe). Now the
+        // handler actually re-applies the nftables protection chains with
+        // `queue num N` rules added or omitted, and only on success does it
+        // record the flag in the service so `Health` reflects truth.
+        match plan_nfqueue_toggle(runtime.bootstrap.is_some(), runtime.nfqueue_num, enabled) {
+            NfqueueToggleAction::Reject(msg) => ControlResponse::Error(msg),
+            NfqueueToggleAction::Apply { queue } => {
+                // `bootstrap.is_some()` already checked by the planner.
+                let bs = runtime.bootstrap.as_deref().expect("bootstrap present");
+                match bs.setup(queue, runtime.route_mark_base) {
+                    Ok(()) => {
+                        // Only commit the flag after nftables actually applied,
+                        // so a kernel failure can't leave the UI claiming
+                        // interception is on when no rules exist.
+                        let mut svc = service
+                            .lock()
+                            .map_err(|_| "service lock poisoned".to_string())?;
+                        svc.handle(ControlRequest::SetNfqueueEnabled { enabled })
+                    }
+                    Err(e) => ControlResponse::Error(format!(
+                        "nftables update failed: {e} (interception state unchanged)"
+                    )),
+                }
+            }
+        }
     } else if let ControlRequest::OpenRoutedTcp { host, port, target } = request {
         match open_routed_tcp(host, port, target, db_path.to_string()) {
             Ok(listen_addr) => ControlResponse::RoutedTcpReady { listen_addr },
@@ -826,11 +904,18 @@ fn main() {
         None
     };
 
+    let runtime = DaemonRuntime {
+        bootstrap: bootstrap.clone(),
+        nfqueue_num,
+        route_mark_base,
+    };
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let bs_ref = bootstrap.as_deref();
-                if let Err(err) = handle_client(stream, &service, bs_ref, &notification_tx, &db_path) {
+                if let Err(err) =
+                    handle_client(stream, &service, &runtime, &notification_tx, &db_path)
+                {
                     eprintln!("request handling error: {err}");
                 }
             }
@@ -838,5 +923,69 @@ fn main() {
                 eprintln!("incoming socket error: {err}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_rejected_when_bootstrap_missing() {
+        // Daemon failed to install nftables at boot (e.g. not root). The
+        // tray toggle must return a real error rather than silently flip
+        // the flag, otherwise `Health` would lie about whether interception
+        // is on.
+        let action = plan_nfqueue_toggle(false, Some(0), true);
+        assert!(matches!(action, NfqueueToggleAction::Reject(_)));
+        let action = plan_nfqueue_toggle(false, None, false);
+        assert!(matches!(action, NfqueueToggleAction::Reject(_)));
+    }
+
+    #[test]
+    fn enable_rejected_when_no_queue_configured() {
+        // No LOGIGUARD_NFQUEUE → no NfqueueProcessor draining the queue.
+        // Adding `queue num N` rules now would drop every packet, so we
+        // refuse with an actionable error message and leave nftables alone.
+        let action = plan_nfqueue_toggle(true, None, true);
+        match action {
+            NfqueueToggleAction::Reject(msg) => {
+                assert!(
+                    msg.contains("LOGIGUARD_NFQUEUE"),
+                    "error message must point operators at the env var, got: {msg}"
+                );
+            }
+            other => panic!("expected reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disable_always_applies_with_no_queue() {
+        // Disabling interception is always safe — even with no queue
+        // configured we just re-apply nftables without `queue num` rules,
+        // which is the same as the configured-off state.
+        assert_eq!(
+            plan_nfqueue_toggle(true, None, false),
+            NfqueueToggleAction::Apply { queue: None }
+        );
+        assert_eq!(
+            plan_nfqueue_toggle(true, Some(0), false),
+            NfqueueToggleAction::Apply { queue: None }
+        );
+    }
+
+    #[test]
+    fn enable_applies_with_configured_queue() {
+        // The happy path: production systemd unit sets LOGIGUARD_NFQUEUE=0.
+        // Enabling re-applies nftables WITH `queue num 0` rules so the
+        // already-running processor starts receiving packets again.
+        assert_eq!(
+            plan_nfqueue_toggle(true, Some(0), true),
+            NfqueueToggleAction::Apply { queue: Some(0) }
+        );
+        assert_eq!(
+            plan_nfqueue_toggle(true, Some(42), true),
+            NfqueueToggleAction::Apply { queue: Some(42) }
+        );
     }
 }
