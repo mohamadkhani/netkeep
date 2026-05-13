@@ -288,6 +288,27 @@ fn run_gui(pending_id: String) {
         } else {
             DestScope::IpCidr(4) // default: exact IP (/32)
         };
+
+        // Estimate content height so the window fits its content:
+        //   header          ~ 80  (py(16)×2 + content)
+        //   flow_info       ~222  (outer py(16) + card py(16) + 5 grid rows × ~22 + 4 gaps × 12)
+        //   action_footer   ~258  (pt+pb 28 + rule_scope ~96 + divider 1 + duration 30 + egress 30 + buttons 33 + gaps 40)
+        //   status_bar      ~ 30  (py(8)×2 + text)
+        //   ─────────────────────
+        //   base (0 egress) ≈ 590
+        // Add padding for borders, DPI variance, and text metrics.
+        let has_device = item.flow.device_label.is_some();
+        let device_extra: f32 = if has_device { 24. } else { 0. };
+        let egress_rows = ((egresses.len().min(6) + 2) / 3) as f32; // ~3 chips per wrapped row
+        let estimated_height = 600. + device_extra + egress_rows * 28.;
+
+        // Cap at 90% of the primary display height.
+        let screen_h = cx
+            .primary_display()
+            .map(|d| f32::from(d.bounds().size.height))
+            .unwrap_or(1080.);
+        let win_height = estimated_height.min(screen_h * 0.90);
+
         let state: Entity<AppState> = cx.new(|_| AppState {
             item,
             now_secs: daemon::unix_now(),
@@ -303,7 +324,7 @@ fn run_gui(pending_id: String) {
             WindowOptions {
                 window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                     None,
-                    size(px(440.), px(580.)),
+                    size(px(440.), px(win_height)),
                     cx,
                 ))),
                 titlebar: Some(gpui::TitlebarOptions {

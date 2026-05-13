@@ -65,8 +65,6 @@ impl Render for DecisionApp {
 
         v_flex()
             .w_full()
-            .h_full()
-            .overflow_hidden()
             .bg(colors::surface_container())
             .border_1()
             .border_color(colors::border())
