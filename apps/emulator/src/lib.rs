@@ -178,6 +178,7 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
     match response {
         ControlResponse::ImmediateVerdict {
             action: RuleAction::Allow,
+            ..
         } => {
             let upstream = connect_upstream(&host, port, None, socket_path).map_err(|e| {
                 let _ = fail_reply(&mut stream);
@@ -187,9 +188,11 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
             relay_bidirectional(stream, upstream)
         }
         ControlResponse::ImmediateVerdict {
-            action: RuleAction::Route { target },
+            action: RuleAction::Route,
+            route_target,
+            ..
         } => {
-            let upstream = connect_upstream(&host, port, Some(&target), socket_path).map_err(|e| {
+            let upstream = connect_upstream(&host, port, route_target.as_ref(), socket_path).map_err(|e| {
                 let _ = fail_reply(&mut stream);
                 e
             })?;
@@ -242,9 +245,11 @@ fn wait_for_pending_and_continue(
             }
             ControlResponse::PendingResolved {
                 action: RuleAction::Allow,
+                ..
             }
             | ControlResponse::ImmediateVerdict {
                 action: RuleAction::Allow,
+                ..
             } => {
                 let upstream = connect_upstream(&host, port, None, socket_path).map_err(|e| {
                     let _ = fail_reply(&mut stream);
@@ -254,12 +259,16 @@ fn wait_for_pending_and_continue(
                 return relay_bidirectional(stream, upstream);
             }
             ControlResponse::PendingResolved {
-                action: RuleAction::Route { target },
+                action: RuleAction::Route,
+                route_target,
+                ..
             }
             | ControlResponse::ImmediateVerdict {
-                action: RuleAction::Route { target },
+                action: RuleAction::Route,
+                route_target,
+                ..
             } => {
-                let upstream = connect_upstream(&host, port, Some(&target), socket_path).map_err(|e| {
+                let upstream = connect_upstream(&host, port, route_target.as_ref(), socket_path).map_err(|e| {
                     let _ = fail_reply(&mut stream);
                     e
                 })?;

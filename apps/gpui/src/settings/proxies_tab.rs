@@ -56,8 +56,8 @@ impl TableDelegate for ProxiesDelegate {
         self.proxies.len()
     }
 
-    fn column(&self, col_ix: usize, _cx: &App) -> &Column {
-        &self.columns[col_ix]
+    fn column(&self, col_ix: usize, _cx: &App) -> Column {
+        self.columns[col_ix].clone()
     }
 
     fn render_td(

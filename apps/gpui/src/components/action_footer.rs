@@ -569,14 +569,14 @@ fn build_dest_matcher(flow: &FlowContext, dest_scope: &DestScope) -> Destination
 fn allow_button(
     pid: String,
     make_permanent: bool,
-    flow: FlowContext,
+    _flow: FlowContext,
     selected_egress: Egress,
     dest_matcher: DestinationMatcher,
     rule_process_name: Option<String>,
     disabled: bool,
 ) -> gpui::AnyElement {
     let is_default = selected_egress.is_system_default;
-    let route_target = selected_egress.targets.first().cloned();
+    let egress_id = if is_default { None } else { Some(selected_egress.id.clone()) };
 
     div()
         .id("allow-btn")
@@ -602,24 +602,15 @@ fn allow_button(
                 move |_, _, cx| {
                     let pid = pid.clone();
                     let mk_perm = make_permanent;
-                    let rt = route_target.clone();
+                    let eid = egress_id.clone();
                     let dest = dest_matcher.clone();
                     let proc = rule_process_name.clone();
                     cx.spawn(async move |cx| {
-                        let (resolve_action, rule_action, rule_target) = if rt.is_some() {
-                            let target = rt.clone().unwrap();
-                            (
-                                RuleAction::Route { target: target.clone() },
-                                RuleAction::Route { target: target.clone() },
-                                Some(target),
-                            )
-                        } else {
-                            (RuleAction::Allow, RuleAction::Allow, None)
-                        };
+                        let action = if eid.is_some() { RuleAction::Route } else { RuleAction::Allow };
                         let rule = Rule {
                             id: format!("ui-{}", daemon::unix_now()),
                             enabled: true,
-                            action: rule_action,
+                            action: action.clone(),
                             duration: if mk_perm {
                                 RuleDuration::Permanent
                             } else {
@@ -627,7 +618,7 @@ fn allow_button(
                             },
                             process_name: proc,
                             destination: dest,
-                            route_target: rule_target,
+                            egress_id: eid,
                         };
                         let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
                             .unwrap_or_else(|_| SOCKET_PATH.to_string());
@@ -638,7 +629,7 @@ fn allow_button(
                                     &socket,
                                     &ControlRequest::ResolvePendingWithRule {
                                         pending_id: pid,
-                                        action: resolve_action,
+                                        action,
                                         rule,
                                     },
                                 )
@@ -712,7 +703,7 @@ fn deny_button(
                             },
                             process_name: proc,
                             destination: dest,
-                            route_target: None,
+                            egress_id: None,
                         };
                         let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
                             .unwrap_or_else(|_| SOCKET_PATH.to_string());

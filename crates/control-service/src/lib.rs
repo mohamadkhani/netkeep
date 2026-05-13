@@ -1,5 +1,5 @@
 use control_api::{validate_request, ControlRequest, ControlResponse, PushNotification};
-use core_types::{FlowContext, FlowEvent, FlowState, RouteTarget, RuleAction};
+use core_types::{Egress, FlowContext, FlowEvent, FlowState, RouteTarget, RuleAction};
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
 use policy_engine::resolve_action;
@@ -169,6 +169,15 @@ impl<R: Repository> ControlService<R> {
         self.notification_tx.clone()
     }
 
+    /// Resolve the first available `RouteTarget` for a Route action.
+    /// Checks interface operstate for Device/Tun targets; Proxy targets are
+    /// considered available unless the ProxyRepository marks them disabled.
+    fn resolve_route_target(&self, egress_id: &Option<String>) -> Option<RouteTarget> {
+        let id = egress_id.as_deref()?;
+        let egress = self.repo.get_egress(id)?;
+        first_available_target(&egress, &self.repo)
+    }
+
     fn next_event_id(&mut self) -> String {
         self.event_counter += 1;
         format!("evt-{}", self.event_counter)
@@ -228,15 +237,21 @@ impl<R: Repository> ControlService<R> {
                         flow.destination_ip
                     );
                     match resolved.action {
-                        RuleAction::Allow | RuleAction::Deny | RuleAction::Route { .. } => {
+                        RuleAction::Allow | RuleAction::Deny | RuleAction::Route => {
+                            let route_target = if resolved.action == RuleAction::Route {
+                                self.resolve_route_target(&resolved.egress_id)
+                            } else {
+                                None
+                            };
                             let state = match &resolved.action {
-                                RuleAction::Allow | RuleAction::Route { .. } => FlowState::Allowed,
+                                RuleAction::Allow | RuleAction::Route => FlowState::Allowed,
                                 RuleAction::Deny => FlowState::Denied,
                                 RuleAction::Ask => unreachable!(),
                             };
                             self.record_event(&flow, state, now_secs);
                             return ControlResponse::ImmediateVerdict {
                                 action: resolved.action,
+                                route_target,
                             };
                         }
                         RuleAction::Ask => {}
@@ -250,7 +265,7 @@ impl<R: Repository> ControlService<R> {
                             FlowState::Denied
                         };
                         self.record_event(&flow, state, now_secs);
-                        ControlResponse::ImmediateVerdict { action }
+                        ControlResponse::ImmediateVerdict { action, route_target: None }
                     }
                     DecisionOutcome::Pending(p) => {
                         self.record_event(&flow, FlowState::Pending, now_secs);
@@ -269,7 +284,7 @@ impl<R: Repository> ControlService<R> {
             }
             ControlRequest::AwaitPendingDecision { pending_id } => {
                 if let Some(action) = self.decision_engine.take_resolved(&pending_id) {
-                    ControlResponse::PendingResolved { action }
+                    ControlResponse::PendingResolved { action, route_target: None }
                 } else if self.decision_engine.is_pending(&pending_id) {
                     ControlResponse::PendingStillWaiting { pending_id }
                 } else {
@@ -279,11 +294,17 @@ impl<R: Repository> ControlService<R> {
             ControlRequest::ResolvePending { pending_id, action } => {
                 if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action) {
                     self.repo.delete_pending(&pending_id);
+                    let route_target = if chosen == RuleAction::Route {
+                        // No rule context here — best-effort: no target
+                        None
+                    } else {
+                        None
+                    };
                     let _ = self.notification_tx.send(PushNotification::PendingResolved {
                         pending_id: pending_id.clone(),
                         action: chosen.clone(),
                     });
-                    ControlResponse::PendingResolved { action: chosen }
+                    ControlResponse::PendingResolved { action: chosen, route_target }
                 } else {
                     ControlResponse::Error("pending decision not found".to_string())
                 }
@@ -292,15 +313,21 @@ impl<R: Repository> ControlService<R> {
                 // Install the rule first, then sweep: any other pending decisions
                 // already in the queue that the new rule covers are auto-resolved
                 // without showing additional dialogs.
+                let egress_id = rule.egress_id.clone();
                 self.repo.upsert_rule(rule);
                 self.sweep_pending();
                 if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action) {
                     self.repo.delete_pending(&pending_id);
+                    let route_target = if chosen == RuleAction::Route {
+                        self.resolve_route_target(&egress_id)
+                    } else {
+                        None
+                    };
                     let _ = self.notification_tx.send(PushNotification::PendingResolved {
                         pending_id: pending_id.clone(),
                         action: chosen.clone(),
                     });
-                    ControlResponse::PendingResolved { action: chosen }
+                    ControlResponse::PendingResolved { action: chosen, route_target }
                 } else {
                     ControlResponse::Error("pending decision not found".to_string())
                 }
@@ -399,6 +426,30 @@ impl<R: Repository> ControlService<R> {
     }
 }
 
+/// Walk an egress's target list and return the first one that is currently
+/// available. For Device/Tun targets availability is checked via
+/// `/sys/class/net/<name>/operstate`; Proxy targets are available when the
+/// `ProxyRepository` says `enabled == true`.
+fn first_available_target<R: state_store::ProxyRepository>(egress: &Egress, repo: &R) -> Option<RouteTarget> {
+    for target in &egress.targets {
+        let available = match target {
+            RouteTarget::Tun(name) | RouteTarget::Device(name) => {
+                let state = std::fs::read_to_string(format!("/sys/class/net/{name}/operstate"))
+                    .unwrap_or_default();
+                let s = state.trim();
+                s == "up" || s == "unknown"
+            }
+            RouteTarget::Proxy(id) => {
+                repo.get_proxy(id).map(|p| p.enabled).unwrap_or(false)
+            }
+        };
+        if available {
+            return Some(target.clone());
+        }
+    }
+    None
+}
+
 /// Newtype wrapper that lets a shared `ControlService` be used as a `FlowRegistrar`
 /// across threads (e.g., handed to the nfqueue processor thread).
 pub struct SharedService<R: Repository>(
@@ -427,14 +478,19 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                 flow.destination_ip
             );
             match resolved.action {
-                RuleAction::Allow | RuleAction::Deny | RuleAction::Route { .. } => {
+                RuleAction::Allow | RuleAction::Deny | RuleAction::Route => {
+                    let route_target = if resolved.action == RuleAction::Route {
+                        self.resolve_route_target(&resolved.egress_id)
+                    } else {
+                        None
+                    };
                     let state = match &resolved.action {
-                        RuleAction::Allow | RuleAction::Route { .. } => FlowState::Allowed,
+                        RuleAction::Allow | RuleAction::Route => FlowState::Allowed,
                         RuleAction::Deny => FlowState::Denied,
                         RuleAction::Ask => unreachable!(),
                     };
                     self.record_event(&flow, state, now_secs);
-                    return FlowDecision::Immediate(resolved.action);
+                    return FlowDecision::Immediate(resolved.action, route_target);
                 }
                 RuleAction::Ask => {}
             }
@@ -442,11 +498,11 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
         match self.decision_engine.register_unknown_flow(flow.clone(), now_secs) {
             DecisionOutcome::Immediate(action) => {
                 let state = match &action {
-                    RuleAction::Allow | RuleAction::Route { .. } => FlowState::Allowed,
+                    RuleAction::Allow | RuleAction::Route => FlowState::Allowed,
                     RuleAction::Deny | RuleAction::Ask => FlowState::Denied,
                 };
                 self.record_event(&flow, state, now_secs);
-                FlowDecision::Immediate(action)
+                FlowDecision::Immediate(action, None)
             }
             DecisionOutcome::Pending(p) => {
                 self.record_event(&flow, FlowState::Pending, now_secs);
@@ -481,7 +537,7 @@ mod tests {
             duration: RuleDuration::UntilRestart,
             process_name: None,
             destination: DestinationMatcher::DomainExact("example.com".to_string()),
-            route_target: None,
+            egress_id: None,
         }
     }
 
@@ -540,7 +596,7 @@ mod tests {
             pending_id,
             action: RuleAction::Deny,
         });
-        assert_eq!(resolved, ControlResponse::PendingResolved { action: RuleAction::Deny });
+        assert_eq!(resolved, ControlResponse::PendingResolved { action: RuleAction::Deny, route_target: None });
     }
 
     #[test]
@@ -572,7 +628,7 @@ mod tests {
         let resolved = service.handle(ControlRequest::AwaitPendingDecision {
             pending_id: pending_id.clone(),
         });
-        assert_eq!(resolved, ControlResponse::PendingResolved { action: RuleAction::Allow });
+        assert_eq!(resolved, ControlResponse::PendingResolved { action: RuleAction::Allow, route_target: None });
     }
 
     #[test]
@@ -586,7 +642,8 @@ mod tests {
         assert_eq!(
             out,
             ControlResponse::ImmediateVerdict {
-                action: RuleAction::Allow
+                action: RuleAction::Allow,
+                route_target: None,
             }
         );
     }

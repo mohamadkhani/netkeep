@@ -108,13 +108,12 @@ Shared data models, no dependencies on other crates.
 - `FlowContext` — network flow metadata (process, IPs, domain, protocol, direction, port)
 - `PendingDecision` — user decision queue item
 - `FlowEvent` — audit log entry
-- `RuleAction` — {Allow, Deny, Ask, Route{target}}
-- `RouteTarget` — {Tun(name), Device(name), Proxy(id)}
+- `RuleAction` — {Allow, Deny, Ask, Route}
+- `RouteTarget` — {Tun(name), Device(name), Proxy(id)} — concrete routing target resolved from an Egress at enforcement time
 - `ProxyConfig` — proxy endpoint (SOCKS5/HTTP/Shadowsocks) with host, port, auth
 - `ProxyProtocol` — {Socks5, Http, Shadowsocks}
 - `ProxyAuth` — {None, Basic{username, password}, Shadowsocks{method, password}}
-- `EgressTarget` — target + priority + enabled flag
-- `Egress` — named route destination with prioritized targets, availability, and optional `dns_servers`
+- `Egress` — named route entity with an ordered list of `RouteTarget`s; the first available target is used at enforcement time. Bound to a `Rule` via `Rule.egress_id`.
 - `RuleDuration` — {UntilRestart, Permanent}
 - `DestinationMatcher` — {IpExact, Cidr, DomainExact, DomainWildcard}
 - `TransportProtocol` — {Tcp, Udp, Quic, Other}
@@ -128,7 +127,7 @@ Rule matching and precedence logic.
 **Key Functions:**
 - `resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule>` — pick best matching enabled rule
 - Specificity ranking: process + exact IP > process + wildcard > exact IP > wildcard > global
-- Action precedence: Deny > Allow > Ask (`Allow` and `Route { .. }` share action rank **2**). If two rules tie on both specificity and action rank, **greater** `rule.id` wins.
+- Action precedence: Deny > Allow > Ask (`Allow` and `Route` share action rank **2**). If two rules tie on both specificity and action rank, **greater** `rule.id` wins.
 - Tie-break: when specificity **and** action rank are equal, lexicographically greater `rule.id` wins (deterministic; avoids ambiguous SQLite row order)
 - Wildcard matching: `*.example.com` matches subdomains, not apex
 
@@ -219,7 +218,8 @@ SQLite-backed persistence.
 - `EgressRepository` — CRUD egresses, targets, and per-egress DNS servers
 
 **Schema:**
-- `rules` table — id, enabled, action, duration, process_name, destination, created_at, updated_at
+
+- `rules` table — id, enabled, action, duration, process_name, destination, egress_id, created_at, updated_at
 - `flow_events` table — id, process_name, device_label, destination_ip, destination_domain, protocol, state, timestamp_secs
 - `pending_decisions` table — id, flow_id, created_at, deadline_at, default_action
 - `egresses` table — id, name, color, is_system_default
@@ -263,9 +263,9 @@ RuleList(Vec<Rule>)
 PendingList(Vec<PendingDecision>)
 FlowList(Vec<FlowEvent>)
 PendingCreated { pending_id, created_at, deadline_at, protocol }
-ImmediateVerdict { action }
+ImmediateVerdict { action, route_target: Option<RouteTarget> }
 PendingStillWaiting { pending_id }
-PendingResolved { action }
+PendingResolved { action, route_target: Option<RouteTarget> }
 Health { ready, fail_close_active, timeout_secs, ... }
 Unlocked
 RoutedTcpReady { listen_addr }
@@ -402,6 +402,10 @@ Planned (Phase 2 onward):
     - Routing mark restored before routing decision via conntrack
     - Configurable `ROUTE_MARK_BASE` (default: 20000) via `LOGIGUARD_ROUTE_MARK_BASE` env var
 12. **Single-decision window gating in monitor mode:** Tray monitor allows only one decision dialog at a time and clears the open-window gate after the spawned `--pending-id` child exits (parent waits on child). Deferred pendings are retried on subsequent polls.
+
+13. **Egress-bound rules; target resolved at enforcement time:** `Rule.egress_id` references a named `Egress` entity rather than embedding a concrete `RouteTarget`. At enforcement time `control-service::first_available_target()` walks the egress's ordered target list and returns the first usable one — Device/Tun checked via `/sys/class/net/<name>/operstate`, Proxy checked via `ProxyRepository.enabled`. This enables failover (e.g. primary VPN down → backup proxy) without touching the rule. `ImmediateVerdict` and `PendingResolved` carry the resolved `route_target: Option<RouteTarget>` so the enforcer still gets a concrete target even though `RuleAction::Route` no longer embeds one.
+
+14. **Daemon does not auto-seed per-interface egresses:** On startup the daemon only ensures the `eg-default` system egress exists. It does not create one Egress per local network interface. Interface availability is checked at routing time by `first_available_target()`, not stored in the DB. The "Route via" selector in the decision dialog therefore shows only user-defined named egresses plus the default route.
 
 ## Systemd Integration
 

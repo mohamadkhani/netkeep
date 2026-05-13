@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Application, Entity, SharedString, WindowOptions, px, size,
+    App, AppContext as _, Entity, SharedString, WindowOptions, px, size,
 };
 use gpui_component::{Root, Theme, ThemeMode};
 #[cfg(target_os = "linux")]
@@ -113,7 +113,9 @@ fn run_tray_monitor() {
     #[cfg(target_os = "linux")]
     gtk::init().expect("failed to init GTK (required for system tray on Linux)");
 
-    Application::new().run(move |cx: &mut App| {
+    gpui_platform::application()
+        .with_assets(gpui_component_assets::Assets)
+        .run(move |cx: &mut App| {
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         fonts::apply_design_fonts(cx);
@@ -268,12 +270,14 @@ fn run_gui(pending_id: String) {
         std::process::exit(1);
     });
 
-    Application::new().run(move |cx: &mut App| {
+    gpui_platform::application()
+        .with_assets(gpui_component_assets::Assets)
+        .run(move |cx: &mut App| {
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         fonts::apply_design_fonts(cx);
 
-        let egresses = daemon::detect_egresses();
+        let egresses = daemon::fetch_egresses();
         let process_scope = if item.flow.process_name.is_some() {
             ProcessScope::Specific
         } else {
@@ -324,7 +328,9 @@ fn run_settings() {
     let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
         .unwrap_or_else(|_| daemon::SOCKET_PATH.to_string());
 
-    Application::new().run(move |cx: &mut App| {
+    gpui_platform::application()
+        .with_assets(gpui_component_assets::Assets)
+        .run(move |cx: &mut App| {
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         fonts::apply_design_fonts(cx);

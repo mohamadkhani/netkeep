@@ -5,7 +5,10 @@ pub enum RuleAction {
     Allow,
     Deny,
     Ask,
-    Route { target: RouteTarget },
+    /// Route traffic via the egress named by `Rule::egress_id`.
+    /// The concrete `RouteTarget` is resolved at enforcement time from the
+    /// egress's ordered target list — first available target wins.
+    Route,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -40,7 +43,11 @@ pub struct Rule {
     pub duration: RuleDuration,
     pub process_name: Option<String>,
     pub destination: DestinationMatcher,
-    pub route_target: Option<RouteTarget>,
+    /// Set when `action == Route`. References an `Egress.id` stored in the
+    /// daemon's state-store. The first available target of that egress is
+    /// used at enforcement time; if the egress or all its targets are
+    /// unavailable the packet is denied (fail-close).
+    pub egress_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

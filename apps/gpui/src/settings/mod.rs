@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{
-    DestinationMatcher, Egress, ProxyAuth, ProxyConfig, ProxyProtocol, RouteTarget, Rule,
+    DestinationMatcher, Egress, ProxyAuth, ProxyConfig, ProxyProtocol, Rule,
     RuleAction, RuleDuration,
 };
 use gpui::{
@@ -27,7 +27,7 @@ use gpui_component::WindowExt as _;
 use gpui_component::{h_flex, v_flex};
 
 use crate::colors;
-use crate::components::{field_label, modal_footer, modal_header, proto_btn};
+use crate::components::{field_label, modal_header, proto_btn};
 
 use egress_tab::EgressDelegate;
 use proxies_tab::ProxiesDelegate;
@@ -262,8 +262,7 @@ impl SettingsApp {
         };
         let init_route = existing
             .as_ref()
-            .and_then(|r| r.route_target.as_ref())
-            .map(helpers::route_summary)
+            .and_then(|r| r.egress_id.clone())
             .unwrap_or_default();
 
         let process_input = cx.new(|cx| {
@@ -389,7 +388,6 @@ impl SettingsApp {
                         .ok_text(ok_label)
                         .cancel_text("Cancel"),
                 )
-                .footer(|ok, cancel, w, cx| vec![modal_footer(cancel(w, cx), ok(w, cx))])
                 .child(
                     v_flex()
                         .px(px(16.))
@@ -426,10 +424,7 @@ impl SettingsApp {
                                         ac_route,
                                         ac_route,
                                         move |_, _, _| {
-                                            // Placeholder target; replaced with real value on save.
-                                            *act_route.lock().unwrap() = RuleAction::Route {
-                                                target: RouteTarget::Device(String::new()),
-                                            };
+                                            *act_route.lock().unwrap() = RuleAction::Route;
                                         },
                                     )),
                             ),
@@ -549,12 +544,11 @@ impl SettingsApp {
                         _ => DestinationMatcher::IpExact(dest_val),
                     };
                     let route_raw = route_i.read(cx).value().trim().to_string();
-                    // For ROUTE action: parse the target from the input field and build the
-                    // real action. The placeholder target set by the button is replaced here.
-                    let (action, route_target) = if matches!(action, RuleAction::Route { .. }) {
-                        match helpers::parse_targets_csv(&route_raw).into_iter().next() {
-                            Some(t) => (RuleAction::Route { target: t }, None),
-                            None => (RuleAction::Allow, None), // fallback if input empty
+                    let (action, egress_id) = if action == RuleAction::Route {
+                        if route_raw.is_empty() {
+                            (RuleAction::Allow, None) // fallback if input empty
+                        } else {
+                            (RuleAction::Route, Some(route_raw))
                         }
                     } else {
                         (action, None)
@@ -569,7 +563,7 @@ impl SettingsApp {
                         duration,
                         process_name,
                         destination,
-                        route_target,
+                        egress_id,
                     };
                     let to_send = rule.clone();
                     let sock_c = sock.clone();
@@ -744,7 +738,6 @@ impl SettingsApp {
                         .ok_text(ok_label)
                         .cancel_text("Cancel"),
                 )
-                .footer(|ok, cancel, w, cx| vec![modal_footer(cancel(w, cx), ok(w, cx))])
                 .child(
                     v_flex()
                         .px(px(16.))
@@ -949,7 +942,6 @@ impl SettingsApp {
                         .ok_text(ok_label)
                         .cancel_text("Cancel"),
                 )
-                .footer(|ok, cancel, w, cx| vec![modal_footer(cancel(w, cx), ok(w, cx))])
                 .child(
                     v_flex()
                         .px(px(16.))
@@ -1113,15 +1105,15 @@ impl Render for SettingsApp {
 
         // Table content for the active tab
         let table_content = match active_tab {
-            SettingsTab::Rules => gpui_component::table::Table::new(&self.rules_table)
+            SettingsTab::Rules => gpui_component::table::DataTable::new(&self.rules_table)
                 .stripe(true)
                 .bordered(true)
                 .into_any_element(),
-            SettingsTab::Egress => gpui_component::table::Table::new(&self.egress_table)
+            SettingsTab::Egress => gpui_component::table::DataTable::new(&self.egress_table)
                 .stripe(true)
                 .bordered(true)
                 .into_any_element(),
-            SettingsTab::Proxies => gpui_component::table::Table::new(&self.proxy_table)
+            SettingsTab::Proxies => gpui_component::table::DataTable::new(&self.proxy_table)
                 .stripe(true)
                 .bordered(true)
                 .into_any_element(),

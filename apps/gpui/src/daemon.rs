@@ -123,6 +123,18 @@ pub fn detect_egresses() -> Vec<core_types::Egress> {
     egresses
 }
 
+/// Fetch all egresses from the daemon and merge interface availability from the local system.
+/// Falls back to `detect_egresses()` if the daemon is unreachable.
+pub fn fetch_egresses() -> Vec<Egress> {
+    let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
+        .unwrap_or_else(|_| SOCKET_PATH.to_string());
+
+    match send_request(&socket_path, &ControlRequest::ListEgresses) {
+        Ok(ControlResponse::EgressList(egresses)) => merge_egress_availability(egresses),
+        _ => detect_egresses(),
+    }
+}
+
 /// Refresh `is_available` from a local interface scan; keeps daemon-persisted names, targets, and DNS.
 pub fn merge_egress_availability(mut stored: Vec<Egress>) -> Vec<Egress> {
     let detected = detect_egresses();

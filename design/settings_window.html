@@ -441,11 +441,11 @@
         </div>
     </div>
 
-    <!-- Add / Edit Egress Modal -->
+    <!-- Add / Edit Egress Modal (REDESIGNED) -->
     <div id="egress-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-        <div class="bg-surface-container border border-outline-variant rounded-lg w-[480px] flex flex-col shadow-2xl">
+        <div class="bg-surface-container border border-outline-variant rounded-lg w-[540px] max-h-[90vh] flex flex-col shadow-2xl">
             <!-- Modal Header -->
-            <div class="flex items-center justify-between px-density-comfortable py-3 border-b border-outline-variant bg-surface-container-high rounded-t-lg">
+            <div class="flex items-center justify-between px-density-comfortable py-3 border-b border-outline-variant bg-surface-container-high rounded-t-lg shrink-0">
                 <div class="flex items-center gap-2">
                     <span class="material-symbols-outlined text-[16px] text-primary" id="egress-modal-icon">add_circle</span>
                     <span class="font-label-caps text-label-caps text-on-surface" id="egress-modal-title">ADD EGRESS</span>
@@ -453,64 +453,146 @@
                 <button id="close-egress-modal" class="material-symbols-outlined text-[20px] text-on-surface-variant hover:text-on-surface transition-colors p-1 rounded hover:bg-surface-variant">close</button>
             </div>
 
-            <!-- Modal Body -->
-            <div class="p-density-comfortable flex flex-col gap-4">
+            <!-- Modal Body (scrollable) -->
+            <div class="p-density-comfortable flex flex-col gap-4 overflow-y-auto">
 
                 <!-- Name -->
                 <div class="flex flex-col gap-1">
                     <label class="font-label-caps text-[10px] text-on-surface-variant">NAME</label>
-                    <input
-                        id="egress-name"
-                        type="text"
-                        placeholder="e.g. WireGuard VPN"
-                        value="New Egress"
-                        class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
-                    />
+                    <input id="egress-name" type="text" placeholder="e.g. Work VPN" value="New Egress"
+                        class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"/>
                 </div>
 
                 <!-- Color -->
                 <div class="flex flex-col gap-1">
                     <label class="font-label-caps text-[10px] text-on-surface-variant">COLOR</label>
-                    <div class="flex gap-2 items-center">
-                        <input
-                            id="egress-color"
-                            type="text"
-                            placeholder="#3b82f6"
-                            value="#3b82f6"
-                            class="flex-1 bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
-                        />
-                        <div id="egress-color-swatch" class="w-8 h-8 rounded border border-outline-variant" style="background:#3b82f6"></div>
+                    <div class="flex gap-2 items-center flex-wrap">
+                        <!-- Preset colour swatches -->
+                        <button class="color-swatch w-7 h-7 rounded-full border-2 border-transparent hover:border-on-surface transition-colors shrink-0" style="background:#22c55e" data-color="#22c55e" title="Green"></button>
+                        <button class="color-swatch w-7 h-7 rounded-full border-2 border-outline-variant hover:border-on-surface transition-colors shrink-0" style="background:#3b82f6" data-color="#3b82f6" title="Blue"></button>
+                        <button class="color-swatch w-7 h-7 rounded-full border-2 border-transparent hover:border-on-surface transition-colors shrink-0" style="background:#f59e0b" data-color="#f59e0b" title="Amber"></button>
+                        <button class="color-swatch w-7 h-7 rounded-full border-2 border-transparent hover:border-on-surface transition-colors shrink-0" style="background:#ef4444" data-color="#ef4444" title="Red"></button>
+                        <button class="color-swatch w-7 h-7 rounded-full border-2 border-transparent hover:border-on-surface transition-colors shrink-0" style="background:#8b5cf6" data-color="#8b5cf6" title="Violet"></button>
+                        <button class="color-swatch w-7 h-7 rounded-full border-2 border-transparent hover:border-on-surface transition-colors shrink-0" style="background:#06b6d4" data-color="#06b6d4" title="Cyan"></button>
+                        <!-- Custom hex input + live preview -->
+                        <div class="flex items-center gap-2 flex-1 min-w-[140px]">
+                            <input id="egress-color" type="text" placeholder="#3b82f6" value="#3b82f6"
+                                class="flex-1 bg-surface-variant border border-outline-variant rounded px-3 py-1.5 text-on-surface font-data-mono text-[12px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"/>
+                            <div id="egress-color-swatch" class="w-7 h-7 rounded border border-outline-variant shrink-0" style="background:#3b82f6"></div>
+                        </div>
                     </div>
                 </div>
 
-                <!-- Targets -->
-                <div class="flex flex-col gap-1">
-                    <label class="font-label-caps text-[10px] text-on-surface-variant">TARGETS <span class="text-on-surface-variant/60 normal-case font-body-sm">(comma-separated: dev:eth0, tun:wg0, proxy:id)</span></label>
-                    <input
-                        id="egress-targets"
-                        type="text"
-                        placeholder="dev:eth0"
-                        value="dev:eth0"
-                        class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
-                    />
+                <!-- Routing Targets -->
+                <div class="flex flex-col gap-2">
+                    <div class="flex items-center justify-between">
+                        <label class="font-label-caps text-[10px] text-on-surface-variant">ROUTING TARGETS</label>
+                        <span class="font-body-sm text-on-surface-variant/50">First enabled target is used</span>
+                    </div>
+
+                    <!-- Target list -->
+                    <div id="egress-target-list" class="bg-surface border border-outline-variant rounded overflow-hidden divide-y divide-outline-variant">
+                        <!-- Rows injected by JS; two sample rows shown for reference: -->
+
+                        <!-- Sample row: TUN (enabled) -->
+                        <div class="egress-target-row flex items-center gap-2 px-3 py-2">
+                            <!-- Reorder arrows -->
+                            <div class="flex flex-col shrink-0 -my-0.5">
+                                <button class="move-up material-symbols-outlined text-[14px] text-on-surface-variant/40 hover:text-on-surface leading-tight transition-colors">expand_less</button>
+                                <button class="move-down material-symbols-outlined text-[14px] text-on-surface-variant/40 hover:text-on-surface leading-tight transition-colors">expand_more</button>
+                            </div>
+                            <!-- Type badge (fixed width so names align) -->
+                            <span class="font-label-caps text-[9px] px-1.5 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30 shrink-0 w-11 text-center">TUN</span>
+                            <!-- Target name -->
+                            <span class="font-data-mono text-[12px] text-on-surface flex-1">wg0</span>
+                            <!-- Enabled toggle -->
+                            <label class="flex items-center gap-1.5 cursor-pointer shrink-0 select-none">
+                                <span class="font-label-caps text-[9px] text-on-surface-variant/60">ENABLED</span>
+                                <div class="target-toggle relative w-8 h-4 rounded-full bg-primary transition-colors cursor-pointer" data-on="true">
+                                    <span class="target-thumb absolute top-0.5 right-0.5 w-3 h-3 bg-on-primary rounded-full transition-transform" style="background:var(--tw-prose-body, #002e6a)"></span>
+                                </div>
+                            </label>
+                            <!-- Remove -->
+                            <button class="remove-target material-symbols-outlined text-[14px] text-on-surface-variant/30 hover:text-error transition-colors shrink-0">close</button>
+                        </div>
+
+                        <!-- Sample row: PROXY (disabled) -->
+                        <div class="egress-target-row flex items-center gap-2 px-3 py-2">
+                            <div class="flex flex-col shrink-0 -my-0.5">
+                                <button class="move-up material-symbols-outlined text-[14px] text-on-surface-variant/40 hover:text-on-surface leading-tight transition-colors">expand_less</button>
+                                <button class="move-down material-symbols-outlined text-[14px] text-on-surface-variant/40 hover:text-on-surface leading-tight transition-colors">expand_more</button>
+                            </div>
+                            <span class="font-label-caps text-[9px] px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/30 shrink-0 w-11 text-center">PROXY</span>
+                            <span class="font-data-mono text-[12px] text-on-surface-variant/50 flex-1">Work SOCKS5</span>
+                            <label class="flex items-center gap-1.5 cursor-pointer shrink-0 select-none">
+                                <span class="font-label-caps text-[9px] text-on-surface-variant/60">ENABLED</span>
+                                <div class="target-toggle relative w-8 h-4 rounded-full bg-outline-variant transition-colors cursor-pointer" data-on="false">
+                                    <span class="target-thumb absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform"></span>
+                                </div>
+                            </label>
+                            <button class="remove-target material-symbols-outlined text-[14px] text-on-surface-variant/30 hover:text-error transition-colors shrink-0">close</button>
+                        </div>
+
+                        <!-- Empty state -->
+                        <div id="egress-targets-empty" class="hidden px-3 py-5 text-center">
+                            <span class="font-body-sm text-on-surface-variant/40">No targets — traffic uses system routing table.</span>
+                        </div>
+                    </div>
+
+                    <!-- Add target inline form -->
+                    <div class="bg-surface-container-low border border-dashed border-outline-variant rounded p-3 flex flex-col gap-3">
+                        <span class="font-label-caps text-[9px] text-on-surface-variant/80">ADD TARGET</span>
+                        <div class="flex gap-2 items-end">
+                            <!-- Type selector buttons -->
+                            <div class="flex flex-col gap-1.5 shrink-0">
+                                <span class="font-label-caps text-[9px] text-on-surface-variant/50">TYPE</span>
+                                <div class="flex gap-1" id="target-type-btns">
+                                    <button data-type="tun"   class="target-type-btn font-label-caps text-[9px] px-2.5 py-1 rounded border transition-colors border-[#22c55e] text-[#22c55e] bg-[#22c55e]/10">TUN</button>
+                                    <button data-type="dev"   class="target-type-btn font-label-caps text-[9px] px-2.5 py-1 rounded border transition-colors border-outline-variant text-on-surface-variant hover:border-on-surface-variant">DEV</button>
+                                    <button data-type="proxy" class="target-type-btn font-label-caps text-[9px] px-2.5 py-1 rounded border transition-colors border-outline-variant text-on-surface-variant hover:border-on-surface-variant">PROXY</button>
+                                </div>
+                            </div>
+                            <!-- Value selector — changes contents based on selected type -->
+                            <div class="flex flex-col gap-1.5 flex-1">
+                                <span class="font-label-caps text-[9px] text-on-surface-variant/50" id="target-value-label">INTERFACE</span>
+                                <select id="target-value-select"
+                                    class="bg-surface-variant border border-outline-variant rounded px-2.5 py-1.5 text-on-surface font-data-mono text-[12px] focus:outline-none focus:border-primary transition-colors">
+                                    <!-- Options populated by JS based on type: detected interfaces or proxy list -->
+                                    <optgroup label="TUN devices" id="target-opts-tun">
+                                        <option value="tun:wg0">wg0</option>
+                                        <option value="tun:tun0">tun0</option>
+                                    </optgroup>
+                                    <optgroup label="Network devices" id="target-opts-dev" class="hidden">
+                                        <option value="dev:eth0">eth0</option>
+                                        <option value="dev:wlan0">wlan0</option>
+                                    </optgroup>
+                                    <optgroup label="Proxies" id="target-opts-proxy" class="hidden">
+                                        <option value="proxy:px-1">Work SOCKS5</option>
+                                        <option value="proxy:px-2">Home HTTP</option>
+                                    </optgroup>
+                                </select>
+                            </div>
+                            <!-- Add button -->
+                            <button id="add-target-btn"
+                                class="flex items-center gap-1 bg-primary hover:bg-primary-container text-on-primary font-label-caps text-[9px] px-3 py-1.5 rounded transition-colors shrink-0">
+                                <span class="material-symbols-outlined text-[12px]">add</span>
+                                ADD
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- DNS Servers -->
                 <div class="flex flex-col gap-1">
-                    <label class="font-label-caps text-[10px] text-on-surface-variant">DNS SERVERS <span class="text-on-surface-variant/60 normal-case font-body-sm">(comma-separated, leave empty for system default)</span></label>
-                    <input
-                        id="egress-dns"
-                        type="text"
-                        placeholder="1.1.1.1, 8.8.8.8"
-                        value=""
-                        class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"
-                    />
+                    <label class="font-label-caps text-[10px] text-on-surface-variant">DNS SERVERS <span class="font-body-sm text-on-surface-variant/60 normal-case">(comma-separated, empty = system)</span></label>
+                    <input id="egress-dns" type="text" placeholder="1.1.1.1, 8.8.8.8" value=""
+                        class="bg-surface-variant border border-outline-variant rounded px-3 py-2 text-on-surface font-data-mono text-[13px] focus:outline-none focus:border-primary transition-colors placeholder:text-on-surface-variant/50"/>
                 </div>
 
             </div>
 
             <!-- Modal Footer -->
-            <div class="flex justify-end gap-2 px-density-comfortable py-3 border-t border-outline-variant bg-surface-container-high rounded-b-lg">
+            <div class="flex justify-end gap-2 px-density-comfortable py-3 border-t border-outline-variant bg-surface-container-high rounded-b-lg shrink-0">
                 <button id="cancel-egress" class="font-label-caps text-[10px] px-4 py-2 rounded border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-outline transition-colors">
                     CANCEL
                 </button>
@@ -717,47 +799,238 @@
         selectProto('socks5');
 
         // ── Add / Edit Egress Modal ──────────────────────────────────────────
-        const egressModal       = document.getElementById('egress-modal');
-        const openAddEgressBtn  = document.getElementById('open-add-egress-modal');
-        const closeEgressBtn    = document.getElementById('close-egress-modal');
-        const cancelEgress      = document.getElementById('cancel-egress');
-        const confirmEgress     = document.getElementById('confirm-egress');
-        const egressModalTitle  = document.getElementById('egress-modal-title');
-        const egressModalIcon   = document.getElementById('egress-modal-icon');
-        const egressConfirmIcon = document.getElementById('egress-confirm-icon');
+        const egressModal        = document.getElementById('egress-modal');
+        const openAddEgressBtn   = document.getElementById('open-add-egress-modal');
+        const closeEgressBtn     = document.getElementById('close-egress-modal');
+        const cancelEgress       = document.getElementById('cancel-egress');
+        const confirmEgress      = document.getElementById('confirm-egress');
+        const egressModalTitle   = document.getElementById('egress-modal-title');
+        const egressModalIcon    = document.getElementById('egress-modal-icon');
+        const egressConfirmIcon  = document.getElementById('egress-confirm-icon');
         const egressConfirmLabel = document.getElementById('egress-confirm-label');
-        const egressColorInput  = document.getElementById('egress-color');
-        const egressColorSwatch = document.getElementById('egress-color-swatch');
+        const egressColorInput   = document.getElementById('egress-color');
+        const egressColorSwatch  = document.getElementById('egress-color-swatch');
+        const targetList         = document.getElementById('egress-target-list');
+        const targetsEmpty       = document.getElementById('egress-targets-empty');
 
         let egressIsEdit = false;
 
+        // ── Target type selector ─────────────────────────────────────────────
+        const targetTypeBtns = document.querySelectorAll('.target-type-btn');
+        const targetValueSelect = document.getElementById('target-value-select');
+        const targetValueLabel  = document.getElementById('target-value-label');
+        const targetOptsMap = {
+            tun:   document.getElementById('target-opts-tun'),
+            dev:   document.getElementById('target-opts-dev'),
+            proxy: document.getElementById('target-opts-proxy'),
+        };
+        const typeLabelMap = { tun: 'INTERFACE', dev: 'INTERFACE', proxy: 'PROXY' };
+        const typeColors = {
+            tun:   { border:'#22c55e', text:'#22c55e', bg:'rgba(34,197,94,0.1)'  },
+            dev:   { border:'#8c909f', text:'#c2c6d6', bg:'rgba(140,144,159,0.1)'},
+            proxy: { border:'#adc6ff', text:'#adc6ff', bg:'rgba(173,198,255,0.1)'},
+        };
+        const typeBadgeClasses = {
+            tun:   'bg-[#22c55e]/10 text-[#22c55e] border-[#22c55e]/30',
+            dev:   'bg-surface-variant text-on-surface-variant border-outline-variant',
+            proxy: 'bg-primary/10 text-primary border-primary/30',
+        };
+
+        let selectedTargetType = 'tun';
+
+        function selectTargetType(type) {
+            selectedTargetType = type;
+            targetTypeBtns.forEach(btn => {
+                const t = btn.dataset.type;
+                const c = typeColors[t];
+                if (t === type) {
+                    btn.style.borderColor = c.border;
+                    btn.style.color       = c.text;
+                    btn.style.background  = c.bg;
+                } else {
+                    btn.style.borderColor = '';
+                    btn.style.color       = '';
+                    btn.style.background  = '';
+                }
+            });
+            // Show the correct <optgroup>
+            Object.entries(targetOptsMap).forEach(([t, el]) => {
+                el.classList.toggle('hidden', t !== type);
+            });
+            // Re-select first option in the visible group
+            const visibleOpts = targetOptsMap[type].querySelectorAll('option');
+            if (visibleOpts.length) targetValueSelect.value = visibleOpts[0].value;
+            targetValueLabel.textContent = typeLabelMap[type] || 'VALUE';
+        }
+
+        targetTypeBtns.forEach(btn => {
+            btn.addEventListener('click', () => selectTargetType(btn.dataset.type));
+        });
+
+        // ── Target list helpers ──────────────────────────────────────────────
+        function refreshEmptyState() {
+            const rows = targetList.querySelectorAll('.egress-target-row');
+            targetsEmpty.classList.toggle('hidden', rows.length > 0);
+        }
+
+        function makeTargetRow(type, value, label, enabledInit = true) {
+            const row = document.createElement('div');
+            row.className = 'egress-target-row flex items-center gap-2 px-3 py-2 border-b border-outline-variant last:border-b-0';
+            row.dataset.type  = type;
+            row.dataset.value = value;
+            row.dataset.enabled = String(enabledInit);
+
+            const badgeCls = typeBadgeClasses[type] || typeBadgeClasses.dev;
+            const toggleBg = enabledInit ? 'bg-primary' : 'bg-outline-variant';
+            const thumbPos = enabledInit ? 'right-0.5' : 'left-0.5';
+
+            row.innerHTML = `
+                <div class="flex flex-col shrink-0 -my-0.5">
+                    <button class="move-up material-symbols-outlined text-[14px] text-on-surface-variant/40 hover:text-on-surface leading-tight transition-colors">expand_less</button>
+                    <button class="move-down material-symbols-outlined text-[14px] text-on-surface-variant/40 hover:text-on-surface leading-tight transition-colors">expand_more</button>
+                </div>
+                <span class="font-label-caps text-[9px] px-1.5 py-0.5 rounded ${badgeCls} shrink-0 w-11 text-center">${type.toUpperCase()}</span>
+                <span class="font-data-mono text-[12px] text-on-surface flex-1">${label}</span>
+                <label class="flex items-center gap-1.5 cursor-pointer shrink-0 select-none">
+                    <span class="font-label-caps text-[9px] text-on-surface-variant/60">ENABLED</span>
+                    <div class="target-toggle relative w-8 h-4 rounded-full ${toggleBg} transition-colors cursor-pointer" data-on="${enabledInit}">
+                        <span class="target-thumb absolute top-0.5 ${thumbPos} w-3 h-3 bg-white rounded-full transition-transform"></span>
+                    </div>
+                </label>
+                <button class="remove-target material-symbols-outlined text-[14px] text-on-surface-variant/30 hover:text-error transition-colors shrink-0">close</button>
+            `;
+
+            // Wire up toggle
+            const toggle = row.querySelector('.target-toggle');
+            toggle.addEventListener('click', () => {
+                const on = toggle.dataset.on !== 'true';
+                toggle.dataset.on = String(on);
+                toggle.classList.toggle('bg-primary', on);
+                toggle.classList.toggle('bg-outline-variant', !on);
+                const thumb = toggle.querySelector('.target-thumb');
+                thumb.classList.toggle('right-0.5', on);
+                thumb.classList.toggle('left-0.5', !on);
+                // Dim the name when disabled
+                const nameEl = row.querySelector('.font-data-mono');
+                nameEl.classList.toggle('text-on-surface', on);
+                nameEl.classList.toggle('text-on-surface-variant/50', !on);
+                row.dataset.enabled = String(on);
+            });
+
+            // Wire up remove
+            row.querySelector('.remove-target').addEventListener('click', () => {
+                row.remove();
+                refreshEmptyState();
+            });
+
+            // Wire up reorder
+            row.querySelector('.move-up').addEventListener('click', () => {
+                const prev = row.previousElementSibling;
+                if (prev && prev.classList.contains('egress-target-row')) {
+                    targetList.insertBefore(row, prev);
+                }
+            });
+            row.querySelector('.move-down').addEventListener('click', () => {
+                const next = row.nextElementSibling;
+                if (next && next.classList.contains('egress-target-row')) {
+                    targetList.insertBefore(next, row);
+                }
+            });
+
+            return row;
+        }
+
+        document.getElementById('add-target-btn').addEventListener('click', () => {
+            const val   = targetValueSelect.value;
+            const label = targetValueSelect.options[targetValueSelect.selectedIndex]?.text || val;
+            if (!val) return;
+            const row = makeTargetRow(selectedTargetType, val, label, true);
+            // Insert before the empty-state div
+            targetList.insertBefore(row, targetsEmpty);
+            refreshEmptyState();
+        });
+
+        // Wire existing sample rows' toggles + reorder buttons on page load
+        targetList.querySelectorAll('.target-toggle').forEach(toggle => {
+            toggle.addEventListener('click', () => {
+                const on = toggle.dataset.on !== 'true';
+                toggle.dataset.on = String(on);
+                toggle.classList.toggle('bg-primary', on);
+                toggle.classList.toggle('bg-outline-variant', !on);
+                const thumb = toggle.querySelector('.target-thumb');
+                thumb.classList.toggle('right-0.5', on);
+                thumb.classList.toggle('left-0.5', !on);
+                const nameEl = toggle.closest('.egress-target-row')?.querySelector('.font-data-mono');
+                if (nameEl) {
+                    nameEl.classList.toggle('text-on-surface', on);
+                    nameEl.classList.toggle('text-on-surface-variant/50', !on);
+                }
+            });
+        });
+        targetList.querySelectorAll('.remove-target').forEach(btn => {
+            btn.addEventListener('click', () => { btn.closest('.egress-target-row')?.remove(); refreshEmptyState(); });
+        });
+        targetList.querySelectorAll('.move-up').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const row = btn.closest('.egress-target-row');
+                const prev = row?.previousElementSibling;
+                if (row && prev && prev.classList.contains('egress-target-row')) targetList.insertBefore(row, prev);
+            });
+        });
+        targetList.querySelectorAll('.move-down').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const row = btn.closest('.egress-target-row');
+                const next = row?.nextElementSibling;
+                if (row && next && next.classList.contains('egress-target-row')) targetList.insertBefore(next, row);
+            });
+        });
+
+        // ── Color swatch presets ─────────────────────────────────────────────
+        document.querySelectorAll('.color-swatch').forEach(swatch => {
+            swatch.addEventListener('click', () => {
+                const c = swatch.dataset.color;
+                egressColorInput.value = c;
+                updateColorSwatch();
+                // Highlight the active swatch
+                document.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('border-on-surface'));
+                swatch.classList.add('border-on-surface');
+                swatch.classList.remove('border-outline-variant', 'border-transparent');
+            });
+        });
+
+        // ── Open / close ─────────────────────────────────────────────────────
         function openEgressModal(editMode, data) {
             egressIsEdit = editMode;
             if (editMode) {
-                egressModalTitle.textContent  = 'EDIT EGRESS';
-                egressModalIcon.textContent   = 'edit';
-                egressConfirmIcon.textContent = 'save';
+                egressModalTitle.textContent   = 'EDIT EGRESS';
+                egressModalIcon.textContent    = 'edit';
+                egressConfirmIcon.textContent  = 'save';
                 egressConfirmLabel.textContent = 'SAVE';
-                document.getElementById('egress-name').value    = data.name    || '';
-                document.getElementById('egress-color').value   = data.color   || '#3b82f6';
-                document.getElementById('egress-targets').value = data.targets || '';
-                document.getElementById('egress-dns').value     = data.dns     || '';
+                document.getElementById('egress-name').value  = data.name  || '';
+                document.getElementById('egress-color').value = data.color || '#3b82f6';
+                document.getElementById('egress-dns').value   = data.dns   || '';
+                // Populate target rows from data.targets (array of {type, value, label, enabled})
+                targetList.querySelectorAll('.egress-target-row').forEach(r => r.remove());
+                (data.targets || []).forEach(t => {
+                    const row = makeTargetRow(t.type, t.value, t.label, t.enabled !== false);
+                    targetList.insertBefore(row, targetsEmpty);
+                });
             } else {
-                egressModalTitle.textContent  = 'ADD EGRESS';
-                egressModalIcon.textContent   = 'add_circle';
-                egressConfirmIcon.textContent = 'add';
+                egressModalTitle.textContent   = 'ADD EGRESS';
+                egressModalIcon.textContent    = 'add_circle';
+                egressConfirmIcon.textContent  = 'add';
                 egressConfirmLabel.textContent = 'ADD EGRESS';
-                document.getElementById('egress-name').value    = 'New Egress';
-                document.getElementById('egress-color').value   = '#3b82f6';
-                document.getElementById('egress-targets').value = 'dev:eth0';
-                document.getElementById('egress-dns').value     = '';
+                document.getElementById('egress-name').value  = 'New Egress';
+                document.getElementById('egress-color').value = '#3b82f6';
+                document.getElementById('egress-dns').value   = '';
+                targetList.querySelectorAll('.egress-target-row').forEach(r => r.remove());
             }
+            refreshEmptyState();
             updateColorSwatch();
+            selectTargetType('tun');
             egressModal.classList.remove('hidden');
         }
-        function closeEgressModal() {
-            egressModal.classList.add('hidden');
-        }
+        function closeEgressModal() { egressModal.classList.add('hidden'); }
         function updateColorSwatch() {
             const c = egressColorInput.value.trim();
             try { egressColorSwatch.style.background = c; } catch(_) {}
@@ -769,20 +1042,27 @@
         egressModal.addEventListener('click', (e) => { if (e.target === egressModal) closeEgressModal(); });
         egressColorInput.addEventListener('input', updateColorSwatch);
 
-        // Edit buttons on egress rows
+        // Edit buttons on egress table rows
         document.querySelectorAll('.edit-egress-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const row = btn.closest('[class*="grid"]');
-                const name = row.querySelector('.font-data-mono')?.textContent || '';
-                openEgressModal(true, { name, color: '#3b82f6', targets: 'dev:eth0', dns: '' });
+                const name = row.querySelector('.font-data-mono')?.textContent?.trim() || '';
+                openEgressModal(true, {
+                    name, color: '#3b82f6', dns: '',
+                    targets: [{ type: 'dev', value: 'dev:eth0', label: 'eth0', enabled: true }],
+                });
             });
         });
 
         confirmEgress.addEventListener('click', () => {
-            const name    = document.getElementById('egress-name').value.trim()    || 'New Egress';
-            const color   = document.getElementById('egress-color').value.trim()   || '#3b82f6';
-            const targets = document.getElementById('egress-targets').value.trim() || 'dev:eth0';
+            const name    = document.getElementById('egress-name').value.trim()  || 'New Egress';
+            const color   = document.getElementById('egress-color').value.trim() || '#3b82f6';
             const dns     = document.getElementById('egress-dns').value.trim();
+            const targets = [...targetList.querySelectorAll('.egress-target-row')].map(r => ({
+                type:    r.dataset.type,
+                value:   r.dataset.value,
+                enabled: r.dataset.enabled === 'true',
+            }));
             console.log(egressIsEdit ? 'Save egress:' : 'Add egress:', { name, color, targets, dns });
             closeEgressModal();
         });

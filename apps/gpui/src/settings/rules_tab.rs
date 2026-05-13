@@ -15,7 +15,7 @@ use crate::components::{action_btn, badge, dest_text};
 use crate::daemon;
 
 use super::SettingsState;
-use super::helpers::route_summary;
+
 
 // ── Delegate ───────────────────────────────────────────────────────────
 
@@ -58,8 +58,8 @@ impl TableDelegate for RulesDelegate {
         self.rules.len()
     }
 
-    fn column(&self, col_ix: usize, _cx: &App) -> &Column {
-        &self.columns[col_ix]
+    fn column(&self, col_ix: usize, _cx: &App) -> Column {
+        self.columns[col_ix].clone()
     }
 
     fn render_td(
@@ -142,9 +142,7 @@ impl TableDelegate for RulesDelegate {
             }
             // Route column
             5 => {
-                let route = rule.route_target.as_ref()
-                    .map(route_summary)
-                    .unwrap_or_default();
+                let route = rule.egress_id.clone().unwrap_or_default();
                 Label::new(if route.is_empty() { "—".to_string() } else { route })
                     .text_size(px(12.))
                     .text_color(if route_is_empty(&rule) || dimmed {
@@ -230,5 +228,5 @@ impl TableDelegate for RulesDelegate {
 }
 
 fn route_is_empty(rule: &Rule) -> bool {
-    rule.route_target.is_none()
+    rule.egress_id.is_none()
 }

@@ -90,10 +90,10 @@ See [`docs/gpui-components.md`](docs/gpui-components.md) → Export Map for the 
   - App/process, Domain, Subdomain, Wildcard domain (`*.example.com`)
   - IP, CIDR/netmask
   - Wildcard does not match apex by default
-  - Optional route target (TUN, NIC, or proxy)
+  - Optional `egress_id` binding — rule references a named Egress entity; concrete `RouteTarget` resolved at enforcement time
   - Optional per-egress DNS server list
   - Proxy support: SOCKS5, HTTP/HTTPS, Shadowsocks with per-type auth
-  - Egress targets have priority ordering; first enabled target is active
+  - Egress targets have priority ordering; first *available* target wins at enforcement time
 - Protocol coverage in v1:
   - TCP + UDP, best-effort domain inference for QUIC/HTTP3
   - On DNS/SNI conflict, treat as IP-only
@@ -128,11 +128,11 @@ Bidirectional Unix socket at `/tmp/logiguard.sock`. JSON-lines transport. See [`
 
 Full schema and field definitions are in [`docs/architecture.md`](docs/architecture.md) → Core Crates.
 
-Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `EgressTarget`, `ProxyConfig`, `DestinationMatcher`, `RuleAction`, `RuleDuration`.
+Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `ProxyConfig`, `DestinationMatcher`, `RuleAction`, `RuleDuration`.
 
 ### Rule Resolution
 
-- Action precedence: `Deny > Allow > Ask`; `Allow` and `Route { .. }` share action rank
+- Action precedence: `Deny > Allow > Ask`; `Allow` and `Route` share action rank
 - Specificity (high → low): process+exact > process+wildcard > exact > wildcard > global
 - Tie-break: lexicographically greater `rule.id` wins
 - Wildcard: `*.example.com` matches subdomains only; apex must be explicit
@@ -164,15 +164,21 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `EgressTarget`, `
 - [x] Design-system primitives in `components/ds.rs` (badge, chip, dest_text, cidr_picker, label_row)
 - [x] Rule scope UI: process toggle, destination scope chips, CIDR octet picker, rule summary line
 - [x] NFQUEUE enable/disable toggle via tray menu
+- [x] Egress-bound rules: `Rule.egress_id` replaces `route_target`; first available `RouteTarget` resolved at enforcement time via `first_available_target()`
+- [x] gpui migrated from crates.io `gpui 0.2` to git HEAD (`zed-industries/zed`); ported `DataTable`, `Column` ownership, removed footer closure API
+- [x] Daemon no longer auto-seeds per-interface egresses; only ensures `eg-default` exists on startup
 - [ ] Auth fields in proxy form dialog (Basic / Shadowsocks)
 - [ ] Egress priority ordering UI
+- [ ] Add Egress modal design
 
 ## 4) Open Bugs / Follow-ups
 
 - [x] **Settings window not resizable** — fixed since 2026-05-13 (session 21). Root view now wraps everything in `gpui_component::window_border()` so the resize edges + cursor change work on Linux compositors that use client-side decorations (notably GNOME / Mutter, which refuses xdg-decoration server-side requests). Also explicitly requests `WindowDecorations::Client` and sets `window_min_size = 640×420` so the user can't accidentally collapse the table headers.
 - [x] **NFQUEUE tray toggle unreliable** — fixed since 2026-05-13 (session 21). The previous handler just flipped a status bit in `ControlService` and never touched the kernel; the toggle was a no-op. Now `SetNfqueueEnabled` re-applies the nftables protection chains via `NftablesBootstrap::setup(queue, route_mark_base)` — `Some(n)` adds `queue num n` rules, `None` removes them. The cached flag is only committed *after* nftables actually applied. Gate logic is in the pure `plan_nfqueue_toggle` helper with 4 new unit tests covering the (bootstrap present, queue configured, enabled requested) matrix, including the case where the daemon was started without `LOGIGUARD_NFQUEUE` (rejected with an actionable error pointing the operator at the systemd unit). Workspace 126 → 130 tests.
+- [x] **Auto-seeded interface egresses polluting "Route via" selector** — fixed 2026-05-13. Daemon was calling `detect_egresses()` on every startup and upserting one Egress per local interface into the DB. The decision dialog's "Route via" showed all of them alongside user-defined ones (e.g. "TUN: throne-tun", "LAN: enp3s0"). Daemon now only ensures `eg-default` exists; per-interface availability is checked at routing time by `first_available_target()`.
 - [ ] **Tray toggle should be single item** — currently two separate enable/disable menu items; should be one checked/unchecked toggle
 - [ ] **Add Egress / Add Proxy button styling** — full-width, doesn't match design spec
+- [ ] **Stale auto-seeded egresses in existing DB** — users who ran an older daemon have interface egresses stored in their SQLite DB. They need to delete them via the Egresses settings tab or by wiping the DB.
 
 ## 5) Definition of Done (MVP)
 
@@ -388,3 +394,29 @@ User-reported regression that turned out to be a long-standing pre-existing gap,
 - [x] **Tests.** 12 new tests in `nfqueue::tests::http_host_*` — happy path, case-insensitivity, IPv4/IPv6 port stripping, CONNECT proxies, multi-header ordering, truncation safety, garbage rejection, explicit negatives against TLS and non-HTTP TCP. Workspace **130 → 142** tests.
 
 - [x] **Documentation.** Expanded `docs/nfqueue-domain-inference.md` with a full "Plaintext HTTP Host header fallback" section that explains every defensive guard and what's still uncovered (QUIC, plain UDP services, non-HTTP/non-TLS TCP). Updated `docs/implementation-status.md` with a Bug 16 entry. Updated the doc-comment on `FlowContext.sni_hint` / `RawPacket.sni_hint` to call out that the field now holds either source (no rename — too many touch points for an incidental change).
+
+### 2026-05-13 (session 23 — egress-bound rules + gpui git migration)
+
+Two intertwined changes in one session: a full architectural refactor of how routing targets are stored and resolved, and a migration of the GPUI dependency from the stale crates.io release to git HEAD.
+
+- [x] **`Rule.egress_id` replaces `Rule.route_target`.** Rules no longer embed a concrete `RouteTarget`. Instead they reference a named `Egress` entity by ID. At enforcement time, `control-service::first_available_target()` walks the egress's ordered target list and returns the first available one — checking `/sys/class/net/<name>/operstate` for Device/Tun targets and `ProxyRepository.enabled` for Proxy targets. This enables true failover (primary VPN down → fall through to backup) without changing the rule.
+  - `RuleAction::Route` — dropped the embedded `{ target: RouteTarget }` field; now a unit variant
+  - `Rule.egress_id: Option<String>` — replaces the removed `route_target: Option<RouteTarget>`
+  - `FlowDecision::Immediate(action, Option<RouteTarget>)` — carries the resolved target alongside the action so the enforcer still gets a concrete target even though `RuleAction::Route` no longer embeds one
+  - `ImmediateVerdict { action, route_target: Option<RouteTarget> }` and `PendingResolved { action, route_target }` in `control-api` — same pattern
+  - `state-store`: `rules` table migrated — added `egress_id TEXT NULL`, dropped `route_target_kind`/`route_target_value`; migration applied at startup
+  - `policy-engine`: `ResolvedRule.egress_id` threads through from matched rule
+  - `control-service`: `resolve_route_target()` + `first_available_target()` added; all response constructors updated
+  - `gpui action_footer`: sends `egress_id` on rule instead of a resolved target
+  - `cli`: `--route <device>` replaced with `--egress <id>`; display shows `egress=<id>`
+  - `emulator`: pattern matches updated for new `RuleAction::Route` and `route_target` field
+
+- [x] **Daemon no longer auto-seeds per-interface egresses.** Previously `detect_egresses()` was called on every startup and each local interface was upserted as a separate Egress in the DB. This caused the decision dialog "Route via" selector to show "TUN: throne-tun", "LAN: enp3s0", etc. alongside user-defined egresses like "proxy1". Daemon now only ensures the single `eg-default` system egress exists. Interface availability is checked at routing time.
+
+- [x] **gpui migrated from crates.io 0.2 to git HEAD** (`zed-industries/zed`). API breakages fixed:
+  - `Table::new(...)` → `DataTable::new(...)`
+  - `column()` return type: `&Column` → `Column` (clone from stored vec)
+  - `.footer(closure)` API removed — `button_props` handles OK/Cancel now
+  - `cx.update_entity(...).unwrap_or()` → returns `R` directly, not `Result<R>`
+  - Added `gpui_platform` dep with `features = ["font-kit", "wayland", "x11"]` — required to avoid runtime `unreachable!()` panic when Wayland is detected but no backend is compiled in
+  - `Application::new().run(...)` → `gpui_platform::application().with_assets(...).run(...)`

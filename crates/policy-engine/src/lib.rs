@@ -4,6 +4,10 @@ use core_types::{DestinationMatcher, FlowContext, Rule, RuleAction};
 pub struct ResolvedRule {
     pub rule_id: String,
     pub action: RuleAction,
+    /// Populated when `action == Route`; references the egress the matched
+    /// rule is bound to. Control-service resolves the concrete `RouteTarget`
+    /// from this id at enforcement time.
+    pub egress_id: Option<String>,
 }
 
 /// Wildcard match for `DomainWildcard(pattern)` against a flow's `destination_domain`.
@@ -75,8 +79,7 @@ fn specificity(rule: &Rule) -> u8 {
 fn action_rank(action: &RuleAction) -> u8 {
     match action {
         RuleAction::Deny => 3,
-        RuleAction::Allow => 2,
-        RuleAction::Route { .. } => 2,
+        RuleAction::Allow | RuleAction::Route => 2,
         RuleAction::Ask => 1,
     }
 }
@@ -96,13 +99,14 @@ pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule
         .map(|r| ResolvedRule {
             rule_id: r.id.clone(),
             action: r.action.clone(),
+            egress_id: r.egress_id.clone(),
         })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{FlowDirection, RouteTarget, RuleDuration, Rule, TransportProtocol};
+    use core_types::{FlowDirection, RuleDuration, Rule, TransportProtocol};
 
     fn mk_rule(
         id: &str,
@@ -117,7 +121,7 @@ mod tests {
             duration: RuleDuration::UntilRestart,
             process_name: process_name.map(str::to_string),
             destination,
-            route_target: None,
+            egress_id: None,
         }
     }
 
@@ -435,24 +439,23 @@ mod tests {
             direction: FlowDirection::Outbound,
             device_label: None,
         };
-        let tun = mk_rule(
+        let mut tun = mk_rule(
             "demo-digikala-tun",
-            RuleAction::Route {
-                target: RouteTarget::Tun("wg0".into()),
-            },
+            RuleAction::Route,
             Some("socks-client"),
             DestinationMatcher::DomainExact("www.digikala.com".to_string()),
         );
-        let wifi = mk_rule(
+        tun.egress_id = Some("eg-tun-wg0".into());
+        let mut wifi = mk_rule(
             "demo-digikala-wifi",
-            RuleAction::Route {
-                target: RouteTarget::Device("wlp0s20f3".into()),
-            },
+            RuleAction::Route,
             Some("socks-client"),
             DestinationMatcher::DomainExact("www.digikala.com".to_string()),
         );
+        wifi.egress_id = Some("eg-wifi-wlp0".into());
         let resolved = resolve_action(&[tun, wifi], &flow).expect("must resolve");
         assert_eq!(resolved.rule_id, "demo-digikala-wifi");
+        assert_eq!(resolved.egress_id, Some("eg-wifi-wlp0".into()));
     }
 }
 

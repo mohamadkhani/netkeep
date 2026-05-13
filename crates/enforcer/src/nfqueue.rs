@@ -133,21 +133,21 @@ where
         // re-classify to pick up the newly installed rule.
         let should_cache = matches!(
             &decision,
-            FlowDecision::Immediate(RuleAction::Allow)
-                | FlowDecision::Immediate(RuleAction::Route { .. })
-                | FlowDecision::Immediate(RuleAction::Deny)
+            FlowDecision::Immediate(RuleAction::Allow, _)
+                | FlowDecision::Immediate(RuleAction::Route, Some(_))
+                | FlowDecision::Immediate(RuleAction::Deny, _)
         );
 
         let fwmark = match &decision {
-            FlowDecision::Immediate(RuleAction::Route { target }) => {
+            FlowDecision::Immediate(RuleAction::Route, Some(target)) => {
                 self.registrar.route_mark(target)
             }
             _ => None,
         };
 
-        let verdict = match decision {
-            FlowDecision::Immediate(RuleAction::Allow)
-            | FlowDecision::Immediate(RuleAction::Route { .. }) => Verdict::Accept,
+        let verdict = match &decision {
+            FlowDecision::Immediate(RuleAction::Allow, _)
+            | FlowDecision::Immediate(RuleAction::Route, Some(_)) => Verdict::Accept,
             _ => Verdict::Drop,
         };
 

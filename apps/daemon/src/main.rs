@@ -102,70 +102,7 @@ fn now_secs() -> u64 {
 
 /// Detect local interfaces and build initial egress records.
 /// Includes:
-/// - system default route egress
-/// - TUN/TAP interfaces (type 65534)
-/// - physical LAN/Wi-Fi interfaces (type 1, excluding known virtual bridges)
-fn detect_egresses() -> Vec<Egress> {
-    let mut egresses = vec![Egress {
-        id: "eg-default".to_string(),
-        name: "Default Route".to_string(),
-        color: "#6b7280".to_string(),
-        targets: vec![],
-        dns_servers: vec![],
-        is_system_default: true,
-        is_available: true,
-    }];
 
-    if let Ok(entries) = std::fs::read_dir("/sys/class/net/") {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name == "lo" {
-                continue;
-            }
-            let if_type: u32 = std::fs::read_to_string(format!("/sys/class/net/{name}/type"))
-                .ok()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(1);
-            let operstate = std::fs::read_to_string(format!("/sys/class/net/{name}/operstate"))
-                .unwrap_or_default();
-            let state = operstate.trim();
-            let is_up = state == "up" || state == "unknown";
-
-            if if_type == 65534 {
-                egresses.push(Egress {
-                    id: format!("eg-{name}"),
-                    name: format!("TUN: {name}"),
-                    color: "#22c55e".to_string(),
-                    targets: vec![RouteTarget::Tun(name.clone())],
-                    dns_servers: vec![],
-                    is_system_default: false,
-                    is_available: is_up,
-                });
-            } else if if_type == 1
-                && !name.starts_with("docker")
-                && !name.starts_with("virbr")
-                && !name.starts_with("br-")
-            {
-                let is_wireless = name.starts_with("wl") || name.starts_with("wlp");
-                let label = if is_wireless {
-                    format!("Wi-Fi: {name}")
-                } else {
-                    format!("LAN: {name}")
-                };
-                egresses.push(Egress {
-                    id: format!("eg-{name}"),
-                    name: label,
-                    color: "#3b82f6".to_string(),
-                    targets: vec![RouteTarget::Device(name.clone())],
-                    dns_servers: vec![],
-                    is_system_default: false,
-                    is_available: is_up,
-                });
-            }
-        }
-    }
-    egresses
-}
 
 /// Returns true if the process `peer_pid` has stdin on a physical console
 /// (/dev/tty[0-9]* or /dev/console), not a pseudo-terminal (/dev/pts/*).
@@ -779,14 +716,18 @@ fn main() {
     // Bug 2: delete all UntilRestart rules on every startup.
     repo.purge_session_rules();
 
-    // Initialize/sync egress records from currently detected interfaces.
-    // Existing rows with the same id are updated; custom DNS servers are preserved.
-    let detected_egresses = detect_egresses();
-    for mut eg in detected_egresses {
-        if let Some(existing) = repo.get_egress(&eg.id) {
-            eg.dns_servers = existing.dns_servers;
-        }
-        repo.upsert_egress(&eg);
+    // Ensure the system default egress exists; do not auto-seed per-interface egresses.
+    // Interface availability is checked at routing time by first_available_target().
+    if repo.get_egress("eg-default").is_none() {
+        repo.upsert_egress(&Egress {
+            id: "eg-default".to_string(),
+            name: "Default Route".to_string(),
+            color: "#6b7280".to_string(),
+            targets: vec![],
+            dns_servers: vec![],
+            is_system_default: true,
+            is_available: true,
+        });
     }
 
     let startup_now = now_secs();

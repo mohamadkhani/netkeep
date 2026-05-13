@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
-use core_types::{DestinationMatcher, FlowContext, FlowDirection, RouteTarget, Rule, RuleAction, RuleDuration, TransportProtocol};
+use core_types::{DestinationMatcher, FlowContext, FlowDirection, Rule, RuleAction, RuleDuration, TransportProtocol};
 use control_api::{ControlRequest, ControlResponse};
 use serde_json::json;
 
@@ -86,11 +86,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                 Some("allow") => RuleAction::Allow,
                 Some("deny") => RuleAction::Deny,
                 Some("ask") => RuleAction::Ask,
-                Some("route") => {
-                    let device = extract_flag(flags_rest, "--route")
-                        .unwrap_or("tun0");
-                    RuleAction::Route { target: RouteTarget::Tun(device.to_string()) }
-                }
+                Some("route") => RuleAction::Route,
                 Some(other) => {
                     return Err(format!("unknown action: {other}; use allow, deny, ask, or route"))
                 }
@@ -107,14 +103,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                 None => RuleDuration::UntilRestart,
             };
             let process_name = extract_flag(flags_rest, "--process").map(|s| s.to_string());
-
-            let route_target = extract_flag(flags_rest, "--route").and_then(|v| {
-                if matches!(&action, RuleAction::Route { .. }) {
-                    None // already embedded in action
-                } else {
-                    Some(RouteTarget::Tun(v.to_string()))
-                }
-            });
+            let egress_id = extract_flag(flags_rest, "--egress").map(|s| s.to_string());
 
             Ok((
                 ControlRequest::AddRule(Rule {
@@ -124,7 +113,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                     duration,
                     process_name,
                     destination,
-                    route_target,
+                    egress_id,
                 }),
                 output_mode,
             ))
@@ -222,14 +211,12 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
                 let body = rules
                     .iter()
                     .map(|r| {
-                        let route = match &r.route_target {
-                            Some(RouteTarget::Tun(d)) => format!(" route=tun:{d}"),
-                            Some(RouteTarget::Device(d)) => format!(" route=dev:{d}"),
-                            Some(RouteTarget::Proxy(d)) => format!(" route=proxy:{d}"),
+                        let egress = match &r.egress_id {
+                            Some(id) => format!(" egress={id}"),
                             None => String::new(),
                         };
                         format!(
-                            "{} {:?} action={:?} duration={:?} process={:?}{route}",
+                            "{} {:?} action={:?} duration={:?} process={:?}{egress}",
                             r.id, r.destination, r.action, r.duration, r.process_name
                         )
                     })
@@ -287,13 +274,13 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
             "pending created id={pending_id} protocol={protocol:?} \
              created_at_secs={created_at_secs} deadline_at_secs={deadline_at_secs}"
         )),
-        ControlResponse::ImmediateVerdict { action } => {
+        ControlResponse::ImmediateVerdict { action, .. } => {
             Ok(format!("immediate verdict={action:?}"))
         }
         ControlResponse::PendingStillWaiting { pending_id } => {
             Ok(format!("pending still waiting id={pending_id}"))
         }
-        ControlResponse::PendingResolved { action } => {
+        ControlResponse::PendingResolved { action, .. } => {
             Ok(format!("pending resolved action={action:?}"))
         }
         ControlResponse::Health {
@@ -587,11 +574,11 @@ mod tests {
     }
 
     #[test]
-    fn add_rule_route_action_with_device() {
+    fn add_rule_route_action_with_egress() {
         let args = [
             "add-rule", "r1", "example.com",
             "--action", "route",
-            "--route", "wg0",
+            "--egress", "eg-vpn",
             "--duration", "permanent",
         ]
         .map(String::from)
@@ -599,7 +586,8 @@ mod tests {
         let (req, _) = parse_request(&args).expect("must parse");
         match req {
             ControlRequest::AddRule(rule) => {
-                assert_eq!(rule.action, RuleAction::Route { target: RouteTarget::Tun("wg0".to_string()) });
+                assert_eq!(rule.action, RuleAction::Route);
+                assert_eq!(rule.egress_id, Some("eg-vpn".to_string()));
                 assert_eq!(rule.duration, RuleDuration::Permanent);
             }
             _ => panic!("expected AddRule"),

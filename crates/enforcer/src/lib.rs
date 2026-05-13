@@ -48,9 +48,13 @@ pub trait PacketSource {
 }
 
 /// Decision returned by `FlowRegistrar` for a classified flow.
+///
+/// For `Immediate(Route, Some(target))` the NFQUEUE processor calls
+/// `route_mark(&target)` and sets the fwmark before accepting the packet.
+/// `route_target` is `None` for all non-Route actions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowDecision {
-    Immediate(RuleAction),
+    Immediate(RuleAction, Option<RouteTarget>),
     Pending { id: String, deadline_at_secs: u64 },
 }
 
@@ -100,13 +104,14 @@ where
         let decision = self.registrar.register(flow, now_secs);
 
         let verdict = match &decision {
-            FlowDecision::Immediate(RuleAction::Allow) => EnforcementVerdict::Allow,
-            FlowDecision::Immediate(RuleAction::Route { target }) => {
+            FlowDecision::Immediate(RuleAction::Allow, _) => EnforcementVerdict::Allow,
+            FlowDecision::Immediate(RuleAction::Route, Some(target)) => {
                 EnforcementVerdict::Route { target: target.clone() }
             }
-            // Deny rule, Ask without resolution, or pending queue overflow all result in a drop.
-            FlowDecision::Immediate(RuleAction::Deny)
-            | FlowDecision::Immediate(RuleAction::Ask)
+            // Route with no resolved target, Deny, Ask, or pending → drop (fail-close).
+            FlowDecision::Immediate(RuleAction::Route, None)
+            | FlowDecision::Immediate(RuleAction::Deny, _)
+            | FlowDecision::Immediate(RuleAction::Ask, _)
             | FlowDecision::Pending { .. } => EnforcementVerdict::Deny,
         };
 
@@ -552,7 +557,7 @@ impl FakeFlowRegistrar {
 impl FlowRegistrar for FakeFlowRegistrar {
     fn register(&mut self, _flow: FlowContext, _now_secs: u64) -> FlowDecision {
         if self.decisions.is_empty() {
-            FlowDecision::Immediate(RuleAction::Deny)
+            FlowDecision::Immediate(RuleAction::Deny, None)
         } else {
             self.decisions.remove(0)
         }
@@ -618,7 +623,7 @@ mod tests {
     fn allow_rule_applies_allow_verdict() {
         let mut p = processor(
             vec![event("f1")],
-            vec![FlowDecision::Immediate(RuleAction::Allow)],
+            vec![FlowDecision::Immediate(RuleAction::Allow, None)],
         );
         let result = p.process_next(1000).expect("result");
         assert_eq!(result.verdict, EnforcementVerdict::Allow);
@@ -629,7 +634,7 @@ mod tests {
     fn deny_rule_applies_deny_verdict() {
         let mut p = processor(
             vec![event("f2")],
-            vec![FlowDecision::Immediate(RuleAction::Deny)],
+            vec![FlowDecision::Immediate(RuleAction::Deny, None)],
         );
         let result = p.process_next(1000).expect("result");
         assert_eq!(result.verdict, EnforcementVerdict::Deny);
@@ -659,7 +664,7 @@ mod tests {
     fn sink_receives_verdict_with_correct_flow_id() {
         let mut p = processor(
             vec![event("f4")],
-            vec![FlowDecision::Immediate(RuleAction::Allow)],
+            vec![FlowDecision::Immediate(RuleAction::Allow, None)],
         );
         p.process_next(1000);
         assert_eq!(p.sink.applied.len(), 1);
@@ -726,7 +731,7 @@ mod tests {
         let target = RouteTarget::Tun("tun0".to_string());
         let mut p = processor(
             vec![event("f-route")],
-            vec![FlowDecision::Immediate(RuleAction::Route { target: target.clone() })],
+            vec![FlowDecision::Immediate(RuleAction::Route, Some(target.clone()))],
         );
         let result = p.process_next(1000).expect("result");
         assert_eq!(result.verdict, EnforcementVerdict::Route { target });

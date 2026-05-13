@@ -27,7 +27,7 @@ impl DecisionApp {
                         let remaining = s.item.deadline_at_secs.saturating_sub(s.now_secs);
                         cx.notify();
                         remaining == 0
-                    }).unwrap_or(false);
+                    });
                     if expired {
                         std::process::exit(0);
                     }

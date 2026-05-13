@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use core_types::{
-    DestinationMatcher, Egress, FlowEvent, FlowState, PendingDecision, ProxyAuth, ProxyConfig, ProxyProtocol,
-    RouteTarget, Rule, RuleAction, RuleDuration, TransportProtocol,
+    DestinationMatcher, Egress, FlowEvent, FlowState, PendingDecision, ProxyAuth, ProxyConfig,
+    ProxyProtocol, RouteTarget, Rule, RuleAction, RuleDuration, TransportProtocol,
 };
 use rusqlite::{params, Connection};
 
@@ -195,8 +195,7 @@ impl SqliteRuleRepository {
                  process_name TEXT NULL,
                  destination_kind INTEGER NOT NULL,
                  destination_value TEXT NOT NULL,
-                 route_target_kind INTEGER NULL,
-                 route_target_value TEXT NULL
+                 egress_id TEXT NULL
              );
              CREATE TABLE IF NOT EXISTS flow_events (
                  id TEXT PRIMARY KEY,
@@ -247,6 +246,8 @@ impl SqliteRuleRepository {
              );",
         )
         .map_err(|e| e.to_string())?;
+        // Migration: add egress_id column to existing DBs (ignore error if it already exists).
+        let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN egress_id TEXT NULL;");
         Ok(Self { conn })
     }
 }
@@ -262,12 +263,12 @@ fn action_to_i64(action: &RuleAction) -> i64 {
     }
 }
 
-fn i64_to_action(v: i64, route_target: &Option<RouteTarget>) -> Option<RuleAction> {
+fn i64_to_action(v: i64) -> Option<RuleAction> {
     match v {
         1 => Some(RuleAction::Allow),
         2 => Some(RuleAction::Deny),
         3 => Some(RuleAction::Ask),
-        4 => Some(RuleAction::Route { target: route_target.clone()? }),
+        4 => Some(RuleAction::Route),
         _ => None,
     }
 }
@@ -368,16 +369,9 @@ fn i64_to_state(v: i64) -> Option<FlowState> {
 impl RuleRepository for SqliteRuleRepository {
     fn upsert_rule(&mut self, rule: Rule) {
         let (destination_kind, destination_value) = destination_to_parts(&rule.destination);
-        let (rt_kind, rt_value) = match &rule.route_target {
-            Some(t) => {
-                let (k, v) = route_target_to_parts(t);
-                (Some(k), Some(v.to_string()))
-            }
-            None => (None, None),
-        };
         let _ = self.conn.execute(
-            "INSERT INTO rules (id, enabled, action, duration, process_name, destination_kind, destination_value, route_target_kind, route_target_value)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO rules (id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                  enabled=excluded.enabled,
                  action=excluded.action,
@@ -385,8 +379,7 @@ impl RuleRepository for SqliteRuleRepository {
                  process_name=excluded.process_name,
                  destination_kind=excluded.destination_kind,
                  destination_value=excluded.destination_value,
-                 route_target_kind=excluded.route_target_kind,
-                 route_target_value=excluded.route_target_value;",
+                 egress_id=excluded.egress_id;",
             params![
                 rule.id,
                 if rule.enabled { 1i64 } else { 0i64 },
@@ -395,8 +388,7 @@ impl RuleRepository for SqliteRuleRepository {
                 rule.process_name,
                 destination_kind,
                 destination_value,
-                rt_kind,
-                rt_value,
+                rule.egress_id,
             ],
         );
     }
@@ -405,16 +397,13 @@ impl RuleRepository for SqliteRuleRepository {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, route_target_kind, route_target_value
+                "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id
                  FROM rules WHERE id = ?1",
             )
             .ok()?;
         let mut rows = stmt.query(params![id]).ok()?;
         let row = rows.next().ok()??;
-        let rt_kind: Option<i64> = row.get(7).ok()?;
-        let rt_value: Option<String> = row.get(8).ok()?;
-        let route_target = rt_kind.and_then(|k| rt_value.and_then(|v| parts_to_route_target(k, v)));
-        let action = i64_to_action(row.get::<_, i64>(2).ok()?, &route_target)?;
+        let action = i64_to_action(row.get::<_, i64>(2).ok()?)?;
         let duration = i64_to_duration(row.get::<_, i64>(3).ok()?)?;
         let destination =
             parts_to_destination(row.get::<_, i64>(5).ok()?, row.get::<_, String>(6).ok()?)?;
@@ -425,22 +414,19 @@ impl RuleRepository for SqliteRuleRepository {
             duration,
             process_name: row.get(4).ok()?,
             destination,
-            route_target,
+            egress_id: row.get(7).ok()?,
         })
     }
 
     fn list_rules(&self) -> Vec<Rule> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, route_target_kind, route_target_value FROM rules ORDER BY id",
+            "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id FROM rules ORDER BY id",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
         let mapped = match stmt.query_map([], |row| {
-            let rt_kind: Option<i64> = row.get(7)?;
-            let rt_value: Option<String> = row.get(8)?;
-            let route_target = rt_kind.and_then(|k| rt_value.and_then(|v| parts_to_route_target(k, v)));
-            let action = i64_to_action(row.get::<_, i64>(2)?, &route_target)
+            let action = i64_to_action(row.get::<_, i64>(2)?)
                 .ok_or(rusqlite::Error::InvalidColumnType(2, "action".to_string(), rusqlite::types::Type::Integer))?;
             let duration = i64_to_duration(row.get::<_, i64>(3)?)
                 .ok_or(rusqlite::Error::InvalidColumnType(3, "duration".to_string(), rusqlite::types::Type::Integer))?;
@@ -453,7 +439,7 @@ impl RuleRepository for SqliteRuleRepository {
                 duration,
                 process_name: row.get(4)?,
                 destination,
-                route_target,
+                egress_id: row.get(7)?,
             })
         }) {
             Ok(m) => m,
@@ -884,7 +870,7 @@ mod tests {
             duration: RuleDuration::UntilRestart,
             process_name: Some("curl".to_string()),
             destination: DestinationMatcher::DomainExact("example.com".to_string()),
-            route_target: None,
+            egress_id: None,
         }
     }
 

@@ -1,5 +1,6 @@
 use core_types::{
-    Egress, FlowContext, FlowEvent, PendingDecision, ProxyConfig, RouteTarget, Rule, RuleAction, TransportProtocol,
+    Egress, FlowContext, FlowEvent, PendingDecision, ProxyConfig, RouteTarget, Rule, RuleAction,
+    TransportProtocol,
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,9 +48,14 @@ pub enum ControlResponse {
         deadline_at_secs: u64,
         protocol: TransportProtocol,
     },
-    ImmediateVerdict { action: RuleAction },
+    /// Returned when a flow immediately matches a stored rule.
+    /// `route_target` is `Some` only when `action == Route`; it holds the
+    /// first available target resolved from the rule's egress at decision time.
+    ImmediateVerdict { action: RuleAction, route_target: Option<RouteTarget> },
     PendingStillWaiting { pending_id: String },
-    PendingResolved { action: RuleAction },
+    /// Returned after a pending decision is resolved.
+    /// `route_target` is `Some` only when `action == Route`.
+    PendingResolved { action: RuleAction, route_target: Option<RouteTarget> },
     Health {
         ready: bool,
         fail_close_active: bool,
@@ -131,7 +137,7 @@ mod tests {
             duration: RuleDuration::UntilRestart,
             process_name: None,
             destination: DestinationMatcher::IpExact("1.1.1.1".to_string()),
-            route_target: None,
+            egress_id: None,
         }
     }
 
