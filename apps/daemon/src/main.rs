@@ -459,6 +459,32 @@ fn connect_via_tun(addrs: &[SocketAddr], iface: &str) -> Result<TcpStream, Strin
 }
 
 fn open_routed_tcp(host: String, port: u16, target: RouteTarget, db_path: String) -> Result<String, String> {
+    // Resolve and connect upstream synchronously so any failure is reported
+    // to the emulator as a ControlResponse::Error *before* RoutedTcpReady is
+    // sent.  Previously the connect happened inside the relay thread, so the
+    // emulator received RoutedTcpReady immediately and curl was left stuck for
+    // up to ROUTED_CONNECT_TIMEOUT_SECS before getting an abrupt TCP close.
+    let addrs = resolve_socket_addrs(&host, port, Some(&target), &db_path)?;
+    if let Some(first) = addrs.first() {
+        if let Some(route_line) = route_probe_for(&first.ip().to_string()) {
+            eprintln!(
+                "routed route-probe (default/unmarked): target={target:?} first_addr={first} ip_route_get=\"{route_line}\""
+            );
+        }
+        if let Some(mark) = fwmark_for_route_probe(&target) {
+            if let Some(mline) = route_probe_marked(&first.ip().to_string(), mark) {
+                eprintln!(
+                    "routed route-probe (fwmark={mark}): target={target:?} first_addr={first} ip_route_get=\"{mline}\""
+                );
+            }
+        }
+    }
+    let upstream = match &target {
+        RouteTarget::Tun(iface) => connect_via_tun(&addrs, iface),
+        RouteTarget::Device(iface) => connect_via_device(&addrs, iface),
+        RouteTarget::Proxy(id) => Err(format!("proxy routing not yet implemented: {id}")),
+    }?;
+
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let listen_addr = listener.local_addr().map_err(|e| e.to_string())?.to_string();
     std::thread::spawn(move || {
@@ -469,42 +495,7 @@ fn open_routed_tcp(host: String, port: u16, target: RouteTarget, db_path: String
                 return;
             }
         };
-        let addrs = match resolve_socket_addrs(&host, port, Some(&target), &db_path) {
-            Ok(v) => v,
-            Err(err) => {
-                eprintln!("routed host resolution failed: {err}");
-                return;
-            }
-        };
-        if let Some(first) = addrs.first() {
-            if let Some(route_line) = route_probe_for(&first.ip().to_string()) {
-                eprintln!(
-                    "routed route-probe (default/unmarked): target={target:?} first_addr={first} ip_route_get=\"{route_line}\""
-                );
-            }
-            if let Some(mark) = fwmark_for_route_probe(&target) {
-                if let Some(mline) = route_probe_marked(&first.ip().to_string(), mark) {
-                    eprintln!(
-                        "routed route-probe (fwmark={mark}): target={target:?} first_addr={first} ip_route_get=\"{mline}\""
-                    );
-                }
-            }
-        }
-        let upstream = match target {
-            RouteTarget::Tun(iface) => connect_via_tun(&addrs, &iface),
-            RouteTarget::Device(iface) => connect_via_device(&addrs, &iface),
-            RouteTarget::Proxy(id) => Err(format!(
-                "Proxy routing not yet implemented: {id}"
-            )),
-        };
-        match upstream {
-            Ok(upstream) => {
-                let _ = relay_bidirectional(client, upstream);
-            }
-            Err(err) => {
-                eprintln!("routed upstream connect failed: {err}");
-            }
-        }
+        let _ = relay_bidirectional(client, upstream);
     });
     Ok(listen_addr)
 }
