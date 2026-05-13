@@ -162,7 +162,8 @@ Pending queue and timeout state machine.
 
 **Functions:**
 - `register_unknown_flow()` → existing or new pending ID
-- `resolve_pending()` → apply user decision, clears flow index entry
+- `resolve_pending(id, action, egress_id)` → apply user decision, stores `(action, egress_id)` for later polling, clears flow index entry
+- `take_resolved(id)` → `Option<(RuleAction, Option<egress_id>)>` — consumed once; callers use `egress_id` to call `resolve_route_target()` before returning `PendingResolved`
 - `expire_timeouts()` → auto-deny expired pendings, clears flow index entries
 - `purge_session_rules()` → delete UntilRestart rules
 
@@ -403,7 +404,7 @@ Planned (Phase 2 onward):
     - Configurable `ROUTE_MARK_BASE` (default: 20000) via `LOGIGUARD_ROUTE_MARK_BASE` env var
 12. **Single-decision window gating in monitor mode:** Tray monitor allows only one decision dialog at a time and clears the open-window gate after the spawned `--pending-id` child exits (parent waits on child). Deferred pendings are retried on subsequent polls.
 
-13. **Egress-bound rules; target resolved at enforcement time:** `Rule.egress_id` references a named `Egress` entity rather than embedding a concrete `RouteTarget`. At enforcement time `control-service::first_available_target()` walks the egress's ordered target list and returns the first usable one — Device/Tun checked via `/sys/class/net/<name>/operstate`, Proxy checked via `ProxyRepository.enabled`. This enables failover (e.g. primary VPN down → backup proxy) without touching the rule. `ImmediateVerdict` and `PendingResolved` carry the resolved `route_target: Option<RouteTarget>` so the enforcer still gets a concrete target even though `RuleAction::Route` no longer embeds one.
+13. **Egress-bound rules; target resolved at enforcement time:** `Rule.egress_id` references a named `Egress` entity rather than embedding a concrete `RouteTarget`. At enforcement time `control-service::first_available_target()` walks the egress's ordered target list and returns the first usable one — Device/Tun checked via `/sys/class/net/<name>/operstate`, Proxy checked via `ProxyRepository.enabled`. This enables failover (e.g. primary VPN down → backup proxy) without touching the rule. `ImmediateVerdict` and `PendingResolved` carry the resolved `route_target: Option<RouteTarget>` so the enforcer still gets a concrete target even though `RuleAction::Route` no longer embeds one. **`AwaitPendingDecision` also resolves the target** — `DecisionEngine.resolved` stores `(action, egress_id)` so any poller (emulator, CLI) receives the same concrete target that the UI received via `ResolvePendingWithRule`. Without this, the first request after a dialog resolution would route to the wrong interface; subsequent requests (which hit the persisted rule directly) would route correctly.
 
 14. **Daemon does not auto-seed per-interface egresses:** On startup the daemon only ensures the `eg-default` system egress exists. It does not create one Egress per local network interface. Interface availability is checked at routing time by `first_available_target()`, not stored in the DB. The "Route via" selector in the decision dialog therefore shows only user-defined named egresses plus the default route.
 

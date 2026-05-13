@@ -42,7 +42,7 @@ pub struct DecisionEngine {
     pending: HashMap<String, PendingDecision>,
     /// Reverse index: FlowKey → pending_id. Kept in sync with `pending`.
     pending_by_flow: HashMap<FlowKey, String>,
-    resolved: HashMap<String, RuleAction>,
+    resolved: HashMap<String, (RuleAction, Option<String>)>,
     next_id: u64,
     pending_limit: usize,
     tcp_timeout_secs: u64,
@@ -171,11 +171,11 @@ impl DecisionEngine {
         DecisionOutcome::Pending(decision)
     }
 
-    pub fn resolve_pending(&mut self, pending_id: &str, action: RuleAction) -> Option<RuleAction> {
+    pub fn resolve_pending(&mut self, pending_id: &str, action: RuleAction, egress_id: Option<String>) -> Option<RuleAction> {
         if let Some(decision) = self.pending.remove(pending_id) {
             let key = FlowKey::from(&decision.flow);
             self.pending_by_flow.remove(&key);
-            self.resolved.insert(pending_id.to_string(), action.clone());
+            self.resolved.insert(pending_id.to_string(), (action.clone(), egress_id));
             Some(action)
         } else {
             None
@@ -186,7 +186,8 @@ impl DecisionEngine {
         self.pending.contains_key(pending_id)
     }
 
-    pub fn take_resolved(&mut self, pending_id: &str) -> Option<RuleAction> {
+    /// Returns `(action, egress_id)` for the resolved pending, consuming the entry.
+    pub fn take_resolved(&mut self, pending_id: &str) -> Option<(RuleAction, Option<String>)> {
         self.resolved.remove(pending_id)
     }
 
@@ -369,7 +370,7 @@ mod tests {
         let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
         let out = engine.register_unknown_flow(mk_flow(), 0);
         let id = match out { DecisionOutcome::Pending(p) => p.id, _ => panic!() };
-        engine.resolve_pending(&id, RuleAction::Allow);
+        engine.resolve_pending(&id, RuleAction::Allow, None);
 
         // After resolve, the same flow should create a new pending (not deduplicate).
         let out2 = engine.register_unknown_flow(mk_flow(), 1);
@@ -440,10 +441,10 @@ mod tests {
             _ => panic!("expected pending"),
         };
         assert!(engine.is_pending(&id));
-        let resolved = engine.resolve_pending(&id, RuleAction::Allow);
+        let resolved = engine.resolve_pending(&id, RuleAction::Allow, None);
         assert_eq!(resolved, Some(RuleAction::Allow));
         assert!(!engine.is_pending(&id));
-        assert_eq!(engine.take_resolved(&id), Some(RuleAction::Allow));
+        assert_eq!(engine.take_resolved(&id), Some((RuleAction::Allow, None)));
         assert_eq!(engine.take_resolved(&id), None);
     }
 

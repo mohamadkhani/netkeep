@@ -283,8 +283,13 @@ impl<R: Repository> ControlService<R> {
                 }
             }
             ControlRequest::AwaitPendingDecision { pending_id } => {
-                if let Some(action) = self.decision_engine.take_resolved(&pending_id) {
-                    ControlResponse::PendingResolved { action, route_target: None }
+                if let Some((action, egress_id)) = self.decision_engine.take_resolved(&pending_id) {
+                    let route_target = if action == RuleAction::Route {
+                        self.resolve_route_target(&egress_id)
+                    } else {
+                        None
+                    };
+                    ControlResponse::PendingResolved { action, route_target }
                 } else if self.decision_engine.is_pending(&pending_id) {
                     ControlResponse::PendingStillWaiting { pending_id }
                 } else {
@@ -292,7 +297,7 @@ impl<R: Repository> ControlService<R> {
                 }
             }
             ControlRequest::ResolvePending { pending_id, action } => {
-                if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action) {
+                if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action, None) {
                     self.repo.delete_pending(&pending_id);
                     let route_target = if chosen == RuleAction::Route {
                         // No rule context here — best-effort: no target
@@ -316,7 +321,7 @@ impl<R: Repository> ControlService<R> {
                 let egress_id = rule.egress_id.clone();
                 self.repo.upsert_rule(rule);
                 self.sweep_pending();
-                if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action) {
+                if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action, egress_id.clone()) {
                     self.repo.delete_pending(&pending_id);
                     let route_target = if chosen == RuleAction::Route {
                         self.resolve_route_target(&egress_id)
@@ -413,7 +418,7 @@ impl<R: Repository> ControlService<R> {
                             "sweep_pending: auto-resolving {} ({:?} → {:?})",
                             p.id, p.flow.process_name, action
                         );
-                        self.decision_engine.resolve_pending(&p.id, action.clone());
+                        self.decision_engine.resolve_pending(&p.id, action.clone(), resolved.egress_id.clone());
                         self.repo.delete_pending(&p.id);
                         let _ = self.notification_tx.send(PushNotification::PendingResolved {
                             pending_id: p.id,
