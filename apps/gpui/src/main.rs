@@ -277,7 +277,19 @@ fn run_gui(pending_id: String) {
         Theme::change(ThemeMode::Dark, None, cx);
         fonts::apply_design_fonts(cx);
 
-        let egresses = daemon::fetch_egresses();
+        let mut egresses = daemon::fetch_egresses();
+        // Sort: system default first, then available, then unavailable.
+        egresses.sort_by(|a, b| {
+            match (a.is_system_default, b.is_system_default) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => match (a.is_available, b.is_available) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.id.cmp(&b.id),
+                },
+            }
+        });
         let process_scope = if item.flow.process_name.is_some() {
             ProcessScope::Specific
         } else {
