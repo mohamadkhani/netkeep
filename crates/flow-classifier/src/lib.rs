@@ -60,9 +60,13 @@ pub struct RawPacket {
     pub sni_hint: Option<String>,
     /// Network interface the packet arrived on (populated for gateway/routed traffic).
     pub ingress_interface: Option<String>,
-    /// True when this is a TCP control packet (SYN/ACK/FIN) with no application payload.
-    /// These must be accepted immediately so the handshake completes before classification.
+    /// True when the TCP payload carries no application data (SYN, pure ACK, FIN, RST).
+    /// Used to skip SNI/Host extraction for control-only frames.
     pub tcp_payload_empty: bool,
+    /// True when the TCP FIN flag is set (connection teardown initiated by this side).
+    pub tcp_fin: bool,
+    /// True when the TCP RST flag is set (connection forcibly reset).
+    pub tcp_rst: bool,
 }
 
 /// Resolves the local process name from a socket endpoint.
@@ -231,6 +235,8 @@ mod tests {
             sni_hint: sni.map(str::to_string),
             ingress_interface: iface.map(str::to_string),
             tcp_payload_empty: false,
+            tcp_fin: false,
+            tcp_rst: false,
         }
     }
 

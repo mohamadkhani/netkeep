@@ -101,6 +101,21 @@ See [`docs/gpui-components.md`](docs/gpui-components.md) → Export Map for the 
 - Storage: SQLite
 - Recovery: physical-console-only emergency unlock; boot blocks until daemon healthy
 
+### Linux packages required to build `logiguard-gpui`
+
+Linking the GPUI binary pulls in the system tray stack (`tray-icon` / GTK / `muda`). On Linux you need at least:
+
+- **libappindicator** — AppIndicator / StatusNotifier client library (`-llibappindicator`).
+- **xdotool** — provides **libxdo** (`-lxdo`) on the X11 dependency path.
+
+Arch Linux example:
+
+```bash
+sudo pacman -S libappindicator xdotool
+```
+
+Other distributions use different package names; install the equivalents that ship `libappindicator` and `libxdo`.
+
 ## 2) Core Architecture
 
 See [`docs/architecture.md`](docs/architecture.md) for full component diagrams, crate descriptions, data flow, and design decisions.

@@ -31,7 +31,7 @@ You do **not** have the process name. The kernel knows which process opened the 
                        ▼
 /proc/net/{tcp,tcp6,udp,udp6}
   find row where local_address matches
-  retry [0, 3, 8] ms — TOCTOU with kernel publishing
+  retry [0, 5, 15, 40] ms — TOCTOU with kernel publishing
         │
         └── inode + uid
                 │
@@ -39,13 +39,14 @@ You do **not** have the process name. The kernel knows which process opened the 
         /proc/*/fd/*
           scan symlinks for socket:[inode]
           UID-filtered first pass, full scan fallback
+          retry [0, 3, 8] ms — fork/exec fd-visibility gap
                 │
                 └── pid
                         │
                         ▼
                 /proc/<pid>/exe  (preferred)
                 /proc/<pid>/comm (fallback — kernel truncates to 15 chars)
-                parent-process exe basename for short names (≤3 chars)
+                parent-process exe basename for shell wrapper names
                   process name
                         │
                         ▼
@@ -171,12 +172,13 @@ For the full executable path, `/proc/<pid>/exe` is a symlink to the binary. For 
 
 ## Race Conditions
 
-There are **two** TOCTOU windows that produce `process_name = None`:
+There are **three** TOCTOU windows that produce `process_name = None`:
 
-1. **Kernel-publishing race.** The kernel writes the socket entry to `/proc/net/{tcp,udp}*` asynchronously. NFQUEUE can hand a packet to userspace before the row is visible. The retry loop in `retry_find_socket` (`[0, 3, 8]` ms) closes most of this window; under load or for very fast resolvers some packets still miss.
-2. **Process-exit race.** Between packet delivery and `/proc` lookup the process exits: the inode disappears from `/proc/net/tcp*`, the fd symlink under `/proc/<pid>/fd/` is gone, and the lookup returns `None`.
+1. **Kernel-publishing race.** The kernel writes the socket entry to `/proc/net/{tcp,udp}*` asynchronously. NFQUEUE can hand a packet to userspace before the row is visible. The retry loop in `retry_find_socket` (`[0, 5, 15, 40]` ms, 4 attempts, 60 ms worst case) closes most of this window; under load or for very fast resolvers some packets still miss.
+2. **Fork/exec fd-visibility gap.** Multi-process apps (e.g. Electron, Chromium) spawn a dedicated network-service subprocess. During the brief `fork`→`exec` transition, the new process's file descriptors are not yet visible in `/proc/<pid>/fd/`, so `find_pid_for_inode` returns `None`. The retry loop in `find_pid_for_inode` (`[0, 3, 8]` ms) covers this window for most apps; very slow forks may still miss.
+3. **Process-exit race.** Between packet delivery and `/proc` lookup the process exits: the inode disappears from `/proc/net/tcp*`, the fd symlink under `/proc/<pid>/fd/` is gone, and the lookup returns `None`.
 
-Both look identical from the resolver's perspective — `Option<String>` returns `None` — but their *frequencies* differ. The kernel-publishing race fires on the **first packet of a brand-new connection** under contention. The process-exit race fires on **packets in flight after the process has died** and is uncommon.
+All three look identical from the resolver's perspective — `Option<String>` returns `None` — but their *frequencies* differ. The kernel-publishing race and fork/exec gap fire on the **first packet of a brand-new connection**; the process-exit race fires on **packets in flight after the process has died** and is uncommon.
 
 ### Per-socket cache (in-memory, 60 s TTL)
 

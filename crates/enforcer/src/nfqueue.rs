@@ -106,9 +106,27 @@ where
             protocol: raw.protocol,
         };
 
-        // TCP FIN/RST (empty payload, connection closing) — evict cache entry and accept.
-        if raw.tcp_payload_empty {
+        // FIN/RST — connection is closing/resetting. Evict the cached verdict so
+        // that a future connection reusing the same 5-tuple gets a fresh decision.
+        if raw.tcp_fin || raw.tcp_rst {
             self.decided.remove(&key);
+            return (Verdict::Accept, None);
+        }
+
+        // Pure ACK (and SYN during handshake) — no application payload, nothing
+        // to classify. Return the cached verdict if one exists; otherwise accept.
+        // Do NOT evict the cache: pure ACKs flow freely in established connections
+        // and evicting here would force full re-classification on the next data
+        // segment, which re-runs the /proc resolver and can return process=None
+        // when the proc lookup races with a brief fd-visibility gap.
+        if raw.tcp_payload_empty {
+            if let Some(cached) = self.decided.get(&key) {
+                if cached.expires_at > now_secs {
+                    let v = if cached.accept { Verdict::Accept } else { Verdict::Drop };
+                    return (v, cached.fwmark);
+                }
+                self.decided.remove(&key);
+            }
             return (Verdict::Accept, None);
         }
 
@@ -201,27 +219,36 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         }
     };
 
-    let (src_port, dst_port, protocol, sni_hint, tcp_payload_empty) = match sliced.transport.as_ref() {
-        Some(TransportSlice::Tcp(t)) => {
-            let payload = t.payload();
-            // TLS SNI is the authoritative source when present (TLS is the
-            // common case). For plaintext HTTP — still common for `curl host`,
-            // captive-portal pages, package mirrors, and old internal apps
-            // — fall back to the HTTP `Host:` header so the user actually
-            // sees a domain in the decision dialog. Without this fallback,
-            // any HTTP-only flow shows IP-only and looks like a daemon bug.
-            let domain_hint = extract_tls_sni(payload).or_else(|| extract_http_host(payload));
-            (t.source_port(), t.destination_port(), TransportProtocol::Tcp, domain_hint, payload.is_empty())
-        }
-        Some(TransportSlice::Udp(u)) => {
-            let (sp, dp) = (u.source_port(), u.destination_port());
-            // Best-effort QUIC detection: UDP to/from port 443.
-            let proto =
-                if dp == 443 || sp == 443 { TransportProtocol::Quic } else { TransportProtocol::Udp };
-            (sp, dp, proto, None, false)
-        }
-        _ => (0, 0, TransportProtocol::Other, None, false),
-    };
+    let (src_port, dst_port, protocol, sni_hint, tcp_payload_empty, tcp_fin, tcp_rst) =
+        match sliced.transport.as_ref() {
+            Some(TransportSlice::Tcp(t)) => {
+                let payload = t.payload();
+                // TLS SNI is the authoritative source when present (TLS is the
+                // common case). For plaintext HTTP — still common for `curl host`,
+                // captive-portal pages, package mirrors, and old internal apps
+                // — fall back to the HTTP `Host:` header so the user actually
+                // sees a domain in the decision dialog. Without this fallback,
+                // any HTTP-only flow shows IP-only and looks like a daemon bug.
+                let domain_hint = extract_tls_sni(payload).or_else(|| extract_http_host(payload));
+                (
+                    t.source_port(),
+                    t.destination_port(),
+                    TransportProtocol::Tcp,
+                    domain_hint,
+                    payload.is_empty(),
+                    t.fin(),
+                    t.rst(),
+                )
+            }
+            Some(TransportSlice::Udp(u)) => {
+                let (sp, dp) = (u.source_port(), u.destination_port());
+                // Best-effort QUIC detection: UDP to/from port 443.
+                let proto =
+                    if dp == 443 || sp == 443 { TransportProtocol::Quic } else { TransportProtocol::Udp };
+                (sp, dp, proto, None, false, false, false)
+            }
+            _ => (0, 0, TransportProtocol::Other, None, false, false, false),
+        };
 
     Some(RawPacket {
         src_ip,
@@ -232,6 +259,8 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         sni_hint,
         ingress_interface: None,
         tcp_payload_empty,
+        tcp_fin,
+        tcp_rst,
     })
 }
 

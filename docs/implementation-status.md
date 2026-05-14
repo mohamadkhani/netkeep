@@ -2,7 +2,7 @@
 
 **Test Status:** 143 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
-**Last Updated:** 2026-05-14
+**Last Updated:** 2026-05-15
 
 ## Completed Work
 
@@ -34,6 +34,7 @@
 - [x] TLS SNI extraction from ClientHello (`extract_tls_sni` in `enforcer::nfqueue`)
 - [x] TCP control packets (SYN/ACK/FIN) accepted immediately so handshake completes before classification
 - [x] `RawPacket::tcp_payload_empty` flag to distinguish control packets from data packets
+- [x] `RawPacket::tcp_fin` / `tcp_rst` flags to distinguish connection teardown from pure ACKs in verdict cache
 - [x] Real ProcessResolver via `/proc/net/{tcp,tcp6,udp,udp6}` → inode → `/proc/<pid>/fd` → `/proc/<pid>/comm`
 - [ ] **Not done:** DNS snoop cache for UDP/QUIC domain inference (SNI covers TCP/HTTPS)
 - [ ] **Not done:** Integration tests with actual kernel NFQUEUE
@@ -239,6 +240,22 @@
 
 - **Fix:** `seed_initial_egresses()` runs on first startup: LAN via `ip route get 8.8.8.8`, TUN interfaces via `/sys/class/net/*/type = 65534`. Seeding is skipped once any user egress exists.
 
+## Bug Fixes (ACK eviction + Electron fd gap, 2026-05-15)
+
+**Bug 22:** `process=None` on follow-up packets for multi-process apps (e.g. Electron/Cursor), producing a second `(unknown)` decision dialog for a connection the user had already approved.
+
+- **Root cause (compound):**
+  1. **ACK eviction bug.** `NfqueueProcessor::decide()` used the `tcp_payload_empty` guard to evict the 5-tuple verdict cache. Pure ACKs (client acknowledging server data) have empty payloads and triggered the guard, evicting the cache and forcing full re-classification of the next data packet on every ACK/data alternation. This re-ran `ProcProcessResolver` far more often than necessary.
+  2. **No retry in `find_pid_for_inode`.** The inode→pid scan had no retry, unlike `retry_find_socket`. Electron's `--type=utility` network-service subprocess has a brief `fork`→`exec` window where its fds are absent from `/proc/<pid>/fd/`. The ACK eviction guaranteed that re-classification would hit this window frequently.
+
+- **Fix:**
+  1. `RawPacket` gained two new fields: `tcp_fin: bool` and `tcp_rst: bool`, populated from `etherparse::TcpHeaderSlice`. `decide()` now evicts the verdict cache only on FIN/RST (connection closing). Pure ACKs consult the cache without evicting it.
+  2. `find_pid_for_inode` gained a `[0, 3, 8]` ms retry loop, matching the pattern already used by `retry_find_socket` for the `/proc/net/tcp` lookup.
+
+- **Tests:** All 143 existing tests pass; no new tests added (the invariants are already covered by the three-layer race test suite added for Bug 12).
+
+- **Docs:** `docs/nfqueue-packet-interception.md` TCP handling section rewritten; `docs/process-resolver.md` lookup chain and Race Conditions section updated; `docs/process-attribution-races.md` Bug 22 worked example added.
+
 ## Bug Fixes (decision dialog + settings focus, 2026-05-13)
 
 **Bug 17:** Decision dialog clips action footer when many egress entries present.
@@ -363,7 +380,7 @@ CREATE TABLE pending_decisions (
 | control-service | 12 | RPC handlers, pending lifecycle, push notifications |
 | cli | 17 | Command parsing, output formatting |
 | daemon + emulator integration | 3 | route target switch e2e (2), SOCKS5 allow relay (1) |
-| **Total** | **123** | |
+| **Total** | **143** | |
 
 ## CLI Commands
 
@@ -505,7 +522,7 @@ LOGIGUARD_NFQUEUE=0 \
 ### Current
 
 - Workspace compiles cleanly
-- 142 tests passing (`cargo test --workspace`)
+- 143 tests passing (`cargo test --workspace`)
 - No CI pipeline set up yet
 
 ### Planned
@@ -519,7 +536,7 @@ LOGIGUARD_NFQUEUE=0 \
 
 - **Lines of code (Rust):** ~6,000 (crates + apps)
 - **Test code:** ~2,500 (unit + integration)
-- **Test count:** 123 passing
+- **Test count:** 143 passing
 - **Crates:** 7 (core, policy, decision, flow, enforcer, state, control)
 - **Apps:** 3 (daemon, CLI, GPUI)
 - **Database tables:** 6 (rules, flow_events, pending_decisions, egresses, egress_targets, egress_dns_servers, proxies)

@@ -166,6 +166,54 @@ If you remove any layer, an above row reappears as a duplicate dialog.
 
 ---
 
+## Bug 22 — ACK eviction + Electron fd gap (fixed 2026-05-15)
+
+This is a worked example of two bugs that compounded to produce the `process=None` symptom in production (`electron → api2.cursor.sh`).
+
+### Root cause 1 — ACK eviction in `NfqueueProcessor::decide()`
+
+The nftables `output_early` chain sends **all** output packets to NFQUEUE — SYNs, pure ACKs, FINs, RSTs, and data alike. The old `decide()` used a single `tcp_payload_empty` guard:
+
+```rust
+// old, buggy
+if raw.tcp_payload_empty {
+    self.decided.remove(&key);  // evicted cache for ACKs too
+    return (Verdict::Accept, None);
+}
+```
+
+A pure ACK (client acknowledging server data) has an empty TCP payload. The guard fired, evicted the 5-tuple verdict cache, and forced the **next** data packet to miss the cache and run the full classification pipeline — including `ProcProcessResolver`. If that re-classification raced `/proc`, `process_name` came back `None`.
+
+**Fix:** Split the guard into two distinct branches.
+
+```rust
+// FIN/RST — connection closing. Evict.
+if raw.tcp_fin || raw.tcp_rst {
+    self.decided.remove(&key);
+    return (Verdict::Accept, None);
+}
+
+// Pure ACK (or SYN during handshake) — no application data. Consult cache; do NOT evict.
+if raw.tcp_payload_empty {
+    if let Some(cached) = self.decided.get(&key) { ... }
+    return (Verdict::Accept, None);
+}
+```
+
+Two new fields were added to `RawPacket`: `tcp_fin: bool` and `tcp_rst: bool`, populated by `parse_raw_packet()` from `etherparse::TcpHeaderSlice::fin()` / `.rst()`.
+
+### Root cause 2 — no retry in `find_pid_for_inode`
+
+`retry_find_socket` already had a retry loop (`[0, 5, 15, 40]` ms) for the `/proc/net/tcp` inode lookup. But `find_pid_for_inode` (the `/proc/*/fd/` scan) had **no retry** at all. Electron spawns a dedicated `--type=utility` network-service subprocess; during the `fork`→`exec` window its fds are not visible. Without the ACK eviction bug the window was rarely hit; with it, every client ACK triggered a re-classification that landed squarely in the fork/exec gap.
+
+**Fix:** Added `[0, 3, 8]` ms retry to `find_pid_for_inode` (same pattern as `retry_find_socket`).
+
+### Why two separate Allow rules were created
+
+Rule `ui-1778793567` was created when `process=Some("electron")` — the GPUI dialog offered a `DomainWildcard("cursor.sh")` destination. Layer 3 (`process_matches`) requires an exact destination (`IpExact` or `DomainExact`) to forgive `process=None`; wildcards still require a strict match. When the next connection arrived with `process=None`, the wildcard rule did not match, and the user was prompted again — producing rule `ui-1778793599` with `DomainExact("api2.cursor.sh")` and no process constraint.
+
+---
+
 ## When to revisit
 
 Add a fourth layer if you ever ship one of:

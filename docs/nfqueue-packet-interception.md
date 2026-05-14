@@ -27,8 +27,7 @@ nftables OUTPUT hook  (hook priority -150)
   │
   ├─ loopback? → accept immediately
   ├─ relay socket (fwmark ≥ base)? → accept, restore routing mark
-  ├─ ct state established,related? → accept immediately (already decided)
-  └─ new connection → QUEUE to NFQUEUE num N
+  └─ everything else → QUEUE to NFQUEUE num N
          │
          │  kernel holds packet in queue
          │  blocks application retransmission
@@ -36,10 +35,13 @@ nftables OUTPUT hook  (hook priority -150)
   logiguard-daemon (userspace)
     │  recv() from /dev/nfnetlink_queue
     │  parse IP packet bytes
-    │  TCP control packet (no payload)? → Accept (let handshake complete)
+    │  FIN or RST flag? → evict 5-tuple verdict cache, Accept
+    │  empty TCP payload (SYN, pure ACK)? → return cached verdict or Accept
     │  SNI present? → populate SniDnsCache (ip → domain)
+    │  5-tuple in verdict cache? → return cached verdict
     │  classify flow (SniDnsCache lookup, process, IP)
     │  query decision engine (rule match / pending)
+    │  definitive verdict (Allow/Deny)? → insert into 5-tuple verdict cache
     ▼
   verdict: Accept or Drop
          │
@@ -89,20 +91,19 @@ table inet logiguard {
     ip6 daddr ::1 accept
     ip6 daddr ::ffff:7f00:0000/104 accept
 
-    # Already-decided connections: skip NFQUEUE entirely.
-    # Without this, every ACK/data packet is re-classified; the socket is
-    # established so /proc/net has no SYN entry, process resolution fails,
-    # and "unknown" pending decisions flood the queue.
-    ct state established,related accept
+    # DNS must bypass NFQUEUE — queuing it would block name resolution.
+    udp dport 53 accept
+    tcp dport 53 accept
 
-    # Queue only the first packet of new connections.
+    # All other output goes to NFQUEUE. The userspace daemon maintains a
+    # per-5-tuple verdict cache so that already-decided connections are
+    # fast-pathed in Rust rather than being re-classified every packet.
     queue num 0
   }
 
   chain forward {
     type filter hook forward priority 0; policy accept;
     oifname "lo" accept
-    ct state established,related accept
     queue num 0
   }
 }
@@ -152,21 +153,40 @@ There is no "reject with ICMP" option in NFQUEUE verdicts — only accept or dro
 
 ---
 
-## Why TCP Control Packets Are Accepted Without Classification
+## TCP Packet Handling in the Verdict Cache
 
-NFQUEUE intercepts **every** packet matching the rule, including TCP SYN packets. A SYN has no application payload — no SNI can be extracted. If the SYN is dropped (pending decision), the TCP handshake never completes and the TLS ClientHello (which carries the SNI hostname) never arrives.
+Because the nftables rule sends **all** output packets to NFQUEUE (no `ct state new` filter), the userspace daemon receives SYNs, pure ACKs, data packets, FINs, and RSTs alike. Each kind is handled differently.
 
-**Fix:** Accept packets with empty TCP payload immediately. Let the 3-way handshake complete. The TLS ClientHello is the first packet with real application data — it is the one that gets classified, with SNI available.
+### FIN / RST — connection closing
 
 ```rust
-if is_loopback(&raw.dst_ip) || raw.tcp_payload_empty {
-    Verdict::Accept
-} else {
-    // classify and decide
+if raw.tcp_fin || raw.tcp_rst {
+    self.decided.remove(&key);  // evict 5-tuple cache
+    return (Verdict::Accept, None);
 }
 ```
 
-This is safe: accepting SYN/ACK/FIN does not let application data through. The client cannot send the ClientHello until the handshake succeeds.
+FIN or RST signals the connection is ending. The cached verdict for this 5-tuple is evicted so a future connection that reuses the same port gets a fresh decision rather than inheriting the old one.
+
+### SYN and pure ACKs — empty payload, no classification
+
+```rust
+if raw.tcp_payload_empty {
+    // return cached verdict if present, else Accept without classifying
+    if let Some(cached) = self.decided.get(&key) { ... }
+    return (Verdict::Accept, None);
+}
+```
+
+A SYN has no application payload — no SNI can be extracted and no domain hint is available. If the SYN were dropped the TCP handshake would never complete and the TLS ClientHello would never arrive. Pure ACKs (client acknowledging server data) are similarly content-free.
+
+**Crucially**, pure ACKs do *not* evict the verdict cache — they consult it (returning the cached verdict for denied connections) or fall through to Accept. Evicting on ACK was an earlier bug: every client ACK for a server response would clear the cache and force full re-classification of the next request, re-running the `/proc` resolver and risking `process_name = None` when the fd scan raced a Electron network-service fork/exec. Fixing this (2026-05-15) eliminated the most common source of duplicate process attributions for multi-process apps.
+
+### Data packets — classification + caching
+
+The first data packet per connection (e.g. TLS ClientHello) misses the verdict cache, runs the full classification pipeline (SNI extraction → domain lookup → `/proc` resolver → decision engine), and, if the result is a definitive Allow or Deny, inserts into the cache. All subsequent data packets for the same 5-tuple hit the cache directly.
+
+This is safe: accepting SYN/ACK does not let application data through; the client cannot send the ClientHello until the 3-way handshake succeeds.
 
 ---
 

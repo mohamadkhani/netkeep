@@ -286,15 +286,32 @@ fn parse_ipv6_hex(hex: &str) -> Option<Ipv6Addr> {
 /// cutting the scan from O(all_processes × fds) to O(user_processes × fds).
 /// Falls back to a full scan if the UID-filtered pass finds nothing
 /// (edge case: socket passed between processes or setuid binaries).
+///
+/// A short retry loop covers multi-process applications (e.g. Electron) where
+/// the network-service subprocess can have a brief window after fork/exec during
+/// which its file descriptors are not yet visible under /proc/<pid>/fd/.
 fn find_pid_for_inode(inode: u64, uid: u32) -> Option<u32> {
     let target = format!("socket:[{inode}]");
 
-    // First pass: only look at processes matching the socket's UID.
-    if let Some(pid) = scan_proc_for_inode(&target, Some(uid)) {
-        return Some(pid);
+    // Retry delays: 0 ms covers the common case (fd already visible);
+    // 3 ms and 8 ms cover the fork/exec visibility gap in multi-process apps
+    // like Electron where the network-service subprocess can briefly not have
+    // its file descriptors visible under /proc/<pid>/fd/.
+    const DELAYS_MS: [u64; 3] = [0, 3, 8];
+    for &delay in &DELAYS_MS {
+        if delay > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+        // UID-filtered pass first (fast path).
+        if let Some(pid) = scan_proc_for_inode(&target, Some(uid)) {
+            return Some(pid);
+        }
+        // Full scan — catches setuid, capability-elevated, or socket-passed processes.
+        if let Some(pid) = scan_proc_for_inode(&target, None) {
+            return Some(pid);
+        }
     }
-    // Second pass: full scan — catches setuid, capability-elevated, or socket-passed processes.
-    scan_proc_for_inode(&target, None)
+    None
 }
 
 fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> Option<u32> {

@@ -588,6 +588,8 @@ mod tests {
             sni_hint: None,
             ingress_interface: None,
             tcp_payload_empty: false,
+            tcp_fin: false,
+            tcp_rst: false,
         }
     }
 
