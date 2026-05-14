@@ -1,8 +1,8 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 142 tests passing (`cargo test --workspace`)
+**Test Status:** 143 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
-**Last Updated:** 2026-05-13
+**Last Updated:** 2026-05-14
 
 ## Completed Work
 
@@ -227,6 +227,35 @@
 - **Fix:** The handler now re-applies the `inet logiguard` nftables table via `NftablesBootstrap::setup(queue, route_mark_base)` — `Some(n)` adds `queue num n` rules, `None` removes them — and only commits the cached flag in `ControlService` after the kernel update succeeds. A new pure helper `plan_nfqueue_toggle(bootstrap_present, nfqueue_num, enabled) -> NfqueueToggleAction` decides between `Apply` and `Reject` so the (bootstrap, queue, enabled) matrix is exhaustive and unit-testable. Two reject paths: nftables didn't install at boot, or `enabled=true` was requested without `LOGIGUARD_NFQUEUE` (which would queue packets to a number nobody is draining → kernel drops everything). Each reject returns an actionable error message; no state mutates on reject.
 - **Tests:** 4 new tests in `apps/daemon/src/main.rs::tests` covering both reject paths and both apply paths. First unit tests this binary has ever had.
 
+## Bug Fixes (process resolver + DB path + egress seeding, 2026-05-14)
+
+**Bug 20:** Process name "unknown" for apps using `AF_INET6` sockets to reach IPv4 destinations.
+
+- **Root cause:** `find_socket_inode` only checked the address-family-matching `/proc/net` file. Apps with `IPV6_V6ONLY=0` appear in `/proc/net/tcp6` as `::ffff:a.b.c.d` even for IPv4 connections, so an IPv4 src_ip lookup in `/proc/net/tcp` only would always miss them.
+- **Fix:** `find_socket_inode` now checks both files for any src_ip (matching family first). New `parse_hex_addr()` collapses IPv4-mapped entries to `IpAddr::V4`; `parse_proc_net` handles all four cross-family combinations. Parent fallback threshold changed from `len <= 3` to an explicit shell allowlist (`sh/bash/dash/zsh/fish`) so three-char names like `ssh`/`git`/`bun` keep their own identity. Retry delays extended to `[0, 5, 15, 40]ms` (4 attempts, 60 ms worst case).
+- **Test:** `ipv4_address_matches_ipv4_mapped_entry_in_tcp6`.
+
+**Bug 21:** Fresh DB has no egresses beyond `eg-default`; users could not route without manually creating egresses.
+
+- **Fix:** `seed_initial_egresses()` runs on first startup: LAN via `ip route get 8.8.8.8`, TUN interfaces via `/sys/class/net/*/type = 65534`. Seeding is skipped once any user egress exists.
+
+## Bug Fixes (decision dialog + settings focus, 2026-05-13)
+
+**Bug 17:** Decision dialog clips action footer when many egress entries present.
+- **Root cause:** Window height was hardcoded at 580px. The root container used `h_full()` + `overflow_hidden()`, which clipped children exceeding the window height. With 3+ egress chips, the Allow/Deny buttons pushed below the visible area.
+- **Fix:** Removed `h_full()` and `overflow_hidden()` from the root container. Window height is now estimated dynamically from actual component padding/gap values (~600px base + 28px per egress chip row + 24px for device label), capped at 90% of primary display height.
+- **Files:** `apps/gpui/src/app.rs`, `apps/gpui/src/main.rs`.
+
+**Bug 18:** Default Route not first in "Route via" selector.
+- **Root cause:** `ListEgresses` in the daemon sorts by `id` alphabetically, so `eg-default` could come after `eg-eth0`. The decision dialog always used `selected_egress_index = 0`, which might not be the default.
+- **Fix:** Egresses are sorted after fetching: system default first, then available, then unavailable. `selected_egress_index = 0` is now always the Default Route.
+- **Files:** `apps/gpui/src/main.rs`.
+
+**Bug 19:** Settings window doesn't focus when "Settings…" is re-clicked from tray on GNOME/Wayland.
+- **Root cause:** GPUI's `activate_window()` requests an `xdg-activation` token from the compositor, but Mutter rejects it because the settings process has no recent user-interaction serial (the click happened in the tray process, a different Wayland surface). The activation is silently ignored.
+- **Fix:** The tray process (which has GTK initialized with the user's click serial) obtains an xdg-activation token via `GdkAppLaunchContext::startup_notify_id()` and sends it to the settings process via Unix socket. The settings process sets `XDG_ACTIVATION_TOKEN` and calls `activate_window()`. Even when Mutter rejects full activation, it uses the `app_id` to show an urgency/attention indicator in the taskbar. Settings window state is fully preserved.
+- **Files:** `apps/gpui/src/main.rs`.
+
 ## Bug Fixes (routing, 2026-05-09)
 
 **Bug 10:** SOCKS `Route` → Tun exited via LAN (Digikala saw Iranian IP / HTTP 200 instead of VPN/geo edge). Daemon reused WireGuard’s discovered fwmark from `ip rule`; that mark often means **split-tunnel bypass**, so marked packets followed **`main`** → **`wlp`**, not the tunnel.
@@ -370,7 +399,7 @@ logiguard unlock               # Console-only recovery
 Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 
 - `LOGIGUARD_SOCKET_PATH` — Unix socket path (default `/tmp/logiguard.sock`)
-- `LOGIGUARD_DB_PATH` — SQLite DB location (default `/tmp/logiguard.db`)
+- `LOGIGUARD_DB_PATH` — SQLite DB location (default `~/.config/logiguard/logiguard.db`; directory created automatically)
 - `LOGIGUARD_NFQUEUE` — NFQUEUE number when packet interception enabled (optional)
 - `LOGIGUARD_DEFAULT_TIMEOUT_SECS` — Default pending timeout (default 100)
 - `LOGIGUARD_TCP_TIMEOUT_SECS`, `LOGIGUARD_UDP_TIMEOUT_SECS`, `LOGIGUARD_QUIC_TIMEOUT_SECS`, `LOGIGUARD_OTHER_TIMEOUT_SECS` — protocol overrides (fall back to default timeout when unset)

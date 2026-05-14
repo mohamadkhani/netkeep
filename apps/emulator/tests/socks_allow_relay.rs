@@ -22,6 +22,7 @@ fn start_mock_daemon(socket_path: String) -> thread::JoinHandle<()> {
         assert!(line.contains("\"RegisterUnknownFlow\""));
         let response = serde_json::to_string(&ControlResponse::ImmediateVerdict {
             action: RuleAction::Allow,
+            route_target: None,
         })
         .expect("serialize response");
         stream
@@ -128,6 +129,7 @@ fn socks_pending_keeps_connection_open_until_allow_then_relays() {
                     } else {
                         ControlResponse::PendingResolved {
                             action: RuleAction::Allow,
+                            route_target: None,
                         }
                     }
                 } else {

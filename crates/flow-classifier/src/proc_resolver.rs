@@ -88,8 +88,10 @@ impl ProcessResolver for ProcProcessResolver {
 
         let name = read_exe_basename(pid).or_else(|| read_comm(pid))?;
 
-        // Walk to parent when the direct name is very short (likely a generic helper).
-        let name = if name.len() <= 3 {
+        // Walk to parent only for single-character names or known generic shell
+        // wrappers. Length <= 3 was too broad: `ssh`, `git`, `bun` all have
+        // 3 chars and should NOT be replaced by their parent (the terminal).
+        let name = if name.len() <= 1 || matches!(name.as_str(), "sh" | "bash" | "dash" | "zsh" | "fish") {
             read_ppid(pid).and_then(read_exe_basename).unwrap_or(name)
         } else {
             name
@@ -106,16 +108,26 @@ impl ProcessResolver for ProcProcessResolver {
     }
 }
 
-/// Try to find the socket (inode, uid) with up to 3 attempts and increasing delays.
+/// Try to find the socket (inode, uid) with up to 4 attempts and increasing delays.
+///
+/// Only the first SYN of each new connection reaches NFQUEUE (subsequent packets
+/// are fast-pathed by `ct state established,related accept`), so blocking the
+/// NFQUEUE thread here is acceptable — 60 ms worst-case latency on one new
+/// connection is far better than showing "unknown" in the dialog.
+/// Delays chosen to cover:
+///   - 0 ms  : socket already in /proc/net (most apps)
+///   - 5 ms  : slight kernel lag (typical for busy desktops)
+///   - 15 ms : slower app startup (Electron, .NET, throne relay)
+///   - 40 ms : worst-case race (JVM, sandbox wrappers)
 fn retry_find_socket(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Option<(u64, u32)> {
-    const DELAYS_MS: [u64; 3] = [0, 3, 8];
+    const DELAYS_MS: [u64; 4] = [0, 5, 15, 40];
     for (attempt, &delay) in DELAYS_MS.iter().enumerate() {
         if delay > 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay));
         }
         if let Some(result) = find_socket_inode(ip, port, protocol) {
             if attempt > 0 {
-                eprintln!("proc_resolver: found socket after {} retries", attempt);
+                eprintln!("proc_resolver: found socket after {} retries (delay={}ms)", attempt, delay);
             }
             return Some(result);
         }
@@ -128,14 +140,27 @@ fn retry_find_socket(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Opti
 /// For UDP, also tries a port-only match as a fallback because UDP sockets
 /// not explicitly bound to a specific interface appear as `0.0.0.0:PORT`
 /// in /proc/net/udp even though the outgoing packet carries a real source IP.
+///
+/// Both the IPv4 and the IPv6 tables are checked for any source IP because
+/// modern applications frequently use `AF_INET6` sockets with `IPV6_V6ONLY=0`.
+/// When such a socket connects to an IPv4 address the kernel records the entry
+/// in `/proc/net/tcp6` as `::ffff:a.b.c.d`, so an IPv4-only or IPv6-only
+/// lookup would miss it.
 fn find_socket_inode(src_ip: IpAddr, src_port: u16, protocol: TransportProtocol) -> Option<(u64, u32)> {
     let is_udp = matches!(protocol, TransportProtocol::Udp | TransportProtocol::Quic);
 
-    let files: &[&str] = match (is_udp, src_ip) {
-        (true, IpAddr::V4(_))  => &["/proc/net/udp"],
-        (true, IpAddr::V6(_))  => &["/proc/net/udp6", "/proc/net/udp"],
-        (false, IpAddr::V4(_)) => &["/proc/net/tcp"],
-        (false, IpAddr::V6(_)) => &["/proc/net/tcp6", "/proc/net/tcp"],
+    // Always check both address families: many applications use AF_INET6
+    // sockets even for IPv4 destinations (::ffff: mapped form in tcp6/udp6).
+    let files: &[&str] = if is_udp {
+        match src_ip {
+            IpAddr::V4(_) => &["/proc/net/udp", "/proc/net/udp6"],
+            IpAddr::V6(_) => &["/proc/net/udp6", "/proc/net/udp"],
+        }
+    } else {
+        match src_ip {
+            IpAddr::V4(_) => &["/proc/net/tcp", "/proc/net/tcp6"],
+            IpAddr::V6(_) => &["/proc/net/tcp6", "/proc/net/tcp"],
+        }
     };
 
     // Pass 1: exact (ip, port) match.
@@ -181,14 +206,18 @@ pub fn parse_proc_net(content: &str, src_ip: IpAddr, src_port: u16) -> Option<(u
             continue;
         }
         let addr_hex = &local[..colon];
-        let matches = match src_ip {
-            IpAddr::V4(v4) => parse_ipv4_hex(addr_hex) == Some(v4),
-            IpAddr::V6(v6) => {
-                parse_ipv6_hex(addr_hex) == Some(v6)
-                    || v6.to_ipv4_mapped()
-                        .and_then(|v4| parse_ipv4_hex(addr_hex).map(|a| a == v4))
-                        .unwrap_or(false)
-            }
+        // Normalize the hex address to an IpAddr. A 32-char value comes from
+        // a tcp6/udp6 entry; `to_ipv4_mapped()` collapses `::ffff:a.b.c.d`
+        // back to an Ipv4Addr so cross-file lookups work (e.g. IPv4 src_ip
+        // found in /proc/net/tcp6 as an IPv4-mapped address).
+        let parsed_addr = parse_hex_addr(addr_hex);
+        let matches = match (src_ip, parsed_addr) {
+            (IpAddr::V4(a), Some(IpAddr::V4(b))) => a == b,
+            (IpAddr::V6(a), Some(IpAddr::V6(b))) => a == b,
+            // IPv6 src matched against an IPv4-mapped entry in tcp6 (or vice-versa).
+            (IpAddr::V6(a), Some(IpAddr::V4(b))) => a.to_ipv4_mapped() == Some(b),
+            (IpAddr::V4(a), Some(IpAddr::V6(b))) => b.to_ipv4_mapped() == Some(a),
+            _ => false,
         };
         if matches {
             let inode: u64 = cols[9].parse().ok()?;
@@ -219,6 +248,18 @@ fn parse_proc_net_port_only(content: &str, src_port: u16) -> Option<(u64, u32)> 
         return Some((inode, uid));
     }
     None
+}
+
+/// Decode a /proc/net hex address — either 8-char IPv4 or 32-char IPv6 —
+/// and normalize IPv4-mapped IPv6 (`::ffff:a.b.c.d`) to `IpAddr::V4`.
+fn parse_hex_addr(hex: &str) -> Option<IpAddr> {
+    match hex.len() {
+        8  => parse_ipv4_hex(hex).map(IpAddr::V4),
+        32 => parse_ipv6_hex(hex).map(|v6| {
+            v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6))
+        }),
+        _ => None,
+    }
 }
 
 /// Decode a /proc/net/tcp IPv4 hex address (little-endian u32 → Ipv4Addr).
@@ -457,6 +498,20 @@ mod tests {
             resolver.resolve("10.20.30.40", 65000, TransportProtocol::Tcp),
             None,
         );
+    }
+
+    #[test]
+    fn ipv4_address_matches_ipv4_mapped_entry_in_tcp6() {
+        // An AF_INET6 socket connecting to an IPv4 address appears in
+        // /proc/net/tcp6 as ::ffff:a.b.c.d (32-char hex, IPv4-mapped).
+        // 10.0.2.15 in IPv4-mapped form = 0000…0000ffff0f02000a
+        // Little-endian words: 00000000 00000000 0000ffff 0f02000a
+        let tcp6_ipv4_mapped = "\
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0000000000000000FFFF00000F02000A:1F90 00000000000000000000000000000000:0000 01 00000000:00000000 00:00000000 00000000  2000        0 77777 1 0 100 0";
+        let ipv4: IpAddr = "10.0.2.15".parse().unwrap();
+        let result = parse_proc_net(tcp6_ipv4_mapped, ipv4, 8080);
+        assert_eq!(result, Some((77777, 2000)));
     }
 
     #[test]

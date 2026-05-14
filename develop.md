@@ -180,6 +180,9 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 - [ ] **Tray toggle should be single item** — currently two separate enable/disable menu items; should be one checked/unchecked toggle
 - [ ] **Add Egress / Add Proxy button styling** — full-width, doesn't match design spec
 - [ ] **Stale auto-seeded egresses in existing DB** — users who ran an older daemon have interface egresses stored in their SQLite DB. They need to delete them via the Egresses settings tab or by wiping the DB.
+- [x] **Decision dialog clips content with many egresses** — fixed 2026-05-13. Window height was hardcoded at 580px; replaced with dynamic estimate (~600px base + 28px per egress row, capped at 90% of display). Root container no longer uses `h_full()`/`overflow_hidden()`.
+- [x] **Default route not first in "Route via" selector** — fixed 2026-05-13. Egresses from the daemon are sorted alphabetically by id; `eg-default` can come after `eg-eth0`. Now sorted: system default first, then available, then unavailable.
+- [x] **Settings window doesn't focus when re-clicked from tray** — fixed 2026-05-14. The tray process obtains an xdg-activation token via GTK's `GdkAppLaunchContext` (which carries the user's click serial) and sends it to the settings process via Unix socket. The settings process sets `XDG_ACTIVATION_TOKEN` and calls `activate_window()`. Even when Mutter rejects full activation, it uses the `app_id` to show an urgency/attention indicator. Settings window state is preserved.
 
 ## 5) Definition of Done (MVP)
 
@@ -430,3 +433,50 @@ Two intertwined changes in one session: a full architectural refactor of how rou
   - `ResolvePendingWithRule` — passes `egress_id.clone()` so the emulator poller and the direct response both resolve identically.
   - `sweep_pending()` — passes `resolved.egress_id` so auto-swept flows also carry the correct egress when polled.
   - `ResolvePending` (no-rule inline) — passes `None`.
+
+### 2026-05-13/14 (session 25 — decision dialog dynamic height + egress sorting + settings focus)
+
+Three UI polish fixes in one session:
+
+- [x] **Decision dialog height is now dynamic.** The window was hardcoded at 440×580 — when many egress entries were present, the action footer (scope toggles, egress chips, Allow/Deny buttons) pushed below the visible area and got clipped by `overflow_hidden()`. Removed `h_full()` and `overflow_hidden()` from the root container. Window height is now estimated at open time: ~600px base (derived from actual component padding/gap values) + 28px per egress chip row + 24px if a device label is present, capped at 90% of the primary display. Files: `apps/gpui/src/app.rs`, `apps/gpui/src/main.rs`.
+
+- [x] **Default route is first and selected in "Route via" selector.** Egresses from the daemon were sorted alphabetically by id (`eg-default` could come after `eg-eth0`), and `selected_egress_index` was always 0. After `fetch_egresses()`, the list is now sorted: system default first, then available egresses, then unavailable — so the Default Route chip is always at position 0 and selected by default. File: `apps/gpui/src/main.rs`.
+
+- [x] **Settings window focuses on re-click from tray (Wayland/GNOME).** `activate_window()` alone is a no-op on GNOME/Wayland because Mutter rejects activation tokens from processes without a recent user serial. The tray process (which has GTK with the user's click serial) now obtains an xdg-activation token via `GdkAppLaunchContext` / `get_startup_notify_id()` and sends it to the settings process via Unix socket. The settings process sets `XDG_ACTIVATION_TOKEN` and calls `activate_window()`. Even when full activation is rejected, Mutter uses the `app_id` to show an urgency/attention indicator. Settings window state is preserved.
+- **Files:** `apps/gpui/src/main.rs`.
+
+### 2026-05-14 (session 26 — process resolver hardening + DB path + initial egress seeding)
+
+Five independent improvements in one session, all in the process-identification and first-run experience paths.
+
+- [x] **Process resolver: IPv4-mapped sockets now found in `/proc/net/tcp6`.**
+  - **Root cause.** Modern apps often open `AF_INET6` sockets with `IPV6_V6ONLY=0` even when connecting to an IPv4 destination. The kernel records those sockets in `/proc/net/tcp6` as `::ffff:a.b.c.d` (IPv4-mapped form). The old `find_socket_inode` only looked in the family-matching file (`/proc/net/tcp` for an IPv4 src_ip). An IPv4 flow whose socket appeared exclusively in `tcp6` was never found → process name shown as "unknown".
+  - **Fix.** `find_socket_inode` now always checks both files, preferring the matching-family file first: `[tcp, tcp6]` for an IPv4 src_ip, `[tcp6, tcp]` for IPv6. New helper `parse_hex_addr(hex)` normalises 8-char (IPv4 LE) and 32-char (IPv6 four-word LE) hex addresses, collapsing `::ffff:a.b.c.d` to `IpAddr::V4`. `parse_proc_net` uses `parse_hex_addr` and handles all four cross-family combinations: V4↔V4, V6↔V6, V6↔V4, V4↔V6.
+  - **New test:** `ipv4_address_matches_ipv4_mapped_entry_in_tcp6`.
+  - **File:** `crates/flow-classifier/src/proc_resolver.rs`.
+
+- [x] **Parent fallback allowlist replaces length threshold.**
+  - **Root cause.** The parent-process fallback (walk to parent when child has a short/generic name) triggered for `name.len() <= 3`. Too broad: `ssh`, `git`, `bun` all have 3 chars and should keep their own name.
+  - **Fix.** Threshold replaced with an explicit shell allowlist: `sh`, `bash`, `dash`, `zsh`, `fish`. Single-character names still trigger the fallback. All other short names keep their own basename.
+  - **File:** `crates/flow-classifier/src/proc_resolver.rs`.
+
+- [x] **Retry delays extended to 4 attempts with higher caps.**
+  - Old: `[0, 3, 8]ms` (3 attempts, 11 ms worst case). New: `[0, 5, 15, 40]ms` (4 attempts, 60 ms worst case). Covers Electron/JVM/sandbox wrappers where the kernel `/proc/net` lag is longer. Only the first SYN of each connection enters NFQUEUE, so this blocking cost is paid at most once per connection.
+  - **File:** `crates/flow-classifier/src/proc_resolver.rs`.
+
+- [x] **DB path moved to `~/.config/logiguard/logiguard.db`.**
+  - Old default `/tmp/logiguard.db` was lost on reboot. New default is the XDG config directory. `~` is resolved at runtime via `$HOME` env var (Rust doesn't expand shell tildes). Parent directory is created with `fs::create_dir_all` on startup. Override still available via `LOGIGUARD_DB_PATH`.
+  - **File:** `apps/daemon/src/main.rs`.
+
+- [x] **Initial egress seeding (LAN + TUN) on fresh DB.**
+  - Fresh installs had only `eg-default` with no concrete targets. `seed_initial_egresses()` now runs on startup **only when no user-defined egresses exist**:
+    - **LAN** (`#3b82f6`): `ip route get 8.8.8.8` → `dev <iface>` → `RouteTarget::Device`.
+    - **TUN** (`#8b5cf6`): `/sys/class/net/*/type = 65534` → one egress per TUN/TAP/WireGuard interface found.
+  - Skipped entirely once any user egress exists.
+  - **File:** `apps/daemon/src/main.rs`.
+
+- [x] **Emulator integration test fixed: `ImmediateVerdict` and `PendingResolved` missing `route_target`.**
+  - Both variants gained a `route_target` field in session 24; the `socks_allow_relay` test was not updated. Added `route_target: None` to both literals.
+  - **File:** `apps/emulator/tests/socks_allow_relay.rs`.
+
+**Tests:** workspace **143** passing, no regressions.

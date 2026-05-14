@@ -186,7 +186,10 @@ Process and domain attribution.
 - `DeviceLabelResolver` — attach device labels (e.g., "vpn-work")
 
 **Implementation:**
-- `ProcProcessResolver` reads `/proc/net/{tcp,tcp6,udp,udp6}` → inode → `/proc/*/fd/*` → `/proc/<pid>/exe`/`comm`, with a UID-filtered first pass and a parent-exe fallback for short generic names. Successful resolutions are cached by `(src_ip, src_port, protocol)` (60 s TTL, 4096-entry cap) so retransmits of the same socket do not re-race the kernel. See [`docs/process-resolver.md`](process-resolver.md) and [`docs/process-attribution-races.md`](process-attribution-races.md).
+- `ProcProcessResolver` reads `/proc/net/{tcp,tcp6,udp,udp6}` → inode → `/proc/*/fd/*` → `/proc/<pid>/exe`/`comm`, with a UID-filtered first pass and a parent-exe fallback for known shell wrappers (`sh/bash/dash/zsh/fish`). Successful resolutions are cached by `(src_ip, src_port, protocol)` (60 s TTL, 4096-entry cap) so retransmits do not re-race the kernel.
+  - **Dual-file lookup:** both the IPv4 and IPv6 `/proc/net` files are checked for any src_ip. Modern apps using `AF_INET6` sockets with `IPV6_V6ONLY=0` appear only in `/proc/net/tcp6` even for IPv4 destinations (as `::ffff:a.b.c.d`). `parse_hex_addr()` normalises 8-char and 32-char hex, collapsing IPv4-mapped addresses to `IpAddr::V4`. `parse_proc_net` performs cross-family comparison (V4↔V4, V6↔V6, V4↔V6 via `to_ipv4_mapped()`).
+  - **Retry policy:** 4 attempts at `[0, 5, 15, 40]ms` (60 ms worst case) covering native apps, Electron, JVM, and sandbox wrappers. Only the first SYN of each connection reaches NFQUEUE, so this latency is paid at most once per connection.
+  - See [`docs/process-resolver.md`](process-resolver.md) and [`docs/process-attribution-races.md`](process-attribution-races.md).
 - TLS SNI extraction is in `enforcer::nfqueue::extract_tls_sni`; domains discovered from SNI populate the shared `SniDnsCache` consumed by `FlowClassifier`. QUIC SNI is not yet parsed.
 
 ### `enforcer`
@@ -408,6 +411,11 @@ Planned (Phase 2 onward):
 
 14. **Daemon does not auto-seed per-interface egresses:** On startup the daemon only ensures the `eg-default` system egress exists. It does not create one Egress per local network interface. Interface availability is checked at routing time by `first_available_target()`, not stored in the DB. The "Route via" selector in the decision dialog therefore shows only user-defined named egresses plus the default route.
 
+15. **First-run egress seeding (LAN + TUN):** On the very first startup against a fresh DB (i.e. no user-defined egresses beyond `eg-default`), the daemon runs `seed_initial_egresses()` to provide a usable set of routing options out of the box:
+    - **LAN egress** — detected via `ip route get 8.8.8.8`; the `dev <iface>` field identifies the default-route interface. Creates one `RouteTarget::Device(iface)` egress (blue `#3b82f6`).
+    - **TUN egresses** — scanned from `/sys/class/net/*/type`; any interface whose `type` file reads `65534` (the kernel TUN/TAP constant, shared with WireGuard) gets its own egress named after the interface (purple `#8b5cf6`).
+    Seeding is skipped entirely once any user egress is present, so it never overwrites user configuration. The DB path defaults to `~/.config/logiguard/logiguard.db`, resolved from `$HOME` at runtime (Rust does not expand shell tildes); the parent directory is created automatically.
+
 ## Systemd Integration
 
 **Daemon unit file (packaged / reference):** `resources/linux/systemd/logiguardd.service`  
@@ -421,7 +429,7 @@ Installs as `/usr/lib/systemd/system/logiguardd.service` with `ExecStart=/usr/bi
 
 - `LOGIGUARD_SOCKET_PATH` — Unix control socket (daemon default: `/tmp/logiguard.sock`)
 - `LOGIGUARD_ROUTE_MARK_BASE` — Base value for routing fwmark allocation (default: 20000). Used to avoid conflicts with other tools (sing-box, xray, throne).
-- `LOGIGUARD_DB_PATH` — SQLite database file (daemon default: `/tmp/logiguard.db`; override for production paths)
+- `LOGIGUARD_DB_PATH` — SQLite database file (daemon default: `~/.config/logiguard/logiguard.db`; directory is created automatically)
 - `LOGIGUARD_DEVICE_ROUTE_FALLBACK` — if `1`/`true`/`yes`, routed **device** connect may fall back to unmarked `connect` after failures (escape hatch; not fail-close strict)
 - `LOGIGUARD_NFQUEUE` — NFQUEUE number to listen on (default: 0)
 - `LOGIGUARD_DEFAULT_TIMEOUT_SECS` — default pending timeout in seconds (default: 100)

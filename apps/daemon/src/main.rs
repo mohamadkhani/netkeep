@@ -27,7 +27,7 @@ use state_store::{EgressRepository, PendingRepository, RuleRepository, SqliteRul
 use tokio::sync::broadcast;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
-const DEFAULT_DB_PATH: &str = "/tmp/logiguard.db";
+const DEFAULT_DB_RELATIVE: &str = ".config/logiguard/logiguard.db";
 const DEFAULT_TIMEOUT_SECS: u64 = 100;
 const DEFAULT_PENDING_LIMIT: usize = 100;
 const ROUTED_CONNECT_TIMEOUT_SECS: u64 = 8;
@@ -458,6 +458,84 @@ fn connect_via_tun(addrs: &[SocketAddr], iface: &str) -> Result<TcpStream, Strin
     Err(last_err.unwrap_or_else(|| "no candidate address to connect".to_string()))
 }
 
+/// Seed useful egresses on first run: one LAN egress for the default-route
+/// interface, plus one TUN egress per TUN/WireGuard interface found on the
+/// system. Only called when no user-defined egresses exist yet.
+fn seed_initial_egresses(repo: &mut SqliteRuleRepository) {
+    // LAN — primary default-route interface.
+    if let Some(iface) = detect_default_iface() {
+        let id = format!("eg-lan-{iface}");
+        if repo.get_egress(&id).is_none() {
+            eprintln!("seed: creating LAN egress for default interface {iface}");
+            repo.upsert_egress(&Egress {
+                id,
+                name: format!("LAN ({iface})"),
+                color: "#3b82f6".to_string(),
+                targets: vec![RouteTarget::Device(iface)],
+                dns_servers: vec![],
+                is_system_default: false,
+                is_available: true,
+            });
+        }
+    } else {
+        eprintln!("seed: could not detect default route interface, skipping LAN egress");
+    }
+
+    // TUN interfaces — WireGuard, throne, OpenVPN, etc.
+    for iface in detect_tun_ifaces() {
+        let id = format!("eg-tun-{iface}");
+        if repo.get_egress(&id).is_none() {
+            eprintln!("seed: creating TUN egress for {iface}");
+            repo.upsert_egress(&Egress {
+                id,
+                name: format!("TUN ({iface})"),
+                color: "#8b5cf6".to_string(),
+                targets: vec![RouteTarget::Tun(iface)],
+                dns_servers: vec![],
+                is_system_default: false,
+                is_available: true,
+            });
+        }
+    }
+}
+
+/// Run `ip route get 8.8.8.8` and extract the `dev <iface>` field.
+fn detect_default_iface() -> Option<String> {
+    let out = std::process::Command::new("ip")
+        .args(["route", "get", "8.8.8.8"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Output: "8.8.8.8 via 192.168.1.1 dev enp3s0 src 192.168.1.5 …"
+    let mut iter = text.split_whitespace();
+    while let Some(tok) = iter.next() {
+        if tok == "dev" {
+            return iter.next().map(str::to_string);
+        }
+    }
+    None
+}
+
+/// Return all TUN-type interfaces on the system (type=65534 in sysfs).
+/// Excludes loopback. Used for initial egress seeding.
+fn detect_tun_ifaces() -> Vec<String> {
+    let Ok(entries) = fs::read_dir("/sys/class/net") else { return vec![] };
+    let mut ifaces = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let type_path = format!("/sys/class/net/{name}/type");
+        if let Ok(t) = fs::read_to_string(&type_path) {
+            // type 65534 = TUN/TAP; WireGuard reports as type 65534 (wireguard interfaces
+            // also appear here as they are tun devices at the kernel level).
+            if t.trim() == "65534" {
+                ifaces.push(name);
+            }
+        }
+    }
+    ifaces.sort();
+    ifaces
+}
+
 fn open_routed_tcp(host: String, port: u16, target: RouteTarget, db_path: String) -> Result<String, String> {
     // Resolve and connect upstream synchronously so any failure is reported
     // to the emulator as a ControlResponse::Error *before* RoutedTcpReady is
@@ -666,8 +744,17 @@ fn handle_client(
 fn main() {
     let socket_path =
         std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
-    let db_path =
-        std::env::var("LOGIGUARD_DB_PATH").unwrap_or_else(|_| DEFAULT_DB_PATH.to_string());
+    let db_path = std::env::var("LOGIGUARD_DB_PATH").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{h}/{DEFAULT_DB_RELATIVE}"))
+            .unwrap_or_else(|_| format!("/root/{DEFAULT_DB_RELATIVE}"))
+    });
+    // Ensure the parent directory exists before SQLite tries to open the file.
+    if let Some(parent) = std::path::Path::new(&db_path).parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!("warning: could not create db directory {}: {e}", parent.display());
+        }
+    }
     let default_timeout_secs =
         parse_env_u64("LOGIGUARD_DEFAULT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
     let tcp_timeout_secs = parse_env_u64("LOGIGUARD_TCP_TIMEOUT_SECS", default_timeout_secs);
@@ -719,6 +806,16 @@ fn main() {
             is_system_default: true,
             is_available: true,
         });
+    }
+
+    // On first run (no user-defined egresses exist yet), seed useful egresses:
+    // one LAN egress for the default-route interface, plus one egress per TUN
+    // interface found on the system (WireGuard, throne, etc.).
+    let user_egresses: Vec<_> = repo.list_egresses().into_iter()
+        .filter(|e| !e.is_system_default)
+        .collect();
+    if user_egresses.is_empty() {
+        seed_initial_egresses(&mut repo);
     }
 
     let startup_now = now_secs();
