@@ -28,6 +28,7 @@ pub fn surface_container_highest() -> gpui::Hsla {
     gpui::rgb(0x2a3548).into() // surface-container-highest / surface-variant
 }
 
+#[allow(dead_code)]
 pub fn surface_bright() -> gpui::Hsla {
     gpui::rgb(0x2f3a4c).into() // surface-bright
 }
@@ -36,6 +37,7 @@ pub fn border() -> gpui::Hsla {
     gpui::rgb(0x424754).into() // outline-variant
 }
 
+#[allow(dead_code)]
 pub fn outline() -> gpui::Hsla {
     gpui::rgb(0x8c909f).into() // outline
 }
@@ -44,6 +46,7 @@ pub fn primary() -> gpui::Hsla {
     gpui::rgb(0xadc6ff).into() // primary
 }
 
+#[allow(dead_code)]
 pub fn primary_container() -> gpui::Hsla {
     gpui::rgb(0x4d8eff).into() // primary-container
 }

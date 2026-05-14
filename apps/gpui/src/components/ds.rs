@@ -95,6 +95,7 @@ pub fn dest_text(dest: &DestinationMatcher) -> String {
 }
 
 /// Returns the short type tag for a `DestinationMatcher` (used in table badges).
+#[allow(dead_code)]
 pub fn dest_kind_label(dest: &DestinationMatcher) -> &'static str {
     match dest {
         DestinationMatcher::Any => "ANY",

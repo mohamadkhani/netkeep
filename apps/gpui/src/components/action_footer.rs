@@ -660,7 +660,7 @@ fn allow_button(
 fn deny_button(
     pid: String,
     make_permanent: bool,
-    flow: FlowContext,
+    _flow: FlowContext,
     dest_matcher: DestinationMatcher,
     rule_process_name: Option<String>,
     disabled: bool,

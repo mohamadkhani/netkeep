@@ -68,6 +68,7 @@ pub fn modal_header(icon: &str, title: &str) -> impl IntoElement {
 //       vec![modal_footer(cancel(w, cx), ok(w, cx))]
 //   })
 
+#[allow(dead_code)]
 pub fn modal_footer(cancel: AnyElement, ok: AnyElement) -> AnyElement {
     h_flex()
         .justify_end()

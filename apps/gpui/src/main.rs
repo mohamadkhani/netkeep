@@ -1,25 +1,25 @@
 mod app;
 mod colors;
 mod components;
-mod fonts;
 mod daemon;
-mod settings;
+mod fonts;
 mod monitor;
+mod settings;
 mod state;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{
-    App, AppContext as _, Entity, SharedString, WindowOptions, px, size,
-};
+use gpui::{px, size, App, AppContext as _, Entity, SharedString, WindowOptions};
 use gpui_component::{Root, Theme, ThemeMode};
 #[cfg(target_os = "linux")]
 use gtk::prelude::WidgetExt as _;
 #[cfg(target_os = "linux")]
 use tray_icon::menu::ContextMenu as _;
-use tray_icon::menu::{IsMenuItem, Menu as TrayMenu, MenuEvent, MenuId, MenuItem as TrayMenuItem, PredefinedMenuItem};
+use tray_icon::menu::{
+    IsMenuItem, Menu as TrayMenu, MenuEvent, MenuId, MenuItem as TrayMenuItem, PredefinedMenuItem,
+};
 use tray_icon::{Icon, TrayIconBuilder};
 
 use app::DecisionApp;
@@ -93,8 +93,8 @@ fn main() {
 }
 
 fn run_tray_monitor() {
-    let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
-        .unwrap_or_else(|_| daemon::SOCKET_PATH.to_string());
+    let socket_path =
+        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| daemon::SOCKET_PATH.to_string());
     let gui_command = std::env::var("LOGIGUARD_GUI_COMMAND").unwrap_or_else(|_| {
         std::env::current_exe()
             .map(|e| e.to_string_lossy().to_string())
@@ -116,143 +116,135 @@ fn run_tray_monitor() {
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
-        fonts::apply_design_fonts(cx);
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+            fonts::apply_design_fonts(cx);
 
-        let sp = socket_path.clone();
-        let gc = gui_command.clone();
-        std::thread::spawn(move || monitor::poll_decision_spawner(sp, gc));
+            let sp = socket_path.clone();
+            let gc = gui_command.clone();
+            std::thread::spawn(move || monitor::poll_decision_spawner(sp, gc));
 
-        // Build menu before the tray so GTK-backed `muda` sees items on the first `gtk_context_menu()`
-        // build (see muda gtk/mod.rs: menu children are only populated once).
-        let menu = TrayMenu::new();
+            // Build menu before the tray so GTK-backed `muda` sees items on the first `gtk_context_menu()`
+            // build (see muda gtk/mod.rs: menu children are only populated once).
+            let menu = TrayMenu::new();
 
-        // Use muda type aliases so we never pick `gtk::Menu` / `gtk::MenuItem` from other preludes,
-        // and build a `&[&dyn IsMenuItem]` slice so `append_items` matches the expected trait object.
-        let nfqueue_enable = TrayMenuItem::with_id(
-            MenuId::new("logiguard-nfqueue-enable"),
-            "Enable Network Interception",
-            true,
-            None,
-        );
-        let nfqueue_disable = TrayMenuItem::with_id(
-            MenuId::new("logiguard-nfqueue-disable"),
-            "Disable Network Interception",
-            true,
-            None,
-        );
-        let sep = PredefinedMenuItem::separator();
-        let manage = TrayMenuItem::with_id(
-            MenuId::new("logiguard-manage"),
-            "Settings…",
-            true,
-            None,
-        );
-        let quit_item = TrayMenuItem::with_id(
-            MenuId::new("logiguard-quit"),
-            "Quit",
-            true,
-            None,
-        );
-        // Build as `Vec<&dyn IsMenuItem>` so each concrete item coerces at push sites (clearer
-        // for rust-analyzer than a mixed-type array literal).
-        let mut items: Vec<&dyn IsMenuItem> = Vec::with_capacity(5);
-        items.push(&nfqueue_enable);
-        items.push(&nfqueue_disable);
-        items.push(&sep);
-        items.push(&manage);
-        items.push(&quit_item);
-        menu.append_items(&items).expect("tray menu items");
+            // Use muda type aliases so we never pick `gtk::Menu` / `gtk::MenuItem` from other preludes,
+            // and build a `&[&dyn IsMenuItem]` slice so `append_items` matches the expected trait object.
+            let nfqueue_enable = TrayMenuItem::with_id(
+                MenuId::new("logiguard-nfqueue-enable"),
+                "Enable Network Interception",
+                true,
+                None,
+            );
+            let nfqueue_disable = TrayMenuItem::with_id(
+                MenuId::new("logiguard-nfqueue-disable"),
+                "Disable Network Interception",
+                true,
+                None,
+            );
+            let sep = PredefinedMenuItem::separator();
+            let manage =
+                TrayMenuItem::with_id(MenuId::new("logiguard-manage"), "Settings…", true, None);
+            let quit_item =
+                TrayMenuItem::with_id(MenuId::new("logiguard-quit"), "Quit", true, None);
+            // Build as `Vec<&dyn IsMenuItem>` so each concrete item coerces at push sites (clearer
+            // for rust-analyzer than a mixed-type array literal).
+            let mut items: Vec<&dyn IsMenuItem> = Vec::with_capacity(5);
+            items.push(&nfqueue_enable);
+            items.push(&nfqueue_disable);
+            items.push(&sep);
+            items.push(&manage);
+            items.push(&quit_item);
+            menu.append_items(&items).expect("tray menu items");
 
-        #[cfg(target_os = "linux")]
-        {
-            let gtk_menu = menu.gtk_context_menu();
-            gtk_menu.show_all();
-        }
+            #[cfg(target_os = "linux")]
+            {
+                let gtk_menu = menu.gtk_context_menu();
+                gtk_menu.show_all();
+            }
 
-        let tray_icon = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip("LogiGuard")
-            .with_title("LogiGuard")
-            .with_icon(tray_pixel_icon())
-            .build()
-            .expect("system tray");
+            let tray_icon = TrayIconBuilder::new()
+                .with_menu(Box::new(menu))
+                .with_tooltip("LogiGuard")
+                .with_title("LogiGuard")
+                .with_icon(tray_pixel_icon())
+                .build()
+                .expect("system tray");
 
-        // Keep tray icon accessible for dynamic updates.
-        // Wrap in Arc to share with the async task that handles menu events.
-        let tray_icon = Arc::new(tray_icon);
+            // Keep tray icon accessible for dynamic updates.
+            // Wrap in Arc to share with the async task that handles menu events.
+            let tray_icon = Arc::new(tray_icon);
 
-        // Sync icon with current NFQUEUE state on startup.
-        if let Ok((enabled, _)) = daemon::get_nfqueue_status() {
-            let icon = if enabled {
-                tray_pixel_icon()
-            } else {
-                tray_icon_disabled()
-            };
-            let _ = tray_icon.set_icon(Some(icon));
-        }
+            // Sync icon with current NFQUEUE state on startup.
+            if let Ok((enabled, _)) = daemon::get_nfqueue_status() {
+                let icon = if enabled {
+                    tray_pixel_icon()
+                } else {
+                    tray_icon_disabled()
+                };
+                let _ = tray_icon.set_icon(Some(icon));
+            }
 
-        #[cfg(target_os = "linux")]
-        gtk_drain_events();
+            #[cfg(target_os = "linux")]
+            gtk_drain_events();
 
-        let sock_mgmt = socket_path.clone();
-        let gui_cmd = gui_command.clone();
-        let settings_open = Arc::new(AtomicBool::new(false));
-        let tray_icon_task = tray_icon.clone();
-        cx.spawn(async move |app| {
-            let manage_id = MenuId::new("logiguard-manage");
-            let nfqueue_enable_id = MenuId::new("logiguard-nfqueue-enable");
-            let nfqueue_disable_id = MenuId::new("logiguard-nfqueue-disable");
-            let quit_id = MenuId::new("logiguard-quit");
-            loop {
-                #[cfg(target_os = "linux")]
-                gtk_drain_events();
+            let sock_mgmt = socket_path.clone();
+            let gui_cmd = gui_command.clone();
+            let settings_open = Arc::new(AtomicBool::new(false));
+            let tray_icon_task = tray_icon.clone();
+            cx.spawn(async move |app| {
+                let manage_id = MenuId::new("logiguard-manage");
+                let nfqueue_enable_id = MenuId::new("logiguard-nfqueue-enable");
+                let nfqueue_disable_id = MenuId::new("logiguard-nfqueue-disable");
+                let quit_id = MenuId::new("logiguard-quit");
+                loop {
+                    #[cfg(target_os = "linux")]
+                    gtk_drain_events();
 
-                app.background_executor()
-                    .timer(Duration::from_millis(50))
-                    .await;
-                while let Ok(event) = MenuEvent::receiver().try_recv() {
-                    if event.id == nfqueue_enable_id {
-                        if let Err(e) = daemon::set_nfqueue_enabled(true) {
-                            eprintln!("failed to enable NFQUEUE: {e}");
-                        } else {
-                            let _ = tray_icon_task.set_icon(Some(tray_pixel_icon()));
+                    app.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
+                    while let Ok(event) = MenuEvent::receiver().try_recv() {
+                        if event.id == nfqueue_enable_id {
+                            if let Err(e) = daemon::set_nfqueue_enabled(true) {
+                                eprintln!("failed to enable NFQUEUE: {e}");
+                            } else {
+                                let _ = tray_icon_task.set_icon(Some(tray_pixel_icon()));
+                            }
+                        } else if event.id == nfqueue_disable_id {
+                            if let Err(e) = daemon::set_nfqueue_enabled(false) {
+                                eprintln!("failed to disable NFQUEUE: {e}");
+                            } else {
+                                let _ = tray_icon_task.set_icon(Some(tray_icon_disabled()));
+                            }
+                        } else if event.id == manage_id {
+                            // Only one settings window at a time.
+                            if settings_open.load(Ordering::Relaxed) {
+                                continue;
+                            }
+                            settings_open.store(true, Ordering::Relaxed);
+
+                            let exe = gui_cmd.clone();
+                            let sock = sock_mgmt.clone();
+                            let flag = settings_open.clone();
+                            std::thread::spawn(move || {
+                                let _ = std::process::Command::new(&exe)
+                                    .arg("--settings")
+                                    .env("LOGIGUARD_SOCKET_PATH", &sock)
+                                    .spawn()
+                                    .and_then(|mut c| c.wait());
+                                flag.store(false, Ordering::Relaxed);
+                            });
+                        } else if event.id == quit_id {
+                            let _ = app.update(|cx| cx.quit());
                         }
-                    } else if event.id == nfqueue_disable_id {
-                        if let Err(e) = daemon::set_nfqueue_enabled(false) {
-                            eprintln!("failed to disable NFQUEUE: {e}");
-                        } else {
-                            let _ = tray_icon_task.set_icon(Some(tray_icon_disabled()));
-                        }
-                    } else if event.id == manage_id {
-                        // Only one settings window at a time.
-                        if settings_open.load(Ordering::Relaxed) {
-                            continue;
-                        }
-                        settings_open.store(true, Ordering::Relaxed);
-
-                        let exe = gui_cmd.clone();
-                        let sock = sock_mgmt.clone();
-                        let flag = settings_open.clone();
-                        std::thread::spawn(move || {
-                            let _ = std::process::Command::new(&exe)
-                                .arg("--settings")
-                                .env("LOGIGUARD_SOCKET_PATH", &sock)
-                                .spawn()
-                                .and_then(|mut c| c.wait());
-                            flag.store(false, Ordering::Relaxed);
-                        });
-                    } else if event.id == quit_id {
-                        let _ = app.update(|cx| cx.quit());
                     }
                 }
-            }
-        })
-        .detach();
+            })
+            .detach();
 
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }
 
 /// Linux tray uses GTK/AppIndicator; GPUI does not run `gtk_main`, so we must drain the GTK queue
@@ -273,14 +265,13 @@ fn run_gui(pending_id: String) {
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
-        fonts::apply_design_fonts(cx);
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+            fonts::apply_design_fonts(cx);
 
-        let mut egresses = daemon::fetch_egresses();
-        // Sort: system default first, then available, then unavailable.
-        egresses.sort_by(|a, b| {
-            match (a.is_system_default, b.is_system_default) {
+            let mut egresses = daemon::fetch_egresses();
+            // Sort: system default first, then available, then unavailable.
+            egresses.sort_by(|a, b| match (a.is_system_default, b.is_system_default) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
                 _ => match (a.is_available, b.is_available) {
@@ -288,116 +279,121 @@ fn run_gui(pending_id: String) {
                     (false, true) => std::cmp::Ordering::Greater,
                     _ => a.id.cmp(&b.id),
                 },
-            }
-        });
-        let process_scope = if item.flow.process_name.is_some() {
-            ProcessScope::Specific
-        } else {
-            ProcessScope::Specific // locked: shown as "unknown", cannot switch to All
-        };
-        let dest_scope = if item.flow.destination_domain.is_some() {
-            DestScope::DomainExact
-        } else {
-            DestScope::IpCidr(4) // default: exact IP (/32)
-        };
+            });
+            let process_scope = if item.flow.process_name.is_some() {
+                ProcessScope::Specific
+            } else {
+                ProcessScope::Specific // locked: shown as "unknown", cannot switch to All
+            };
+            let dest_scope = if item.flow.destination_domain.is_some() {
+                DestScope::DomainExact
+            } else {
+                DestScope::IpCidr(4) // default: exact IP (/32)
+            };
 
-        // Estimate content height so the window fits its content:
-        //   header          ~ 80  (py(16)×2 + content)
-        //   flow_info       ~222  (outer py(16) + card py(16) + 5 grid rows × ~22 + 4 gaps × 12)
-        //   action_footer   ~258  (pt+pb 28 + rule_scope ~96 + divider 1 + duration 30 + egress 30 + buttons 33 + gaps 40)
-        //   status_bar      ~ 30  (py(8)×2 + text)
-        //   ─────────────────────
-        //   base (0 egress) ≈ 590
-        // Add padding for borders, DPI variance, and text metrics.
-        let has_device = item.flow.device_label.is_some();
-        let device_extra: f32 = if has_device { 24. } else { 0. };
-        let egress_rows = ((egresses.len().min(6) + 2) / 3) as f32; // ~3 chips per wrapped row
-        let estimated_height = 600. + device_extra + egress_rows * 28.;
+            // Estimate content height so the window fits its content:
+            //   header          ~ 80  (py(16)×2 + content)
+            //   flow_info       ~222  (outer py(16) + card py(16) + 5 grid rows × ~22 + 4 gaps × 12)
+            //   action_footer   ~258  (pt+pb 28 + rule_scope ~96 + divider 1 + duration 30 + egress 30 + buttons 33 + gaps 40)
+            //   status_bar      ~ 30  (py(8)×2 + text)
+            //   ─────────────────────
+            //   base (0 egress) ≈ 590
+            // Add padding for borders, DPI variance, and text metrics.
+            //
+            // When process and domain are both unknown, `action_footer` shows a warning banner
+            // above the rule scope (extra flex gap + padded multi-line text). Keep in sync with
+            // `components::action_footer::rule_scope_section`.
+            let has_device = item.flow.device_label.is_some();
+            let device_extra: f32 = if has_device { 24. } else { 0. };
+            let unknown_connection_warning =
+                item.flow.process_name.is_none() && item.flow.destination_domain.is_none();
+            let unknown_warning_extra: f32 = if unknown_connection_warning { 76. } else { 0. };
+            let egress_rows = ((egresses.len().min(6) + 2) / 3) as f32; // ~3 chips per wrapped row
+            let estimated_height = 600. + device_extra + egress_rows * 28. + unknown_warning_extra;
 
-        // Cap at 90% of the primary display height.
-        let screen_h = cx
-            .primary_display()
-            .map(|d| f32::from(d.bounds().size.height))
-            .unwrap_or(1080.);
-        let win_height = estimated_height.min(screen_h * 0.90);
+            // Cap at 90% of the primary display height.
+            let screen_h = cx
+                .primary_display()
+                .map(|d| f32::from(d.bounds().size.height))
+                .unwrap_or(1080.);
+            let win_height = estimated_height.min(screen_h * 0.90);
 
-        let state: Entity<AppState> = cx.new(|_| AppState {
-            item,
-            now_secs: daemon::unix_now(),
-            make_permanent: false,
-            pending_count: 0,
-            egresses,
-            selected_egress_index: 0,
-            process_scope,
-            dest_scope,
-        });
+            let state: Entity<AppState> = cx.new(|_| AppState {
+                item,
+                now_secs: daemon::unix_now(),
+                make_permanent: false,
+                pending_count: 0,
+                egresses,
+                selected_egress_index: 0,
+                process_scope,
+                dest_scope,
+            });
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
-                    None,
-                    size(px(440.), px(win_height)),
-                    cx,
-                ))),
-                titlebar: Some(gpui::TitlebarOptions {
-                    title: Some(SharedString::from("LogiGuard - Connection Decision")),
-                    appears_transparent: false,
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
+                        None,
+                        size(px(440.), px(win_height)),
+                        cx,
+                    ))),
+                    titlebar: Some(gpui::TitlebarOptions {
+                        title: Some(SharedString::from("LogiGuard - Connection Decision")),
+                        appears_transparent: false,
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |window, cx| {
-                let view = cx.new(|cx| DecisionApp::new(state, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        )
-        .expect("failed to open window");
+                },
+                |window, cx| {
+                    let view = cx.new(|cx| DecisionApp::new(state, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                },
+            )
+            .expect("failed to open window");
 
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }
 
 fn run_settings() {
-    let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
-        .unwrap_or_else(|_| daemon::SOCKET_PATH.to_string());
+    let socket_path =
+        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| daemon::SOCKET_PATH.to_string());
 
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
-        fonts::apply_design_fonts(cx);
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+            fonts::apply_design_fonts(cx);
 
-        let state: Entity<SettingsState> =
-            cx.new(|_| SettingsState::new(socket_path.clone()));
+            let state: Entity<SettingsState> = cx.new(|_| SettingsState::new(socket_path.clone()));
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
-                    origin: gpui::point(px(80.), px(40.)),
-                    size: size(px(960.), px(720.)),
-                })),
-                titlebar: Some(gpui_component::TitleBar::title_bar_options()),
-                // The Settings UI draws its own title bar via gpui-component's
-                // `TitleBar`, and the root view wraps everything in
-                // `window_border()` so we own the resize hit-areas too. Tell
-                // GPUI explicitly that this is a client-side-decorated window
-                // — on compositors that refuse xdg-decoration SSD (notably
-                // GNOME/Mutter) this is what makes the resize edges work.
-                window_decorations: Some(gpui::WindowDecorations::Client),
-                // Don't let the user collapse the window below the point
-                // where the table headers and tab bar still fit.
-                window_min_size: Some(size(px(640.), px(420.))),
-                is_resizable: true,
-                ..Default::default()
-            },
-            |window, cx| {
-                let view = cx.new(|cx| SettingsApp::new(state, window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        )
-        .expect("failed to open settings window");
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
+                        origin: gpui::point(px(80.), px(40.)),
+                        size: size(px(960.), px(720.)),
+                    })),
+                    titlebar: Some(gpui_component::TitleBar::title_bar_options()),
+                    // The Settings UI draws its own title bar via gpui-component's
+                    // `TitleBar`, and the root view wraps everything in
+                    // `window_border()` so we own the resize hit-areas too. Tell
+                    // GPUI explicitly that this is a client-side-decorated window
+                    // — on compositors that refuse xdg-decoration SSD (notably
+                    // GNOME/Mutter) this is what makes the resize edges work.
+                    window_decorations: Some(gpui::WindowDecorations::Client),
+                    // Don't let the user collapse the window below the point
+                    // where the table headers and tab bar still fit.
+                    window_min_size: Some(size(px(640.), px(420.))),
+                    is_resizable: true,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let view = cx.new(|cx| SettingsApp::new(state, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                },
+            )
+            .expect("failed to open settings window");
 
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }
