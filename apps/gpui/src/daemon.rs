@@ -47,6 +47,37 @@ pub fn fetch_pending(pending_id: &str) -> anyhow::Result<PendingDecision> {
     }
 }
 
+/// Return `(tun_ifaces, dev_ifaces)` by reading `/sys/class/net/`.
+/// Used to populate the egress add-target selector.
+pub fn list_net_interfaces() -> (Vec<String>, Vec<String>) {
+    let mut tuns = Vec::new();
+    let mut devs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net/") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "lo" {
+                continue;
+            }
+            let if_type: u32 = std::fs::read_to_string(format!("/sys/class/net/{name}/type"))
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(1);
+            if if_type == 65534 {
+                tuns.push(name);
+            } else if if_type == 1
+                && !name.starts_with("docker")
+                && !name.starts_with("virbr")
+                && !name.starts_with("br-")
+            {
+                devs.push(name);
+            }
+        }
+    }
+    tuns.sort();
+    devs.sort();
+    (tuns, devs)
+}
+
 /// Detect local network interfaces and return a list of default egress entries.
 /// Always includes a "Default Route" entry (system routing table).
 /// Interfaces whose operstate is "down" are marked as unavailable.

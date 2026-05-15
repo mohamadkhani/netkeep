@@ -182,9 +182,11 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 - [x] Egress-bound rules: `Rule.egress_id` replaces `route_target`; first available `RouteTarget` resolved at enforcement time via `first_available_target()`
 - [x] gpui migrated from crates.io `gpui 0.2` to git HEAD (`zed-industries/zed`); ported `DataTable`, `Column` ownership, removed footer closure API
 - [x] Daemon no longer auto-seeds per-interface egresses; only ensures `eg-default` exists on startup
+- [x] Egress table: ID column as first column; Name cell no longer shows inline `(id)` sub-text
+- [x] Egress form dialog: per-target list editor (TUN/DEV/PROXY type buttons + interface input + ADD/remove) replacing CSV text input; TYPE button height fixed to match select element
+- [x] Rules form dialog: egress selector buttons (one per non-system egress, highlighted when selected) replacing free-text route-target input
 - [ ] Auth fields in proxy form dialog (Basic / Shadowsocks)
 - [ ] Egress priority ordering UI
-- [ ] Add Egress modal design
 
 ## 4) Open Bugs / Follow-ups
 
@@ -495,3 +497,24 @@ Five independent improvements in one session, all in the process-identification 
   - **File:** `apps/emulator/tests/socks_allow_relay.rs`.
 
 **Tests:** workspace **143** passing, no regressions.
+
+### 2026-05-16 (session 27 — settings UI polish: egress table ID column + form dialog UX)
+
+Four settings-window UI improvements applied in `design/settings_window.html` first (design spec), then ported to the Rust implementation files.
+
+- [x] **Egress table: ID column added.**
+  - HTML: removed `PRIORITY` column (was col-span-2); added `ID` (col-span-2) before `NAME`; adjusted `NAME` to col-span-3, `STATUS` to col-span-1 to keep grid sum at 12.
+  - `settings/egress_tab.rs`: `ID` is now `columns[0]` (90px); `render_td` arm 0 renders `egress.id` in muted 11px text. `NAME` arm moved to index 1 with no inline `(id)` sub-text.
+
+- [x] **Egress form dialog: TYPE button height mismatch fixed.**
+  - HTML: TYPE selection buttons (`TUN` / `DEV` / `PROXY`) changed from `py-1` to `py-1.5` so they match the height of the adjacent `<select>` element.
+
+- [x] **Egress form dialog: per-target list editor replaces CSV text input.**
+  - `settings/mod.rs` (`open_egress_form_dialog`): `targets_input: Entity<InputState>` removed; replaced with `targets_list: Arc<Mutex<Vec<String>>>` (interior-mutable, shared across `Fn` renders) and `new_tgt_iface: Entity<InputState>` + `new_tgt_type: Arc<Mutex<String>>`.
+  - Dialog body renders existing targets as badge + name + ✕ remove button rows; below is an inline add-target form with `TUN`/`DEV`/`PROXY` type buttons + interface input + `ADD` button.
+  - `on_ok` joins the vec into a comma-separated string and passes to `helpers::parse_targets_csv`.
+
+- [x] **Rules form dialog: egress selector replaces free-text route input.**
+  - `settings/mod.rs` (`open_rule_form_dialog`): `route_input: Entity<InputState>` removed; `available_egresses: Vec<(String, String)>` captured at open time from `self.state.read(cx).egresses`; `selected_route: Arc<Mutex<String>>` holds the selected egress id.
+  - When action is `ROUTE`, the dialog shows one button per non-system egress (highlighted when selected); empty list shows a hint to add egresses first.
+  - `on_ok` reads `route_ok.lock().unwrap()` instead of an input entity.

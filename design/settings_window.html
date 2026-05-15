@@ -223,44 +223,47 @@
                     <div class="bg-surface border border-outline-variant rounded overflow-hidden">
                         <!-- Table Header -->
                         <div class="grid grid-cols-12 gap-x-gutter bg-surface-container-low border-b border-outline-variant p-density-compact">
-                            <div class="col-span-3 font-label-caps text-[10px] text-on-surface-variant">NAME</div>
-                            <div class="col-span-2 font-label-caps text-[10px] text-on-surface-variant">TYPE</div>
+                            <div class="col-span-2 font-label-caps text-[10px] text-on-surface-variant">ID</div>
+                            <div class="col-span-2 font-label-caps text-[10px] text-on-surface-variant">NAME</div>
+                            <div class="col-span-1 font-label-caps text-[10px] text-on-surface-variant">TYPE</div>
                             <div class="col-span-2 font-label-caps text-[10px] text-on-surface-variant">INTERFACE</div>
-                            <div class="col-span-2 font-label-caps text-[10px] text-on-surface-variant">PRIORITY</div>
+                            <div class="col-span-1 font-label-caps text-[10px] text-on-surface-variant">PRIORITY</div>
                             <div class="col-span-1 font-label-caps text-[10px] text-on-surface-variant">STATUS</div>
-                            <div class="col-span-2 font-label-caps text-[10px] text-on-surface-variant text-right">ACTIONS</div>
+                            <div class="col-span-3 font-label-caps text-[10px] text-on-surface-variant text-right">ACTIONS</div>
                         </div>
                         
                         <!-- Table Rows -->
                         <div class="divide-y divide-outline-variant">
                             <!-- Row 1: Default Route -->
                             <div class="grid grid-cols-12 gap-x-gutter p-density-compact hover:bg-surface-bright transition-colors items-center">
-                                <div class="col-span-3 flex items-center gap-2">
+                                <div class="col-span-2 font-data-mono text-[11px] text-on-surface-variant/60">eg-default</div>
+                                <div class="col-span-2 flex items-center gap-2">
                                     <span class="material-symbols-outlined text-[16px] text-on-surface-variant">router</span>
                                     <span class="font-data-mono text-data-mono text-on-surface">Default Route</span>
                                 </div>
-                                <div class="col-span-2"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant border border-outline-variant">SYSTEM</span></div>
+                                <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant border border-outline-variant">SYSTEM</span></div>
                                 <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px] bg-surface-variant px-1.5 py-0.5 rounded border border-outline-variant">eth0</div>
-                                <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px]">0</div>
+                                <div class="col-span-1 font-data-mono text-[11px] text-on-surface-variant/60">0</div>
                                 <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">ACTIVE</span></div>
-                                <div class="col-span-2 flex justify-end gap-1">
+                                <div class="col-span-3 flex justify-end gap-1">
                                     <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">visibility</button>
                                     <button class="material-symbols-outlined text-[16px] text-on-surface-variant/50 p-1 rounded cursor-not-allowed" title="Cannot edit system route">edit</button>
                                     <button class="material-symbols-outlined text-[16px] text-on-surface-variant/50 p-1 rounded cursor-not-allowed" title="Cannot delete system route">delete</button>
                                 </div>
                             </div>
-                            
+
                             <!-- Row 2: WireGuard Tunnel -->
                             <div class="grid grid-cols-12 gap-x-gutter p-density-compact hover:bg-surface-bright transition-colors items-center">
-                                <div class="col-span-3 flex items-center gap-2">
+                                <div class="col-span-2 font-data-mono text-[11px] text-on-surface-variant/60">eg-wg0</div>
+                                <div class="col-span-2 flex items-center gap-2">
                                     <span class="material-symbols-outlined text-[16px] text-[#22c55e]">vpn_lock</span>
                                     <span class="font-data-mono text-data-mono text-on-surface">TUN: wg0</span>
                                 </div>
-                                <div class="col-span-2"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">VPN</span></div>
+                                <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">VPN</span></div>
                                 <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px] bg-surface-variant px-1.5 py-0.5 rounded border border-outline-variant">wg0</div>
-                                <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px]">10</div>
+                                <div class="col-span-1 font-data-mono text-[11px] text-on-surface-variant/60">10</div>
                                 <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">ACTIVE</span></div>
-                                <div class="col-span-2 flex justify-end gap-1">
+                                <div class="col-span-3 flex justify-end gap-1">
                                     <button class="edit-egress-btn font-label-caps text-[10px] px-2 py-0.5 rounded border border-primary text-primary hover:bg-primary/10 transition-colors">Edit</button>
                                     <button class="font-label-caps text-[10px] px-2 py-0.5 rounded border border-error text-error hover:bg-error/10 transition-colors">Delete</button>
                                 </div>
@@ -268,15 +271,16 @@
 
                             <!-- Row 3: WiFi Interface -->
                             <div class="grid grid-cols-12 gap-x-gutter p-density-compact hover:bg-surface-bright transition-colors items-center">
-                                <div class="col-span-3 flex items-center gap-2">
+                                <div class="col-span-2 font-data-mono text-[11px] text-on-surface-variant/60">eg-wlan0</div>
+                                <div class="col-span-2 flex items-center gap-2">
                                     <span class="material-symbols-outlined text-[16px] text-on-surface-variant">wifi</span>
                                     <span class="font-data-mono text-data-mono text-on-surface">Device: wlan0</span>
                                 </div>
-                                <div class="col-span-2"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant border border-outline-variant">DIRECT</span></div>
+                                <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant border border-outline-variant">DIRECT</span></div>
                                 <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px] bg-surface-variant px-1.5 py-0.5 rounded border border-outline-variant">wlan0</div>
-                                <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px]">20</div>
+                                <div class="col-span-1 font-data-mono text-[11px] text-on-surface-variant/60">20</div>
                                 <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant border border-outline-variant">INACTIVE</span></div>
-                                <div class="col-span-2 flex justify-end gap-1">
+                                <div class="col-span-3 flex justify-end gap-1">
                                     <button class="edit-egress-btn font-label-caps text-[10px] px-2 py-0.5 rounded border border-primary text-primary hover:bg-primary/10 transition-colors">Edit</button>
                                     <button class="font-label-caps text-[10px] px-2 py-0.5 rounded border border-error text-error hover:bg-error/10 transition-colors">Delete</button>
                                 </div>
@@ -284,15 +288,16 @@
 
                             <!-- Row 4: Ethernet Interface -->
                             <div class="grid grid-cols-12 gap-x-gutter p-density-compact hover:bg-surface-bright transition-colors items-center">
-                                <div class="col-span-3 flex items-center gap-2">
+                                <div class="col-span-2 font-data-mono text-[11px] text-on-surface-variant/60">eg-eth0</div>
+                                <div class="col-span-2 flex items-center gap-2">
                                     <span class="material-symbols-outlined text-[16px] text-on-surface-variant">ethernet</span>
                                     <span class="font-data-mono text-data-mono text-on-surface">Device: eth0</span>
                                 </div>
-                                <div class="col-span-2"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant border border-outline-variant">DIRECT</span></div>
+                                <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant border border-outline-variant">DIRECT</span></div>
                                 <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px] bg-surface-variant px-1.5 py-0.5 rounded border border-outline-variant">eth0</div>
-                                <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px]">30</div>
+                                <div class="col-span-1 font-data-mono text-[11px] text-on-surface-variant/60">30</div>
                                 <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">ACTIVE</span></div>
-                                <div class="col-span-2 flex justify-end gap-1">
+                                <div class="col-span-3 flex justify-end gap-1">
                                     <button class="edit-egress-btn font-label-caps text-[10px] px-2 py-0.5 rounded border border-primary text-primary hover:bg-primary/10 transition-colors">Edit</button>
                                     <button class="font-label-caps text-[10px] px-2 py-0.5 rounded border border-error text-error hover:bg-error/10 transition-colors">Delete</button>
                                 </div>
@@ -547,16 +552,16 @@
                             <div class="flex flex-col gap-1.5 shrink-0">
                                 <span class="font-label-caps text-[9px] text-on-surface-variant/50">TYPE</span>
                                 <div class="flex gap-1" id="target-type-btns">
-                                    <button data-type="tun"   class="target-type-btn font-label-caps text-[9px] px-2.5 py-1 rounded border transition-colors border-[#22c55e] text-[#22c55e] bg-[#22c55e]/10">TUN</button>
-                                    <button data-type="dev"   class="target-type-btn font-label-caps text-[9px] px-2.5 py-1 rounded border transition-colors border-outline-variant text-on-surface-variant hover:border-on-surface-variant">DEV</button>
-                                    <button data-type="proxy" class="target-type-btn font-label-caps text-[9px] px-2.5 py-1 rounded border transition-colors border-outline-variant text-on-surface-variant hover:border-on-surface-variant">PROXY</button>
+                                    <button data-type="tun"   class="target-type-btn font-label-caps text-[9px] px-2.5 py-1.5 rounded border transition-colors border-[#22c55e] text-[#22c55e] bg-[#22c55e]/10">TUN</button>
+                                    <button data-type="dev"   class="target-type-btn font-label-caps text-[9px] px-2.5 py-1.5 rounded border transition-colors border-outline-variant text-on-surface-variant hover:border-on-surface-variant">DEV</button>
+                                    <button data-type="proxy" class="target-type-btn font-label-caps text-[9px] px-2.5 py-1.5 rounded border transition-colors border-outline-variant text-on-surface-variant hover:border-on-surface-variant">PROXY</button>
                                 </div>
                             </div>
                             <!-- Value selector — changes contents based on selected type -->
                             <div class="flex flex-col gap-1.5 flex-1">
                                 <span class="font-label-caps text-[9px] text-on-surface-variant/50" id="target-value-label">INTERFACE</span>
                                 <select id="target-value-select"
-                                    class="bg-surface-variant border border-outline-variant rounded px-2.5 py-1.5 text-on-surface font-data-mono text-[12px] focus:outline-none focus:border-primary transition-colors">
+                                    class="bg-surface-variant border border-outline-variant rounded px-2.5 py-1 text-on-surface font-data-mono text-[12px] focus:outline-none focus:border-primary transition-colors">
                                     <!-- Options populated by JS based on type: detected interfaces or proxy list -->
                                     <optgroup label="TUN devices" id="target-opts-tun">
                                         <option value="tun:wg0">wg0</option>

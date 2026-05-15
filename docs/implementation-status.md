@@ -2,7 +2,7 @@
 
 **Test Status:** 143 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
-**Last Updated:** 2026-05-15
+**Last Updated:** 2026-05-16
 
 ## Completed Work
 
@@ -80,7 +80,7 @@
   - `components/status_bar.rs` — centered footer with LogiGuard branding and queue status
   - `settings/mod.rs` — SettingsApp with Table/Dialog, tab switching, data sync
   - `settings/rules_tab.rs` — RulesDelegate (TableDelegate) with toggle/delete actions
-  - `settings/egress_tab.rs` — EgressDelegate (TableDelegate) with type badges, delete
+  - `settings/egress_tab.rs` — EgressDelegate (TableDelegate) with type badges, delete; ID is first column
   - `settings/proxies_tab.rs` — ProxiesDelegate (TableDelegate) with protocol badges, toggle/delete
   - `settings/helpers.rs` — fetch_and_apply, parse_dns_csv, route_summary
 - [x] Material Design 3 dark theme matching HTML design spec (`design/decision_dialog_window.html`)
@@ -255,6 +255,18 @@
 - **Tests:** All 143 existing tests pass; no new tests added (the invariants are already covered by the three-layer race test suite added for Bug 12).
 
 - **Docs:** `docs/nfqueue-packet-interception.md` TCP handling section rewritten; `docs/process-resolver.md` lookup chain and Race Conditions section updated; `docs/process-attribution-races.md` Bug 22 worked example added.
+
+## Settings UI Polish (2026-05-16)
+
+Four improvements to the settings window applied to both `design/settings_window.html` and the Rust implementation.
+
+**Egress table — ID column.** Removed the unused `PRIORITY` column; added an `ID` column as the first column (col-span-2 in HTML, 90px in `egress_tab.rs`). `NAME` no longer shows an inline `(id)` sub-text. Column grid still sums to 12.
+
+**Egress modal — TYPE button height.** The `TUN`/`DEV`/`PROXY` type-selector buttons were shorter than the adjacent `<select>` element (`py-1` vs the taller select). Changed to `py-1.5` so the row is visually uniform.
+
+**Egress form dialog — per-target list editor.** Replaced the free-text CSV input for targets with an interactive list: existing targets render as badge + name + ✕ remove button; below is an inline add-form with type buttons + interface input + ADD button. Uses `Arc<Mutex<Vec<String>>>` for interior mutability inside the `Fn` dialog closure. Files: `settings/mod.rs` (`open_egress_form_dialog`).
+
+**Rules form dialog — egress selector.** Replaced the free-text route-target input with one button per non-system egress (highlighted when selected). Available egresses are captured at dialog-open time from `self.state.read(cx).egresses`. Empty list shows a "No egresses configured" hint. Uses `Arc<Mutex<String>>` for the selected egress id. Files: `settings/mod.rs` (`open_rule_form_dialog`).
 
 ## Bug Fixes (decision dialog + settings focus, 2026-05-13)
 

@@ -8,6 +8,7 @@ mod helpers;
 mod proxies_tab;
 mod rules_tab;
 
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use control_api::{ControlRequest, ControlResponse};
@@ -27,7 +28,7 @@ use gpui_component::WindowExt as _;
 use gpui_component::{h_flex, v_flex};
 
 use crate::colors;
-use crate::components::{field_label, modal_header, proto_btn};
+use crate::components::{action_btn, field_label, modal_header, proto_btn};
 
 use egress_tab::EgressDelegate;
 use proxies_tab::ProxiesDelegate;
@@ -275,11 +276,17 @@ impl SettingsApp {
             s.set_value(init_dest_value.clone(), window, cx);
             s
         });
-        let route_input = cx.new(|cx| {
-            let mut s = InputState::new(window, cx);
-            s.set_value(init_route.clone(), window, cx);
-            s
-        });
+        // Available egresses for the route-target selector (id, display name).
+        let available_egresses: Vec<(String, String)> = self
+            .state
+            .read(cx)
+            .egresses
+            .iter()
+            .map(|e| (e.id.clone(), e.name.clone()))
+            .collect();
+
+        // Interior-mutable route selection — replaces the old free-text InputState.
+        let selected_route: Arc<Mutex<String>> = Arc::new(Mutex::new(init_route.clone()));
 
         // Interior-mutable shared state for radio-group selections inside Fn closure.
         let selected_action: Arc<Mutex<RuleAction>> = Arc::new(Mutex::new(init_action));
@@ -289,7 +296,6 @@ impl SettingsApp {
 
         let proc_c = process_input.clone();
         let dest_c = dest_input.clone();
-        let route_c = route_input.clone();
         let action_c = selected_action.clone();
         let dur_c = selected_duration.clone();
         let dtype_c = selected_dest_type.clone();
@@ -357,13 +363,116 @@ impl SettingsApp {
             // Clones for on_ok
             let proc_i = proc_c.clone();
             let dest_i = dest_c.clone();
-            let route_i = route_c.clone();
+            let route_ok = selected_route.clone();
             let action_ok = action_c.clone();
             let dur_ok = dur_c.clone();
             let dtype_ok = dtype_c.clone();
             let state_w = state_weak.clone();
             let sock = socket_path.clone();
             let eid = existing_id.clone();
+
+            let do_save: Rc<dyn Fn(&mut gpui::App) -> bool> = {
+                let proc_i = proc_i;
+                let dest_i = dest_i;
+                let route_ok = route_ok;
+                let action_ok = action_ok;
+                let dur_ok = dur_ok;
+                let dtype_ok = dtype_ok;
+                let state_w = state_w;
+                let sock = sock;
+                let eid = eid;
+                Rc::new(move |cx: &mut gpui::App| -> bool {
+                    let process_raw = proc_i.read(cx).value().to_string();
+                    let process_name = if process_raw.trim().is_empty() {
+                        None
+                    } else {
+                        Some(process_raw.trim().to_string())
+                    };
+                    let dest_val = dest_i.read(cx).value().trim().to_string();
+                    let action = action_ok.lock().unwrap().clone();
+                    let duration = dur_ok.lock().unwrap().clone();
+                    let dest_type = dtype_ok.lock().unwrap().clone();
+                    let destination = match dest_type.as_str() {
+                        "cidr" => DestinationMatcher::Cidr(dest_val),
+                        "domain" => DestinationMatcher::DomainExact(dest_val),
+                        "wildcard" => DestinationMatcher::DomainWildcard(
+                            dest_val.strip_prefix("*.").unwrap_or(&dest_val).to_string(),
+                        ),
+                        "any" => DestinationMatcher::Any,
+                        _ => DestinationMatcher::IpExact(dest_val),
+                    };
+                    let route_raw = route_ok.lock().unwrap().clone();
+                    let (action, egress_id) = if action == RuleAction::Route {
+                        if route_raw.is_empty() {
+                            (RuleAction::Allow, None)
+                        } else {
+                            (RuleAction::Route, Some(route_raw))
+                        }
+                    } else {
+                        (action, None)
+                    };
+                    let id = eid
+                        .clone()
+                        .unwrap_or_else(|| format!("ui-{}", crate::daemon::unix_now()));
+                    let rule = Rule {
+                        id,
+                        enabled: true,
+                        action,
+                        duration,
+                        process_name,
+                        destination,
+                        egress_id,
+                    };
+                    let to_send = rule.clone();
+                    let sock_c = sock.clone();
+                    let state_wc = state_w.clone();
+                    let editing = eid.is_some();
+                    cx.spawn(async move |cx| {
+                        let res = cx
+                            .background_executor()
+                            .spawn(async move {
+                                crate::daemon::send_request(
+                                    &sock_c,
+                                    &ControlRequest::AddRule(to_send),
+                                )
+                            })
+                            .await;
+                        if let Some(st) = state_wc.upgrade() {
+                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                match res {
+                                    Ok(ControlResponse::Ok) => {
+                                        if editing {
+                                            if let Some(r) =
+                                                s.rules.iter_mut().find(|r| r.id == rule.id)
+                                            {
+                                                *r = rule;
+                                            }
+                                            s.status = Some("Rule updated.".into());
+                                        } else {
+                                            s.rules.push(rule);
+                                            s.status = Some("Rule added.".into());
+                                        }
+                                        s.load_generation = s.load_generation.saturating_add(1);
+                                    }
+                                    Ok(ControlResponse::Error(msg)) => {
+                                        s.status = Some(format!("save failed: {msg}"));
+                                    }
+                                    Err(e) => {
+                                        s.status = Some(format!("save failed: {e}"));
+                                    }
+                                    _ => {
+                                        s.status = Some("unexpected response".into());
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                    true
+                })
+            };
+            let do_save_btn = do_save.clone();
 
             // Clones for buttons
             let act_allow = selected_action.clone();
@@ -380,13 +489,28 @@ impl SettingsApp {
 
             dialog
                 .p(px(0.))
-                .close_button(false)
                 .title(modal_header(hdr_icon, hdr_title))
                 .w(px(480.))
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default()
                         .ok_text(ok_label)
                         .cancel_text("Cancel"),
+                )
+                .footer(
+                    h_flex()
+                        .px(px(16.)).py(px(8.))
+                        .gap(px(8.)).justify_end()
+                        .child(
+                            action_btn("dialog-cancel", "Cancel", crate::colors::muted())
+                                .on_click(|_, win, cx| { win.close_dialog(cx); })
+                        )
+                        .child(
+                            action_btn("dialog-ok", ok_label, crate::colors::primary())
+                                .on_click(move |_, win, cx| {
+                                    do_save_btn(cx);
+                                    win.close_dialog(cx);
+                                })
+                        )
                 )
                 .child(
                     v_flex()
@@ -429,16 +553,62 @@ impl SettingsApp {
                                     )),
                             ),
                         )
-                        // Route target input — shown only when action is ROUTE
+                        // Route target egress selector — shown only when action is ROUTE
                         .when(is_route_action, |el| {
-                            el.child(
-                                v_flex()
-                                    .gap(px(4.))
-                                    .child(field_label(
-                                        "ROUTE TARGET  (tun:wg0 / dev:eth0 / proxy:id)",
-                                    ))
-                                    .child(Input::new(&route_c)),
-                            )
+                            let cur_route = selected_route.lock().unwrap().clone();
+                            let route_arc = selected_route.clone();
+                            let egress_btns: Vec<gpui::AnyElement> = available_egresses
+                                .iter()
+                                .map(|(eid, ename)| {
+                                    let is_sel = cur_route == *eid;
+                                    let color =
+                                        if is_sel { colors::primary() } else { colors::muted() };
+                                    let eid_c = eid.clone();
+                                    let rt = route_arc.clone();
+                                    div()
+                                        .id(gpui::ElementId::Name(
+                                            format!("eg-sel-{eid_c}").into(),
+                                        ))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .px(px(10.))
+                                        .py(px(5.))
+                                        .rounded(px(4.))
+                                        .border_1()
+                                        .border_color(color)
+                                        .text_color(color)
+                                        .text_size(px(10.))
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .cursor_pointer()
+                                        .on_click(move |_, _, _| {
+                                            *rt.lock().unwrap() = eid_c.clone();
+                                        })
+                                        .child(ename.clone())
+                                        .into_any_element()
+                                })
+                                .collect();
+                            if egress_btns.is_empty() {
+                                el.child(
+                                    div()
+                                        .text_color(colors::muted())
+                                        .text_size(px(11.))
+                                        .child("No egresses configured — add one in the Egress tab."),
+                                )
+                            } else {
+                                el.child(
+                                    v_flex()
+                                        .gap(px(4.))
+                                        .child(field_label("ROUTE VIA"))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_wrap()
+                                                .gap(px(6.))
+                                                .children(egress_btns),
+                                        ),
+                                )
+                            }
                         })
                         // Destination type
                         .child(
@@ -518,101 +688,7 @@ impl SettingsApp {
                             ),
                         ),
                 )
-                .on_ok(move |_, _, cx| {
-                    let process_raw = proc_i.read(cx).value().to_string();
-                    let process_name = if process_raw.trim().is_empty() {
-                        None
-                    } else {
-                        Some(process_raw.trim().to_string())
-                    };
-                    let dest_val = dest_i.read(cx).value().trim().to_string();
-                    let action = action_ok.lock().unwrap().clone();
-                    let duration = dur_ok.lock().unwrap().clone();
-                    let dest_type = dtype_ok.lock().unwrap().clone();
-                    let destination = match dest_type.as_str() {
-                        "cidr" => DestinationMatcher::Cidr(dest_val),
-                        "domain" => DestinationMatcher::DomainExact(dest_val),
-                        // Canonical wildcard storage is the apex without the `*.`
-                        // prefix (the display layer in `ds::dest_text` prepends it).
-                        // The matcher in `policy-engine` is lenient and accepts
-                        // both forms, but normalizing on the way in keeps the rule
-                        // table free of `*.*.foo.com`-style render glitches.
-                        "wildcard" => DestinationMatcher::DomainWildcard(
-                            dest_val.strip_prefix("*.").unwrap_or(&dest_val).to_string(),
-                        ),
-                        "any" => DestinationMatcher::Any,
-                        _ => DestinationMatcher::IpExact(dest_val),
-                    };
-                    let route_raw = route_i.read(cx).value().trim().to_string();
-                    let (action, egress_id) = if action == RuleAction::Route {
-                        if route_raw.is_empty() {
-                            (RuleAction::Allow, None) // fallback if input empty
-                        } else {
-                            (RuleAction::Route, Some(route_raw))
-                        }
-                    } else {
-                        (action, None)
-                    };
-                    let id = eid
-                        .clone()
-                        .unwrap_or_else(|| format!("ui-{}", crate::daemon::unix_now()));
-                    let rule = Rule {
-                        id,
-                        enabled: true,
-                        action,
-                        duration,
-                        process_name,
-                        destination,
-                        egress_id,
-                    };
-                    let to_send = rule.clone();
-                    let sock_c = sock.clone();
-                    let state_wc = state_w.clone();
-                    let editing = eid.is_some();
-                    cx.spawn(async move |cx| {
-                        let res = cx
-                            .background_executor()
-                            .spawn(async move {
-                                crate::daemon::send_request(
-                                    &sock_c,
-                                    &ControlRequest::AddRule(to_send),
-                                )
-                            })
-                            .await;
-                        if let Some(st) = state_wc.upgrade() {
-                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
-                                match res {
-                                    Ok(ControlResponse::Ok) => {
-                                        if editing {
-                                            if let Some(r) =
-                                                s.rules.iter_mut().find(|r| r.id == rule.id)
-                                            {
-                                                *r = rule;
-                                            }
-                                            s.status = Some("Rule updated.".into());
-                                        } else {
-                                            s.rules.push(rule);
-                                            s.status = Some("Rule added.".into());
-                                        }
-                                        s.load_generation = s.load_generation.saturating_add(1);
-                                    }
-                                    Ok(ControlResponse::Error(msg)) => {
-                                        s.status = Some(format!("save failed: {msg}"));
-                                    }
-                                    Err(e) => {
-                                        s.status = Some(format!("save failed: {e}"));
-                                    }
-                                    _ => {
-                                        s.status = Some("unexpected response".into());
-                                    }
-                                }
-                                cx.notify();
-                            });
-                        }
-                    })
-                    .detach();
-                    true
-                })
+                .on_ok(move |_, _, cx| do_save(cx))
         });
     }
 
@@ -674,16 +750,10 @@ impl SettingsApp {
             .map(|e| e.color.as_str())
             .unwrap_or("#3b82f6")
             .to_string();
-        let init_targets = existing
+        let init_targets_vec: Vec<String> = existing
             .as_ref()
-            .map(|e| {
-                e.targets
-                    .iter()
-                    .map(|t| helpers::route_summary(t))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_else(|| "dev:eth0".to_string());
+            .map(|e| e.targets.iter().map(|t| helpers::route_summary(t)).collect())
+            .unwrap_or_default();
         let init_dns = existing
             .as_ref()
             .map(|e| e.dns_servers.join(", "))
@@ -699,20 +769,34 @@ impl SettingsApp {
             s.set_value(init_color.clone(), window, cx);
             s
         });
-        let targets_input = cx.new(|cx| {
-            let mut s = InputState::new(window, cx);
-            s.set_value(init_targets.clone(), window, cx);
-            s
-        });
         let dns_input = cx.new(|cx| {
             let mut s = InputState::new(window, cx);
             s.set_value(init_dns.clone(), window, cx);
             s
         });
+        // Collect available interfaces and proxy options for the add-target selector.
+        let (tun_ifaces, dev_ifaces) = crate::daemon::list_net_interfaces();
+        let proxy_options: Vec<(String, String)> = self
+            .state
+            .read(cx)
+            .proxies
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
+        let tun_ifaces = Arc::new(tun_ifaces);
+        let dev_ifaces = Arc::new(dev_ifaces);
+        let proxy_options = Arc::new(proxy_options);
+
+        // Reactive list of "type:name" target strings; shared with add/remove buttons.
+        let targets_list = Arc::new(Mutex::new(init_targets_vec));
+        // Currently-selected type for the add-target inline form.
+        let new_tgt_type = Arc::new(Mutex::new("tun".to_string()));
+        // Currently-selected interface value for the add-target form.
+        let selected_iface: Arc<Mutex<String>> =
+            Arc::new(Mutex::new(tun_ifaces.first().cloned().unwrap_or_default()));
 
         let name_c = name_input.clone();
         let color_c = color_input.clone();
-        let targets_c = targets_input.clone();
         let dns_c = dns_input.clone();
 
         let hdr_icon = if is_edit { "✏" } else { "⊕" };
@@ -720,62 +804,196 @@ impl SettingsApp {
         let ok_label = if is_edit { "Save" } else { "Add Egress" };
 
         window.open_dialog(cx, move |dialog, _, _cx| {
+            // ── Snapshot shared state for this render ───────────────────
+            let cur_targets = targets_list.lock().unwrap().clone();
+            let cur_tgt_type = new_tgt_type.lock().unwrap().clone();
+            let current_color = color_c.read(_cx).value().to_string();
+            let color_swatch = colors::hex_to_hsla(&current_color);
+
+            // ── Preset color swatches ────────────────────────────────────
+            const PRESET_COLORS: &[(&str, u32)] = &[
+                ("#22c55e", 0x22c55e),
+                ("#3b82f6", 0x3b82f6),
+                ("#f59e0b", 0xf59e0b),
+                ("#ef4444", 0xef4444),
+                ("#8b5cf6", 0x8b5cf6),
+                ("#06b6d4", 0x06b6d4),
+            ];
+            let preset_swatches: Vec<gpui::AnyElement> = PRESET_COLORS
+                .iter()
+                .map(|(hex_str, hex_u32)| {
+                    let is_selected = current_color.trim_start_matches('#').eq_ignore_ascii_case(
+                        &format!("{:06x}", hex_u32),
+                    );
+                    let color_ent = color_c.clone();
+                    let hex = hex_str.to_string();
+                    div()
+                        .id(gpui::ElementId::Name(format!("swatch-{hex_str}").into()))
+                        .w(px(22.))
+                        .h(px(22.))
+                        .rounded_full()
+                        .bg(gpui::rgb(*hex_u32))
+                        .cursor_pointer()
+                        .when(is_selected, |el| {
+                            el.border_2().border_color(colors::text())
+                        })
+                        .when(!is_selected, |el| {
+                            el.border_1().border_color(colors::border())
+                        })
+                        .on_click(move |_, win, cx| {
+                            color_ent.update(cx, |state, ictx| {
+                                state.set_value(hex.clone(), win, ictx);
+                            });
+                        })
+                        .into_any_element()
+                })
+                .collect();
+
+            // ── Per-target rows (each has a remove button) ──────────────
+            let target_rows: Vec<gpui::AnyElement> = cur_targets
+                .iter()
+                .enumerate()
+                .map(|(i, tgt)| {
+                    let tl = targets_list.clone();
+                    let (badge, badge_color): (&str, gpui::Hsla) =
+                        if tgt.starts_with("tun:") {
+                            ("TUN", colors::green())
+                        } else if tgt.starts_with("proxy:") {
+                            ("PROXY", colors::primary())
+                        } else {
+                            ("DEV", colors::muted())
+                        };
+                    let tgt_name = tgt
+                        .split_once(':')
+                        .map(|(_, n)| n)
+                        .unwrap_or(tgt.as_str())
+                        .to_string();
+                    div()
+                        .id(gpui::ElementId::Name(format!("tgt-row-{i}").into()))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(10.))
+                        .py(px(5.))
+                        .border_b_1()
+                        .border_color(colors::border())
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(badge_color)
+                                .border_1()
+                                .border_color(badge_color)
+                                .px(px(4.))
+                                .py(px(1.))
+                                .rounded(px(2.))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .child(badge),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(12.))
+                                .text_color(colors::text())
+                                .child(tgt_name),
+                        )
+                        .child(
+                            div()
+                                .id(gpui::ElementId::Name(format!("tgt-rm-{i}").into()))
+                                .text_size(px(11.))
+                                .text_color(colors::muted())
+                                .cursor_pointer()
+                                .px(px(4.))
+                                .on_click(move |_, _, _| {
+                                    tl.lock().unwrap().remove(i);
+                                })
+                                .child("✕"),
+                        )
+                        .into_any_element()
+                })
+                .collect();
+
+            // ── Type-button active colors for add-target form ───────────
+            let (tc_tun, tc_dev, tc_prx) = match cur_tgt_type.as_str() {
+                "tun" => (colors::green(), colors::muted(), colors::muted()),
+                "dev" => (colors::muted(), colors::primary(), colors::muted()),
+                _ => (colors::muted(), colors::muted(), colors::teal()),
+            };
+            // ── Snapshot selected_iface for this render ──────────────────
+            let cur_sel_iface = selected_iface.lock().unwrap().clone();
+
+            // ── Interface options based on current type ──────────────────
+            let (iface_vals, iface_labels): (Vec<String>, Vec<String>) =
+                match cur_tgt_type.as_str() {
+                    "tun" => (tun_ifaces.as_ref().clone(), tun_ifaces.as_ref().clone()),
+                    "dev" => (dev_ifaces.as_ref().clone(), dev_ifaces.as_ref().clone()),
+                    _ => proxy_options
+                        .iter()
+                        .map(|(id, name)| (id.clone(), name.clone()))
+                        .unzip(),
+                };
+
+            let iface_sel_btns: Vec<gpui::AnyElement> = iface_vals
+                .iter()
+                .zip(iface_labels.iter())
+                .map(|(val, label)| {
+                    let is_sel = *val == cur_sel_iface;
+                    let color = if is_sel { colors::primary() } else { colors::muted() };
+                    let si = selected_iface.clone();
+                    let v = val.clone();
+                    div()
+                        .id(gpui::ElementId::Name(format!("iface-sel-{val}").into()))
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(3.))
+                        .border_1()
+                        .border_color(color)
+                        .text_color(color)
+                        .text_size(px(11.))
+                        .cursor_pointer()
+                        .on_click(move |_, _, _| {
+                            *si.lock().unwrap() = v.clone();
+                        })
+                        .child(label.clone())
+                        .into_any_element()
+                })
+                .collect();
+
+            let tt_tun = new_tgt_type.clone();
+            let si_tun = selected_iface.clone();
+            let tun_first = tun_ifaces.first().cloned().unwrap_or_default();
+            let tt_dev = new_tgt_type.clone();
+            let si_dev = selected_iface.clone();
+            let dev_first = dev_ifaces.first().cloned().unwrap_or_default();
+            let tt_prx = new_tgt_type.clone();
+            let si_prx = selected_iface.clone();
+            let prx_first = proxy_options.first().map(|(id, _)| id.clone()).unwrap_or_default();
+            let tl_add = targets_list.clone();
+            let tt_add = new_tgt_type.clone();
+            let si_add = selected_iface.clone();
+
+            // ── Clones consumed by on_ok ────────────────────────────────
             let name_i = name_c.clone();
             let color_i = color_c.clone();
-            let targets_i = targets_c.clone();
             let dns_i = dns_c.clone();
+            let tl_ok = targets_list.clone();
             let state_w = state_weak.clone();
             let sock = socket_path.clone();
             let eid = existing_id.clone();
 
-            dialog
-                .p(px(0.))
-                .close_button(false)
-                .title(modal_header(hdr_icon, hdr_title))
-                .w(px(480.))
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok_label)
-                        .cancel_text("Cancel"),
-                )
-                .child(
-                    v_flex()
-                        .px(px(16.))
-                        .py(px(16.))
-                        .gap(px(16.))
-                        .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(field_label("NAME"))
-                                .child(Input::new(&name_c)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(field_label("COLOR (hex)"))
-                                .child(Input::new(&color_c)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(field_label("TARGETS  (dev:eth0, tun:wg0, proxy:id)"))
-                                .child(Input::new(&targets_c)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(field_label(
-                                    "DNS SERVERS  (comma-separated, empty = system)",
-                                ))
-                                .child(Input::new(&dns_c)),
-                        ),
-                )
-                .on_ok(move |_, _, cx| {
+            let do_save: Rc<dyn Fn(&mut gpui::App) -> bool> = {
+                let name_i = name_i;
+                let color_i = color_i;
+                let dns_i = dns_i;
+                let tl_ok = tl_ok;
+                let state_w = state_w;
+                let sock = sock;
+                let eid = eid;
+                Rc::new(move |cx: &mut gpui::App| -> bool {
                     let name = name_i.read(cx).value().to_string();
                     let color = color_i.read(cx).value().to_string();
-                    let targets_s = targets_i.read(cx).value().to_string();
                     let dns_s = dns_i.read(cx).value().to_string();
-                    let targets = helpers::parse_targets_csv(&targets_s);
+                    let targets_vec = tl_ok.lock().unwrap().clone();
+                    let targets = helpers::parse_targets_csv(&targets_vec.join(","));
                     let dns = helpers::parse_dns_csv(&dns_s);
                     let id = eid
                         .clone()
@@ -845,6 +1063,250 @@ impl SettingsApp {
                     .detach();
                     true
                 })
+            };
+            let do_save_btn = do_save.clone();
+
+            dialog
+                .p(px(0.))
+                .title(modal_header(hdr_icon, hdr_title))
+                .w(px(520.))
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text(ok_label)
+                        .cancel_text("Cancel"),
+                )
+                .footer(
+                    h_flex()
+                        .px(px(16.)).py(px(8.))
+                        .gap(px(8.)).justify_end()
+                        .child(
+                            action_btn("dialog-cancel", "Cancel", crate::colors::muted())
+                                .on_click(|_, win, cx| { win.close_dialog(cx); })
+                        )
+                        .child(
+                            action_btn("dialog-ok", ok_label, crate::colors::primary())
+                                .on_click(move |_, win, cx| {
+                                    do_save_btn(cx);
+                                    win.close_dialog(cx);
+                                })
+                        )
+                )
+                .child(
+                    v_flex()
+                        .px(px(16.))
+                        .py(px(16.))
+                        .gap(px(16.))
+                        // Name
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("NAME"))
+                                .child(Input::new(&name_c)),
+                        )
+                        // Color with preset swatches and live preview
+                        .child(
+                            v_flex()
+                                .gap(px(6.))
+                                .child(field_label("COLOR"))
+                                .child(
+                                    h_flex()
+                                        .gap(px(6.))
+                                        .items_center()
+                                        .children(preset_swatches),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap(px(8.))
+                                        .items_center()
+                                        .child(Input::new(&color_c))
+                                        .child(
+                                            div()
+                                                .w(px(28.))
+                                                .h(px(28.))
+                                                .rounded(px(4.))
+                                                .border_1()
+                                                .border_color(colors::border())
+                                                .bg(color_swatch)
+                                                .flex_shrink_0(),
+                                        ),
+                                ),
+                        )
+                        // Routing Targets
+                        .child(
+                            v_flex()
+                                .gap(px(6.))
+                                .child(field_label("ROUTING TARGETS"))
+                                // Current target list
+                                .child(
+                                    div()
+                                        .border_1()
+                                        .border_color(colors::border())
+                                        .rounded(px(4.))
+                                        .overflow_hidden()
+                                        .when(cur_targets.is_empty(), |el| {
+                                            el.child(
+                                                div()
+                                                    .px(px(10.))
+                                                    .py(px(8.))
+                                                    .text_size(px(11.))
+                                                    .text_color(colors::muted())
+                                                    .child(
+                                                        "No targets — system routing table used.",
+                                                    ),
+                                            )
+                                        })
+                                        .children(target_rows),
+                                )
+                                // Add-target inline form
+                                .child(
+                                    v_flex()
+                                        .gap(px(6.))
+                                        .border_1()
+                                        .border_color(colors::border())
+                                        .rounded(px(4.))
+                                        .px(px(10.))
+                                        .py(px(8.))
+                                        .child(field_label("ADD TARGET"))
+                                        .child(
+                                            h_flex()
+                                                .gap(px(6.))
+                                                .items_center()
+                                                // TUN / DEV / PROXY type buttons
+                                                .child(
+                                                    h_flex()
+                                                        .gap(px(4.))
+                                                        .child(
+                                                            div()
+                                                                .id(gpui::ElementId::Name(
+                                                                    "tgt-type-tun".into(),
+                                                                ))
+                                                                .px(px(8.))
+                                                                .py(px(4.))
+                                                                .rounded(px(3.))
+                                                                .border_1()
+                                                                .border_color(tc_tun)
+                                                                .text_color(tc_tun)
+                                                                .text_size(px(9.))
+                                                                .font_weight(
+                                                                    gpui::FontWeight::BOLD,
+                                                                )
+                                                                .cursor_pointer()
+                                                                .on_click(move |_, _, _| {
+                                                                    *tt_tun.lock().unwrap() = "tun".into();
+                                                                    *si_tun.lock().unwrap() = tun_first.clone();
+                                                                })
+                                                                .child("TUN"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id(gpui::ElementId::Name(
+                                                                    "tgt-type-dev".into(),
+                                                                ))
+                                                                .px(px(8.))
+                                                                .py(px(4.))
+                                                                .rounded(px(3.))
+                                                                .border_1()
+                                                                .border_color(tc_dev)
+                                                                .text_color(tc_dev)
+                                                                .text_size(px(9.))
+                                                                .font_weight(
+                                                                    gpui::FontWeight::BOLD,
+                                                                )
+                                                                .cursor_pointer()
+                                                                .on_click(move |_, _, _| {
+                                                                    *tt_dev.lock().unwrap() = "dev".into();
+                                                                    *si_dev.lock().unwrap() = dev_first.clone();
+                                                                })
+                                                                .child("DEV"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id(gpui::ElementId::Name(
+                                                                    "tgt-type-proxy".into(),
+                                                                ))
+                                                                .px(px(8.))
+                                                                .py(px(4.))
+                                                                .rounded(px(3.))
+                                                                .border_1()
+                                                                .border_color(tc_prx)
+                                                                .text_color(tc_prx)
+                                                                .text_size(px(9.))
+                                                                .font_weight(
+                                                                    gpui::FontWeight::BOLD,
+                                                                )
+                                                                .cursor_pointer()
+                                                                .on_click(move |_, _, _| {
+                                                                    *tt_prx.lock().unwrap() = "proxy".into();
+                                                                    *si_prx.lock().unwrap() = prx_first.clone();
+                                                                })
+                                                                .child("PROXY"),
+                                                        ),
+                                                ),
+                                        )
+                                        // Interface / proxy selector
+                                        .child(
+                                            div()
+                                                .when(iface_sel_btns.is_empty(), |el| {
+                                                    el.child(
+                                                        div()
+                                                            .text_size(px(11.))
+                                                            .text_color(colors::muted())
+                                                            .child("No options — add via the Proxies tab."),
+                                                    )
+                                                })
+                                                .when(!iface_sel_btns.is_empty(), |el| {
+                                                    el.child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_wrap()
+                                                            .gap(px(6.))
+                                                            .children(iface_sel_btns),
+                                                    )
+                                                }),
+                                        )
+                                        // ADD button
+                                        .child(
+                                            h_flex()
+                                                .justify_end()
+                                                .child(
+                                                    div()
+                                                        .id(gpui::ElementId::Name(
+                                                            "tgt-add-btn".into(),
+                                                        ))
+                                                        .px(px(10.))
+                                                        .py(px(5.))
+                                                        .rounded(px(3.))
+                                                        .border_1()
+                                                        .border_color(colors::primary())
+                                                        .text_color(colors::primary())
+                                                        .text_size(px(10.))
+                                                        .font_weight(gpui::FontWeight::BOLD)
+                                                        .cursor_pointer()
+                                                        .on_click(move |_, _, _| {
+                                                            let type_s = tt_add.lock().unwrap().clone();
+                                                            let iface = si_add.lock().unwrap().clone();
+                                                            if !iface.is_empty() {
+                                                                tl_add.lock().unwrap().push(
+                                                                    format!("{type_s}:{iface}"),
+                                                                );
+                                                            }
+                                                        })
+                                                        .child("ADD"),
+                                                ),
+                                        ),
+                                ),
+                        )
+                        // DNS
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label(
+                                    "DNS SERVERS  (comma-separated, empty = system)",
+                                ))
+                                .child(Input::new(&dns_c)),
+                        ),
+                )
+                .on_ok(move |_, _, cx| do_save(cx))
         });
     }
 
@@ -932,62 +1394,16 @@ impl SettingsApp {
             let eid = existing_id.clone();
             let auth_val = init_auth.clone();
 
-            dialog
-                .p(px(0.))
-                .close_button(false)
-                .title(modal_header(hdr_icon, hdr_title))
-                .w(px(480.))
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok_label)
-                        .cancel_text("Cancel"),
-                )
-                .child(
-                    v_flex()
-                        .px(px(16.))
-                        .py(px(16.))
-                        .gap(px(16.))
-                        .child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(field_label("NAME"))
-                                .child(Input::new(&name_input_c)),
-                        )
-                        .child(
-                            v_flex().gap(px(4.)).child(field_label("PROTOCOL")).child(
-                                h_flex()
-                                    .gap(px(8.))
-                                    .child(proto_btn("SOCKS5", sc, sc, move |_, _, _| {
-                                        *proto_socks5.lock().unwrap() = ProxyProtocol::Socks5;
-                                    }))
-                                    .child(proto_btn("HTTP", hc, hc, move |_, _, _| {
-                                        *proto_http.lock().unwrap() = ProxyProtocol::Http;
-                                    }))
-                                    .child(proto_btn("SS", sc2, sc2, move |_, _, _| {
-                                        *proto_ss.lock().unwrap() = ProxyProtocol::Shadowsocks;
-                                    })),
-                            ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap(px(12.))
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .gap(px(4.))
-                                        .child(field_label("HOST"))
-                                        .child(Input::new(&host_input_c)),
-                                )
-                                .child(
-                                    v_flex()
-                                        .w(px(96.))
-                                        .gap(px(4.))
-                                        .child(field_label("PORT"))
-                                        .child(Input::new(&port_input_c)),
-                                ),
-                        ),
-                )
-                .on_ok(move |_, _, cx| {
+            let do_save: Rc<dyn Fn(&mut gpui::App) -> bool> = {
+                let name_i = name_i;
+                let host_i = host_i;
+                let port_i = port_i;
+                let proto_for_ok = proto_for_ok;
+                let state_w = state_w;
+                let sock = sock;
+                let eid = eid;
+                let auth_val = auth_val;
+                Rc::new(move |cx: &mut gpui::App| -> bool {
                     let name = name_i.read(cx).value().to_string();
                     let host = host_i.read(cx).value().to_string();
                     let port_str = port_i.read(cx).value().to_string();
@@ -1061,6 +1477,80 @@ impl SettingsApp {
                     .detach();
                     true
                 })
+            };
+            let do_save_btn = do_save.clone();
+
+            dialog
+                .p(px(0.))
+                .title(modal_header(hdr_icon, hdr_title))
+                .w(px(480.))
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text(ok_label)
+                        .cancel_text("Cancel"),
+                )
+                .footer(
+                    h_flex()
+                        .px(px(16.)).py(px(8.))
+                        .gap(px(8.)).justify_end()
+                        .child(
+                            action_btn("dialog-cancel", "Cancel", crate::colors::muted())
+                                .on_click(|_, win, cx| { win.close_dialog(cx); })
+                        )
+                        .child(
+                            action_btn("dialog-ok", ok_label, crate::colors::primary())
+                                .on_click(move |_, win, cx| {
+                                    do_save_btn(cx);
+                                    win.close_dialog(cx);
+                                })
+                        )
+                )
+                .child(
+                    v_flex()
+                        .px(px(16.))
+                        .py(px(16.))
+                        .gap(px(16.))
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label("NAME"))
+                                .child(Input::new(&name_input_c)),
+                        )
+                        .child(
+                            v_flex().gap(px(4.)).child(field_label("PROTOCOL")).child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .child(proto_btn("SOCKS5", sc, sc, move |_, _, _| {
+                                        *proto_socks5.lock().unwrap() = ProxyProtocol::Socks5;
+                                    }))
+                                    .child(proto_btn("HTTP", hc, hc, move |_, _, _| {
+                                        *proto_http.lock().unwrap() = ProxyProtocol::Http;
+                                    }))
+                                    .child(proto_btn("SS", sc2, sc2, move |_, _, _| {
+                                        *proto_ss.lock().unwrap() = ProxyProtocol::Shadowsocks;
+                                    })),
+                            ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .gap(px(4.))
+                                        .child(field_label("HOST"))
+                                        .child(Input::new(&host_input_c)),
+                                )
+                                .child(
+                                    v_flex()
+                                        .w(px(96.))
+                                        .gap(px(4.))
+                                        .child(field_label("PORT"))
+                                        .child(Input::new(&port_input_c)),
+                                ),
+                        ),
+                )
+                .on_ok(move |_, _, cx| do_save(cx))
         });
     }
 }

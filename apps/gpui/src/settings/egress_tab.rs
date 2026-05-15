@@ -37,6 +37,7 @@ impl EgressDelegate {
             state_weak,
             socket_path,
             columns: vec![
+                Column::new("id", "ID").width(px(90.)),
                 Column::new("name", "Name").width(px(140.)),
                 Column::new("type", "Type").width(px(80.)),
                 Column::new("targets", "Targets").width(px(200.)),
@@ -88,35 +89,31 @@ impl TableDelegate for EgressDelegate {
         };
 
         match col_ix {
+            // ID
+            0 => div()
+                .text_color(colors::muted())
+                .text_size(px(11.))
+                .child(egress.id.clone())
+                .into_any_element(),
             // Name
-            0 => {
-                let mut el = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .text_color(colors::text())
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(egress.name.clone()),
-                    );
-                if !egress.is_system_default {
-                    el = el.child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(colors::muted())
-                            .child(format!("({})", egress.id)),
-                    );
-                }
-                el.into_any_element()
-            }
+            1 => div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_color(colors::text())
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(egress.name.clone()),
+                )
+                .into_any_element(),
             // Type badge
-            1 => {
+            2 => {
                 let (label, color) = Self::egress_type_label(egress);
                 table_badge(label, color)
             }
             // Targets
-            2 => {
+            3 => {
                 if egress.targets.is_empty() {
                     div()
                         .text_color(colors::muted())
@@ -132,7 +129,7 @@ impl TableDelegate for EgressDelegate {
                 }
             }
             // DNS
-            3 => {
+            4 => {
                 if egress.dns_servers.is_empty() {
                     div()
                         .text_color(colors::muted())
@@ -146,7 +143,7 @@ impl TableDelegate for EgressDelegate {
                 }
             }
             // Status badge
-            4 => {
+            5 => {
                 let (label, color) = if egress.is_available || egress.is_system_default {
                     ("ACTIVE", colors::green())
                 } else {
@@ -155,7 +152,7 @@ impl TableDelegate for EgressDelegate {
                 table_badge(label, color)
             }
             // Controls (edit + delete for non-system)
-            5 => {
+            6 => {
                 if egress.is_system_default {
                     return div().into_any_element();
                 }
