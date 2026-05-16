@@ -46,6 +46,11 @@ fn destination_matches(rule: &Rule, flow: &FlowContext) -> bool {
 }
 
 fn process_matches(rule: &Rule, flow: &FlowContext) -> bool {
+    // Prefer exe-path comparison when both sides have it — more unique than
+    // basename alone and immune to comm-name truncation.
+    if let (Some(rule_exe), Some(flow_exe)) = (&rule.process_exe, &flow.process_exe) {
+        return rule_exe == flow_exe;
+    }
     match (&rule.process_name, &flow.process_name) {
         (None, _) => true,
         (Some(rp), Some(fp)) => rp == fp,
@@ -120,6 +125,7 @@ mod tests {
             action,
             duration: RuleDuration::UntilRestart,
             process_name: process_name.map(str::to_string),
+            process_exe: None,
             destination,
             egress_id: None,
         }
@@ -129,6 +135,8 @@ mod tests {
     fn wildcard_matches_subdomain_but_not_apex() {
         let flow_sub = FlowContext {
             process_name: None,
+            process_exe: None,
+            app_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
@@ -138,6 +146,8 @@ mod tests {
         };
         let flow_apex = FlowContext {
             process_name: None,
+            process_exe: None,
+            app_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),
@@ -165,6 +175,8 @@ mod tests {
     fn wildcard_matches_with_apex_only_storage_form() {
         let flow_sub = FlowContext {
             process_name: None,
+            process_exe: None,
+            app_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
@@ -219,6 +231,8 @@ mod tests {
     fn wildcard_matches_both_storage_forms_identically() {
         let flow = FlowContext {
             process_name: None,
+            process_exe: None,
+            app_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
@@ -255,6 +269,8 @@ mod tests {
     fn wildcard_empty_pattern_matches_nothing() {
         let flow = FlowContext {
             process_name: None,
+            process_exe: None,
+            app_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
@@ -280,6 +296,8 @@ mod tests {
     fn specific_process_rule_beats_general_rule() {
         let flow = FlowContext {
             process_name: Some("firefox".to_string()),
+            process_exe: None,
+            app_name: None,
             destination_ip: "9.9.9.9".to_string(),
             destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
@@ -308,6 +326,8 @@ mod tests {
     fn deny_beats_allow_at_same_specificity() {
         let flow = FlowContext {
             process_name: None,
+            process_exe: None,
+            app_name: None,
             destination_ip: "8.8.8.8".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),
@@ -334,6 +354,8 @@ mod tests {
     fn flow_unknown_proc(domain: Option<&str>, ip: &str) -> FlowContext {
         FlowContext {
             process_name: None,
+            process_exe: None,
+            app_name: None,
             destination_ip: ip.to_string(),
             destination_port: 443,
             destination_domain: domain.map(str::to_string),
@@ -432,6 +454,8 @@ mod tests {
     fn tie_break_equal_route_rules_prefers_lexicographically_greater_id() {
         let flow = FlowContext {
             process_name: Some("socks-client".to_string()),
+            process_exe: None,
+            app_name: None,
             destination_ip: "0.0.0.0".to_string(),
             destination_port: 443,
             destination_domain: Some("www.digikala.com".to_string()),

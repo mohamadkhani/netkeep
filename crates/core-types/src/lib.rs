@@ -42,6 +42,11 @@ pub struct Rule {
     pub action: RuleAction,
     pub duration: RuleDuration,
     pub process_name: Option<String>,
+    /// Full path to the process executable (e.g. `/usr/bin/curl`). Used as
+    /// the primary match key when present — more unique than basename alone
+    /// and immune to comm-name truncation.
+    #[serde(default)]
+    pub process_exe: Option<String>,
     pub destination: DestinationMatcher,
     /// Set when `action == Route`. References an `Egress.id` stored in the
     /// daemon's state-store. The first available target of that egress is
@@ -53,6 +58,14 @@ pub struct Rule {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowContext {
     pub process_name: Option<String>,
+    /// Full executable path from `/proc/<pid>/exe` — the unique identity of
+    /// the process binary, used for rule matching and stored in the DB.
+    #[serde(default)]
+    pub process_exe: Option<String>,
+    /// User-facing app label resolved from the Arch Linux package database
+    /// (`pacman -Qo <exe>`). Displayed alongside `process_name` in the dialog.
+    #[serde(default)]
+    pub app_name: Option<String>,
     pub destination_ip: String,
     pub destination_port: u16,
     pub destination_domain: Option<String>,

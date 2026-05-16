@@ -195,7 +195,8 @@ impl SqliteRuleRepository {
                  process_name TEXT NULL,
                  destination_kind INTEGER NOT NULL,
                  destination_value TEXT NOT NULL,
-                 egress_id TEXT NULL
+                 egress_id TEXT NULL,
+                 process_exe TEXT NULL
              );
              CREATE TABLE IF NOT EXISTS flow_events (
                  id TEXT PRIMARY KEY,
@@ -246,8 +247,9 @@ impl SqliteRuleRepository {
              );",
         )
         .map_err(|e| e.to_string())?;
-        // Migration: add egress_id column to existing DBs (ignore error if it already exists).
+        // Migrations: add columns to existing DBs (ignore error if they already exist).
         let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN egress_id TEXT NULL;");
+        let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN process_exe TEXT NULL;");
         Ok(Self { conn })
     }
 }
@@ -370,8 +372,8 @@ impl RuleRepository for SqliteRuleRepository {
     fn upsert_rule(&mut self, rule: Rule) {
         let (destination_kind, destination_value) = destination_to_parts(&rule.destination);
         let _ = self.conn.execute(
-            "INSERT INTO rules (id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO rules (id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                  enabled=excluded.enabled,
                  action=excluded.action,
@@ -379,7 +381,8 @@ impl RuleRepository for SqliteRuleRepository {
                  process_name=excluded.process_name,
                  destination_kind=excluded.destination_kind,
                  destination_value=excluded.destination_value,
-                 egress_id=excluded.egress_id;",
+                 egress_id=excluded.egress_id,
+                 process_exe=excluded.process_exe;",
             params![
                 rule.id,
                 if rule.enabled { 1i64 } else { 0i64 },
@@ -389,6 +392,7 @@ impl RuleRepository for SqliteRuleRepository {
                 destination_kind,
                 destination_value,
                 rule.egress_id,
+                rule.process_exe,
             ],
         );
     }
@@ -397,7 +401,7 @@ impl RuleRepository for SqliteRuleRepository {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id
+                "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe
                  FROM rules WHERE id = ?1",
             )
             .ok()?;
@@ -413,6 +417,7 @@ impl RuleRepository for SqliteRuleRepository {
             action,
             duration,
             process_name: row.get(4).ok()?,
+            process_exe: row.get(8).ok()?,
             destination,
             egress_id: row.get(7).ok()?,
         })
@@ -420,7 +425,7 @@ impl RuleRepository for SqliteRuleRepository {
 
     fn list_rules(&self) -> Vec<Rule> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id FROM rules ORDER BY id",
+            "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe FROM rules ORDER BY id",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -438,6 +443,7 @@ impl RuleRepository for SqliteRuleRepository {
                 action,
                 duration,
                 process_name: row.get(4)?,
+                process_exe: row.get(8)?,
                 destination,
                 egress_id: row.get(7)?,
             })
@@ -869,6 +875,7 @@ mod tests {
             action: RuleAction::Allow,
             duration: RuleDuration::UntilRestart,
             process_name: Some("curl".to_string()),
+            process_exe: None,
             destination: DestinationMatcher::DomainExact("example.com".to_string()),
             egress_id: None,
         }
@@ -892,6 +899,8 @@ mod tests {
             id: id.to_string(),
             flow: FlowContext {
                 process_name: Some("curl".to_string()),
+                process_exe: None,
+                app_name: None,
                 destination_ip: "1.1.1.1".to_string(),
                 destination_port: 443,
                 destination_domain: Some("example.com".to_string()),

@@ -13,6 +13,7 @@ use control_service::{ControlService, HealthConfig, SharedService};
 use core_types::{Egress, RouteTarget};
 use decision_engine::{DecisionEngine, OverflowPolicy};
 use enforcer::{NftablesBootstrap, RouteManager, SystemNftablesBootstrap, SystemRouteManager, ROUTE_MARK_BASE};
+use enforcer::dns_snoop::DnsSnoopWorker;
 use enforcer::nfqueue::NfqueueProcessor;
 use flow_classifier::{
     FlowClassifier, FakeDeviceLabelResolver, SniDnsCache,
@@ -911,7 +912,7 @@ fn main() {
                 FakeDeviceLabelResolver { result: None },
             );
             let registrar = SharedService(Arc::clone(&service));
-            match NfqueueProcessor::open(queue_num, classifier, registrar, dns_cache) {
+            match NfqueueProcessor::open(queue_num, classifier, registrar, dns_cache.clone()) {
                 Err(e) => {
                     eprintln!("nfqueue open failed (are you root?): {e}");
                     Some(Arc::clone(&bs))
@@ -923,6 +924,27 @@ fn main() {
                             eprintln!("nfqueue processor stopped: {e}");
                         }
                     });
+
+                    // DNS snoop: second queue (queue_num + 1) on the INPUT hook
+                    // captures DNS responses and populates the shared dns_cache so
+                    // subsequent connections to the same IP are attributed a domain
+                    // even when no SNI or HTTP Host header is available.
+                    if let Some(dns_q) = queue_num.checked_add(1) {
+                        match DnsSnoopWorker::open(dns_q, dns_cache) {
+                            Ok(mut worker) => {
+                                println!("dns snoop running on queue {dns_q}");
+                                std::thread::spawn(move || {
+                                    if let Err(e) = worker.run_loop() {
+                                        eprintln!("dns snoop stopped: {e}");
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                eprintln!("dns snoop open failed: {e}");
+                            }
+                        }
+                    }
+
                     Some(Arc::clone(&bs))
                 }
             }

@@ -1,3 +1,4 @@
+pub mod dns_snoop;
 pub mod nfqueue;
 
 use std::collections::HashMap;
@@ -313,6 +314,18 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             script.push_str(&format!(
                 "add rule inet logiguard forward queue num {q}\n",
             ));
+
+            // INPUT chain: passively snoop DNS responses (UDP src_port 53) on a
+            // second NFQUEUE queue (queue_num + 1) with `bypass` so that if the
+            // DnsSnoopWorker is not running, DNS responses pass through unaffected.
+            if let Some(dns_q) = q.checked_add(1) {
+                script.push_str(
+                    "add chain inet logiguard input_dns { type filter hook input priority 0; policy accept; }\n",
+                );
+                script.push_str(&format!(
+                    "add rule inet logiguard input_dns udp sport 53 queue num {dns_q} bypass\n",
+                ));
+            }
         }
         run_nft_script(&script)
     }
@@ -596,6 +609,8 @@ mod tests {
     fn classified_flow() -> FlowContext {
         FlowContext {
             process_name: Some("curl".to_string()),
+            process_exe: None,
+            app_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),

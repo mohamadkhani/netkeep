@@ -6,27 +6,24 @@ use std::time::{Duration, Instant};
 
 use core_types::TransportProtocol;
 
-use crate::ProcessResolver;
+use crate::{ProcessInfo, ProcessResolver};
 
-/// Real ProcessResolver: (src_ip, src_port, protocol) → process name.
+/// Real ProcessResolver: (src_ip, src_port, protocol) → ProcessInfo.
 ///
 /// Lookup pipeline:
-///   1. Per-socket cache hit — successful resolutions are cached for a short
-///      TTL so retransmits / follow-up segments of the same connection do not
-///      re-race `/proc/net/tcp`.
-///   2. Read /proc/net/{tcp,tcp6,udp,udp6} — exact (ip, port) match → inode + uid
-///   3. UDP fallback: port-only match for wildcard-bound sockets (0.0.0.0:port)
-///   4. Retry with short delays — socket may not be in /proc/net yet (TOCTOU)
-///   5. UID-filtered /proc/*/fd/ scan — skip processes owned by wrong UID (fast path)
-///   6. Prefer exe basename over comm (comm is truncated to 15 chars by the kernel)
-///   7. Parent process exe basename — handles Electron/subprocess models where the
-///      network child has a short or generic name
+///   1. Per-socket cache hit — successful resolutions are cached for 60 s.
+///   2. /proc/net/{tcp,tcp6,udp,udp6} → inode + uid (with retry delays).
+///   3. /proc/*/fd/ scan → pid (UID-filtered first pass, full fallback).
+///   4. `ss` fallback (SOCK_DIAG) if either /proc/net or /proc/*/fd fails.
+///   5. /proc/<pid>/exe → full path + basename name.
+///   6. Name fixup: shell wrappers → parent, electron/AppRun → cmdline/env.
+///   7. `pacman -Qo <exe>` → app_name (Arch Linux, cached per exe path).
 pub struct ProcProcessResolver {
-    /// (src_ip, src_port, protocol) → (name, inserted_at). Avoids re-reading
-    /// /proc/net on every retransmit of the same socket, which otherwise
-    /// re-triggers the TOCTOU race and yields inconsistent process names
-    /// across packets of the same logical connection.
-    cache: Mutex<HashMap<SocketKey, CachedName>>,
+    /// Per-socket ProcessInfo cache keyed by (src_ip, src_port, protocol).
+    cache: Mutex<HashMap<SocketKey, CachedEntry>>,
+    /// Pacman owner cache keyed by exe path. Stores `None` for paths not
+    /// owned by any package to avoid repeated subprocess invocations.
+    pacman_cache: Mutex<HashMap<String, Option<String>>>,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
@@ -37,75 +34,224 @@ struct SocketKey {
 }
 
 #[derive(Clone)]
-struct CachedName {
+struct CachedEntry {
     name: String,
+    exe: Option<String>,
+    app_name: Option<String>,
     inserted_at: Instant,
 }
 
-/// How long a resolved `(src_ip, src_port, protocol) → name` mapping stays
-/// in the cache. Long enough to cover typical TCP connection lifetimes and
-/// HTTP keep-alive idle periods, short enough that an OS port reuse for a
-/// different process gets a fresh lookup.
+/// How long a resolved `(src_ip, src_port, protocol)` mapping stays in cache.
 const CACHE_TTL: Duration = Duration::from_secs(60);
-/// Cap on cache size. When exceeded we evict expired entries on the next
-/// insert; the cap is a defense against pathological resolver-failure storms.
+/// Cap on socket cache size.
 const CACHE_MAX: usize = 4096;
+/// Cap on pacman cache size (one entry per unique binary on the system).
+const PACMAN_CACHE_MAX: usize = 1024;
 
 impl ProcProcessResolver {
     pub fn new() -> Self {
-        Self { cache: Mutex::new(HashMap::new()) }
+        Self {
+            cache: Mutex::new(HashMap::new()),
+            pacman_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Find the PID that owns the socket:
+    ///   1. /proc/net + /proc/*/fd scan (primary).
+    ///   2. `ss` command fallback if the primary path returns None.
+    fn find_pid(&self, ip: IpAddr, port: u16, protocol: TransportProtocol) -> Option<u32> {
+        if let Some((inode, uid)) = retry_find_socket(ip, port, protocol) {
+            if let Some(pid) = find_pid_for_inode(inode, uid) {
+                return Some(pid);
+            }
+            // /proc/net found the inode but /proc/*/fd scan came up empty
+            // (fork/exec visibility gap). Try ss before giving up.
+        }
+        try_ss_fallback(ip, port, protocol)
+    }
+
+    /// Look up the Arch Linux package that owns `exe_path` via `pacman -Qo`.
+    /// Result is cached — including `None` for unowned paths.
+    fn lookup_pacman(&self, exe_path: &str) -> Option<String> {
+        if let Ok(c) = self.pacman_cache.lock() {
+            if let Some(cached) = c.get(exe_path) {
+                return cached.clone();
+            }
+        }
+        let result = pacman_query_owner(exe_path);
+        if let Ok(mut c) = self.pacman_cache.lock() {
+            if c.len() >= PACMAN_CACHE_MAX {
+                c.clear();
+            }
+            c.insert(exe_path.to_string(), result.clone());
+        }
+        result
     }
 }
 
 impl Default for ProcProcessResolver {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl ProcessResolver for ProcProcessResolver {
-    fn resolve(&self, src_ip: &str, src_port: u16, protocol: TransportProtocol) -> Option<String> {
+    fn resolve(&self, src_ip: &str, src_port: u16, protocol: TransportProtocol) -> Option<ProcessInfo> {
         let ip: IpAddr = src_ip.parse().ok()?;
         let key = SocketKey { ip, port: src_port, protocol };
-
-        // Cache fast path — a successful resolution within the TTL is reused
-        // verbatim. This is what stops a retransmit whose /proc/net entry
-        // briefly vanished (or hasn't been written this poll) from yielding
-        // process_name=None when we already learned it a moment ago.
         let now = Instant::now();
+
+        // Cache fast path
         if let Ok(cache) = self.cache.lock() {
             if let Some(entry) = cache.get(&key) {
                 if now.duration_since(entry.inserted_at) < CACHE_TTL {
-                    return Some(entry.name.clone());
+                    return Some(ProcessInfo {
+                        name: entry.name.clone(),
+                        exe: entry.exe.clone(),
+                        app_name: entry.app_name.clone(),
+                    });
                 }
             }
         }
 
-        // Retry loop: TOCTOU — the socket entry may lag behind the packet by a few ms.
-        let (inode, uid) = retry_find_socket(ip, src_port, protocol)?;
+        let pid = self.find_pid(ip, src_port, protocol)?;
 
-        let pid = find_pid_for_inode(inode, uid)?;
+        // Read exe: full path first, fall back to comm.
+        let exe_path = read_exe_path(pid);
+        let raw_name = exe_path
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .or_else(|| read_comm(pid))?;
 
-        let name = read_exe_basename(pid).or_else(|| read_comm(pid))?;
-
-        // Walk to parent only for single-character names or known generic shell
-        // wrappers. Length <= 3 was too broad: `ssh`, `git`, `bun` all have
-        // 3 chars and should NOT be replaced by their parent (the terminal).
-        let name = if name.len() <= 1 || matches!(name.as_str(), "sh" | "bash" | "dash" | "zsh" | "fish") {
-            read_ppid(pid).and_then(read_exe_basename).unwrap_or(name)
+        // Name fixup: shell wrappers → parent, electron → cmdline / env.
+        let name = if raw_name.len() <= 1
+            || matches!(raw_name.as_str(), "sh" | "bash" | "dash" | "zsh" | "fish")
+        {
+            read_ppid(pid).and_then(read_exe_basename).unwrap_or(raw_name)
+        } else if matches!(raw_name.as_str(), "electron" | "AppRun") {
+            // Resolution order for generic Electron/AppImage names:
+            //   1. Own cmdline — path before "resources/" gives the app dir name.
+            //   2. Parent cmdline — utility subprocesses inherit parent's app path.
+            //   3. APPIMAGE env var — set by AppImage runtime for all child procs.
+            //   4. Parent exe basename — last resort, filtered for generic names.
+            app_name_from_electron_cmdline(pid)
+                .or_else(|| read_ppid(pid).and_then(app_name_from_electron_cmdline))
+                .or_else(|| app_name_from_environ(pid))
+                .or_else(|| {
+                    read_ppid(pid)
+                        .and_then(read_exe_basename)
+                        .filter(|n| !matches!(
+                            n.as_str(),
+                            "electron" | "AppRun" | "sh" | "bash" | "dash" | "zsh" | "fish"
+                        ))
+                })
+                .unwrap_or(raw_name)
         } else {
-            name
+            raw_name
         };
+
+        // Pacman lookup (Arch Linux only; graceful no-op otherwise).
+        let app_name = exe_path.as_deref().and_then(|p| self.lookup_pacman(p));
+        // Suppress app_name when it equals name — no value in duplicating it.
+        let app_name = app_name.filter(|a| a != &name);
+
+        let info = ProcessInfo { name, exe: exe_path, app_name };
 
         if let Ok(mut cache) = self.cache.lock() {
             if cache.len() >= CACHE_MAX {
                 cache.retain(|_, v| now.duration_since(v.inserted_at) < CACHE_TTL);
             }
-            cache.insert(key, CachedName { name: name.clone(), inserted_at: now });
+            cache.insert(key, CachedEntry {
+                name: info.name.clone(),
+                exe: info.exe.clone(),
+                app_name: info.app_name.clone(),
+                inserted_at: now,
+            });
         }
 
-        Some(name)
+        Some(info)
     }
+}
+
+// ---------------------------------------------------------------------------
+// `ss` fallback (SOCK_DIAG via iproute2)
+// ---------------------------------------------------------------------------
+
+/// Try `ss -Hnp -{t|u} src :<port>` to find the pid owning the socket.
+///
+/// `ss` uses the kernel's SOCK_DIAG netlink interface internally, which can
+/// produce results in cases where reading `/proc/net/tcp` races.  This is a
+/// last-resort call only made after all `/proc/net` retries have failed, so
+/// its ~1 ms subprocess latency is acceptable.  Returns `None` immediately if
+/// `ss` is not installed or reports an error.
+fn try_ss_fallback(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Option<u32> {
+    let proto_flag = if matches!(protocol, TransportProtocol::Udp | TransportProtocol::Quic) {
+        "-u"
+    } else {
+        "-t"
+    };
+    let output = std::process::Command::new("ss")
+        .args(["-Hnp", proto_flag, &format!("src :{port}")])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // ss -H columns: State Recv-Q Send-Q Local Peer [Process]
+        if fields.len() < 6 { continue; }
+        if !ss_local_matches(fields[3], ip, port) { continue; }
+        if let Some(pid) = extract_pid_from_ss_line(line) {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+/// Return true if `addr` (as printed by `ss`) matches the given IP and port.
+/// Handles IPv4 (`1.2.3.4:port`), IPv6 (`[::1]:port`), and IPv4-mapped forms.
+fn ss_local_matches(addr: &str, ip: IpAddr, port: u16) -> bool {
+    let Some(colon) = addr.rfind(':') else { return false };
+    let port_str = port.to_string();
+    if &addr[colon + 1..] != port_str { return false; }
+    let addr_part = addr[..colon].trim_matches('[').trim_matches(']');
+    match (ip, addr_part.parse::<IpAddr>().ok()) {
+        (IpAddr::V4(a), Some(IpAddr::V4(b))) => a == b,
+        (IpAddr::V6(a), Some(IpAddr::V6(b))) => a == b,
+        (IpAddr::V4(a), Some(IpAddr::V6(b))) => b.to_ipv4_mapped() == Some(a),
+        (IpAddr::V6(a), Some(IpAddr::V4(b))) => a.to_ipv4_mapped() == Some(b),
+        _ => addr_part == ip.to_string(),
+    }
+}
+
+/// Extract `pid=N` from an `ss -p` users field like `users:(("curl",pid=1234,fd=3))`.
+fn extract_pid_from_ss_line(line: &str) -> Option<u32> {
+    let start = line.find("pid=")? + 4;
+    let rest = &line[start..];
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+// ---------------------------------------------------------------------------
+// Pacman lookup (Arch Linux)
+// ---------------------------------------------------------------------------
+
+/// Ask pacman which package owns `exe_path`.
+/// Returns `None` if pacman is not available, the path is unowned, or the
+/// command fails for any reason.
+fn pacman_query_owner(exe_path: &str) -> Option<String> {
+    let output = std::process::Command::new("pacman")
+        .args(["-Qo", "--", exe_path])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // e.g. "/usr/bin/curl is owned by curl 8.7.1-1\n"
+    let s = String::from_utf8_lossy(&output.stdout);
+    let after_by = s.split(" owned by ").nth(1)?;
+    Some(after_by.split_whitespace().next()?.to_string())
 }
 
 /// Try to find the socket (inode, uid) with up to 4 attempts and increasing delays.
@@ -221,6 +367,10 @@ pub fn parse_proc_net(content: &str, src_ip: IpAddr, src_port: u16) -> Option<(u
         };
         if matches {
             let inode: u64 = cols[9].parse().ok()?;
+            // inode=0 means a TIME_WAIT or kernel-internal socket — no process
+            // owns it, so find_pid_for_inode would always fail. Skip it so we
+            // continue searching for the real socket entry.
+            if inode == 0 { continue; }
             let uid: u32 = cols[7].parse().unwrap_or(u32::MAX);
             return Some((inode, uid));
         }
@@ -244,6 +394,7 @@ fn parse_proc_net_port_only(content: &str, src_port: u16) -> Option<(u64, u32)> 
             continue;
         }
         let inode: u64 = cols[9].parse().ok()?;
+        if inode == 0 { continue; }
         let uid: u32 = cols[7].parse().unwrap_or(u32::MAX);
         return Some((inode, uid));
     }
@@ -294,10 +445,11 @@ fn find_pid_for_inode(inode: u64, uid: u32) -> Option<u32> {
     let target = format!("socket:[{inode}]");
 
     // Retry delays: 0 ms covers the common case (fd already visible);
-    // 3 ms and 8 ms cover the fork/exec visibility gap in multi-process apps
-    // like Electron where the network-service subprocess can briefly not have
-    // its file descriptors visible under /proc/<pid>/fd/.
-    const DELAYS_MS: [u64; 3] = [0, 3, 8];
+    // 3/8/20 ms cover the fork/exec visibility gap in multi-process apps
+    // like Electron/Cursor where the network-service subprocess can briefly
+    // not have its file descriptors visible under /proc/<pid>/fd/.
+    // 20 ms is the extra slot for heavier runtimes (e.g. Cursor AppImage).
+    const DELAYS_MS: [u64; 4] = [0, 3, 8, 20];
     for &delay in &DELAYS_MS {
         if delay > 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay));
@@ -357,10 +509,100 @@ fn process_uid_matches(pid: u32, uid: u32) -> bool {
     false
 }
 
+/// Extract a user-visible app name from a process's environment.
+///
+/// Checks two env vars in order:
+/// - `APPIMAGE=/path/to/Cursor-0.45.5.AppImage` — set by the AppImage runtime
+///   for every process in the tree (including utility subprocesses). File stem
+///   is lowercased; a trailing `-<version>` suffix (first component starting
+///   with a digit) is stripped so "Cursor-0.45.5" → "cursor".
+/// - `ELECTRON_APP_NAME=cursor` — some Electron apps set this explicitly.
+///
+/// Returns `None` if neither var is present or the extracted name is too short
+/// to be meaningful (≤ 2 chars).
+pub(crate) fn parse_environ_for_app_name(environ: &str) -> Option<String> {
+    for var in environ.split('\0') {
+        if let Some(val) = var.strip_prefix("APPIMAGE=") {
+            let stem = std::path::Path::new(val)
+                .file_stem()?
+                .to_string_lossy()
+                .to_lowercase();
+            // Strip trailing version: "cursor-0.45.5" → "cursor"
+            let name: String = stem
+                .split('-')
+                .take_while(|part| !part.starts_with(|c: char| c.is_ascii_digit()))
+                .collect::<Vec<_>>()
+                .join("-");
+            let name = if name.is_empty() { stem } else { name.into() };
+            if name.len() > 2 {
+                return Some(name.to_string());
+            }
+        }
+        if let Some(val) = var.strip_prefix("ELECTRON_APP_NAME=") {
+            if val.len() > 2 {
+                return Some(val.to_lowercase());
+            }
+        }
+    }
+    None
+}
+
+fn app_name_from_environ(pid: u32) -> Option<String> {
+    let environ = fs::read_to_string(format!("/proc/{pid}/environ")).ok()?;
+    parse_environ_for_app_name(&environ)
+}
+
+/// Extract an app name from an Electron process's command-line arguments.
+///
+/// Electron apps (including Cursor, VSCode, and others packaged as system
+/// Arch/Debian packages with a shared `electronN` binary) are launched as:
+///
+///   /usr/lib/electron42/electron /usr/share/<app>/resources/app/<entry>.mjs
+///
+/// The directory component immediately before `"resources"` is the canonical
+/// app name. Returns `None` when the process is a subprocess (its cmdline
+/// starts directly with flags like `--type=utility`) — in that case the
+/// caller should try the parent process's cmdline instead.
+pub(crate) fn parse_cmdline_for_app_name(cmdline: &str) -> Option<String> {
+    // Args are NUL-separated. Skip arg[0] (the electron binary path).
+    let app_arg = cmdline
+        .split('\0')
+        .skip(1)
+        .find(|a| !a.is_empty() && !a.starts_with('-'))?;
+
+    let path = std::path::Path::new(app_arg);
+    let components: Vec<_> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .collect();
+
+    let resources_idx = components.iter().position(|c| c == "resources")?;
+    if resources_idx == 0 {
+        return None;
+    }
+    let app_dir = &components[resources_idx - 1];
+    if app_dir.len() > 2 {
+        Some(app_dir.to_string())
+    } else {
+        None
+    }
+}
+
+fn app_name_from_electron_cmdline(pid: u32) -> Option<String> {
+    let cmdline = fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
+    parse_cmdline_for_app_name(&cmdline)
+}
+
 /// Read /proc/<pid>/comm (process name, truncated to 15 chars by the kernel).
 fn read_comm(pid: u32) -> Option<String> {
     let comm = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     Some(comm.trim().to_string())
+}
+
+/// Read the full path of /proc/<pid>/exe.
+fn read_exe_path(pid: u32) -> Option<String> {
+    let exe = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    Some(exe.to_string_lossy().trim_end_matches(" (deleted)").to_string())
 }
 
 /// Read the basename of /proc/<pid>/exe (full path, not truncated).
@@ -462,10 +704,10 @@ mod tests {
         };
         resolver.cache.lock().unwrap().insert(
             key,
-            CachedName { name: "curl".to_string(), inserted_at: Instant::now() },
+            CachedEntry { name: "curl".to_string(), exe: None, app_name: None, inserted_at: Instant::now() },
         );
         assert_eq!(
-            resolver.resolve("10.20.30.40", 65000, TransportProtocol::Tcp).as_deref(),
+            resolver.resolve("10.20.30.40", 65000, TransportProtocol::Tcp).map(|p| p.name).as_deref(),
             Some("curl"),
         );
     }
@@ -480,18 +722,12 @@ mod tests {
         };
         resolver.cache.lock().unwrap().insert(
             key,
-            CachedName { name: "curl".to_string(), inserted_at: Instant::now() },
+            CachedEntry { name: "curl".to_string(), exe: None, app_name: None, inserted_at: Instant::now() },
         );
         // Different port → no hit (returns None because /proc has no entry).
-        assert_eq!(
-            resolver.resolve("10.20.30.40", 65001, TransportProtocol::Tcp),
-            None,
-        );
+        assert!(resolver.resolve("10.20.30.40", 65001, TransportProtocol::Tcp).is_none());
         // Different protocol → no hit.
-        assert_eq!(
-            resolver.resolve("10.20.30.40", 65000, TransportProtocol::Udp),
-            None,
-        );
+        assert!(resolver.resolve("10.20.30.40", 65000, TransportProtocol::Udp).is_none());
     }
 
     #[test]
@@ -509,12 +745,9 @@ mod tests {
             .cache
             .lock()
             .unwrap()
-            .insert(key, CachedName { name: "curl".to_string(), inserted_at: stale });
+            .insert(key, CachedEntry { name: "curl".to_string(), exe: None, app_name: None, inserted_at: stale });
         // Stale entry must not be served; fallback to /proc fails → None.
-        assert_eq!(
-            resolver.resolve("10.20.30.40", 65000, TransportProtocol::Tcp),
-            None,
-        );
+        assert!(resolver.resolve("10.20.30.40", 65000, TransportProtocol::Tcp).is_none());
     }
 
     #[test]
@@ -538,5 +771,104 @@ mod tests {
         assert_eq!(parse_proc_net(UDP_WILDCARD_SAMPLE, real_ip, 54321), None);
         // Port-only fallback succeeds.
         assert_eq!(parse_proc_net_port_only(UDP_WILDCARD_SAMPLE, 54321), Some((55555, 1000)));
+    }
+
+    // TIME_WAIT sockets have inode=0 in /proc/net/tcp. A matching (ip, port)
+    // row with inode=0 must be skipped so the retry loop can find the real entry.
+    const TCP_WITH_ZERO_INODE: &str = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0F02000A:1F90 01020304:0050 06 00000000:00000000 00:00000000 00000000  1000        0 0 1 0 100 0
+   1: 0F02000A:1F90 05060708:0050 01 00000000:00000000 00:00000000 00000000  1000        0 99001 1 0 100 0";
+
+    #[test]
+    fn inode_zero_row_is_skipped_and_real_entry_returned() {
+        let ip: IpAddr = "10.0.2.15".parse().unwrap();
+        // Must skip the inode=0 TIME_WAIT row and return the real ESTABLISHED entry.
+        assert_eq!(parse_proc_net(TCP_WITH_ZERO_INODE, ip, 8080), Some((99001, 1000)));
+    }
+
+    #[test]
+    fn inode_zero_only_row_returns_none() {
+        // Only a TIME_WAIT (inode=0) row exists — should return None so the
+        // caller's retry loop tries again rather than returning a useless inode.
+        const ONLY_ZERO: &str = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0F02000A:1F90 01020304:0050 06 00000000:00000000 00:00000000 00000000  1000        0 0 1 0 100 0";
+        let ip: IpAddr = "10.0.2.15".parse().unwrap();
+        assert_eq!(parse_proc_net(ONLY_ZERO, ip, 8080), None);
+    }
+
+    #[test]
+    fn parse_environ_extracts_appimage_cursor() {
+        let environ = "HOME=/home/user\0APPIMAGE=/home/user/Cursor-0.45.5.AppImage\0TERM=xterm\0";
+        assert_eq!(parse_environ_for_app_name(environ).as_deref(), Some("cursor"));
+    }
+
+    #[test]
+    fn parse_environ_extracts_appimage_no_version_suffix() {
+        let environ = "APPIMAGE=/opt/myapp.AppImage\0";
+        assert_eq!(parse_environ_for_app_name(environ).as_deref(), Some("myapp"));
+    }
+
+    #[test]
+    fn parse_environ_extracts_hyphenated_app_name() {
+        let environ = "APPIMAGE=/downloads/my-editor-1.2.3.AppImage\0";
+        assert_eq!(parse_environ_for_app_name(environ).as_deref(), Some("my-editor"));
+    }
+
+    #[test]
+    fn parse_environ_uses_electron_app_name_var() {
+        let environ = "ELECTRON_APP_NAME=cursor\0OTHER=val\0";
+        assert_eq!(parse_environ_for_app_name(environ).as_deref(), Some("cursor"));
+    }
+
+    #[test]
+    fn parse_environ_returns_none_when_no_relevant_vars() {
+        let environ = "HOME=/home/user\0PATH=/usr/bin\0TERM=xterm\0";
+        assert_eq!(parse_environ_for_app_name(environ), None);
+    }
+
+    #[test]
+    fn parse_environ_rejects_short_names() {
+        let environ = "APPIMAGE=/tmp/ok.AppImage\0";
+        assert_eq!(parse_environ_for_app_name(environ), None);
+    }
+
+    // Cursor on Arch Linux: /usr/bin/cursor → /usr/share/cursor/cursor (script)
+    // → exec /usr/lib/electron42/electron /usr/share/cursor/resources/app/cursor.mjs
+    // The network subprocess inherits the same electron binary but has --type=utility
+    // in its own cmdline. The parent (main process) has the real app path.
+    #[test]
+    fn parse_cmdline_cursor_main_process() {
+        let cmdline = "/usr/lib/electron42/electron\0/usr/share/cursor/resources/app/cursor.mjs\0";
+        assert_eq!(parse_cmdline_for_app_name(cmdline).as_deref(), Some("cursor"));
+    }
+
+    #[test]
+    fn parse_cmdline_cursor_network_subprocess_returns_none() {
+        // Subprocess cmdline has only flags — no app path. Caller must try parent.
+        let cmdline = "/usr/lib/electron42/electron\0--type=utility\0--utility-sub-type=network.mojom.NetworkService\0";
+        assert_eq!(parse_cmdline_for_app_name(cmdline), None);
+    }
+
+    #[test]
+    fn parse_cmdline_vscode_arch_package() {
+        // VSCode on Arch also uses a shared electron binary.
+        let cmdline = "/usr/lib/electron32/electron\0/usr/share/code/resources/app/bootstrap/bootstrap-fork.js\0";
+        assert_eq!(parse_cmdline_for_app_name(cmdline).as_deref(), Some("code"));
+    }
+
+    #[test]
+    fn parse_cmdline_returns_none_when_no_resources_component() {
+        // cmdline with an app path that doesn't follow the electron pattern.
+        let cmdline = "/usr/bin/node\0/usr/share/myapp/index.js\0";
+        assert_eq!(parse_cmdline_for_app_name(cmdline), None);
+    }
+
+    #[test]
+    fn parse_cmdline_returns_none_for_bare_electron() {
+        // electron called with no arguments — nothing to extract.
+        let cmdline = "/usr/lib/electron42/electron\0";
+        assert_eq!(parse_cmdline_for_app_name(cmdline), None);
     }
 }

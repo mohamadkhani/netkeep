@@ -229,10 +229,11 @@ impl<R: Repository> ControlService<R> {
             ControlRequest::RegisterUnknownFlow { flow, now_secs } => {
                 if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
                     eprintln!(
-                        "policy matched rule: id={} action={:?} process={:?} domain={:?} ip={}",
+                        "policy matched rule: id={} action={:?} process={:?}{} domain={:?} ip={}",
                         resolved.rule_id,
                         resolved.action,
                         flow.process_name,
+                        flow.app_name.as_deref().map(|a| format!(" ({})", a)).unwrap_or_default(),
                         flow.destination_domain,
                         flow.destination_ip
                     );
@@ -475,10 +476,11 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
         if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
             eprintln!(
-                "policy matched rule: id={} action={:?} process={:?} domain={:?} ip={}",
+                "policy matched rule: id={} action={:?} process={:?}{} domain={:?} ip={}",
                 resolved.rule_id,
                 resolved.action,
                 flow.process_name,
+                flow.app_name.as_deref().map(|a| format!(" ({})", a)).unwrap_or_default(),
                 flow.destination_domain,
                 flow.destination_ip
             );
@@ -541,6 +543,7 @@ mod tests {
             action: RuleAction::Allow,
             duration: RuleDuration::UntilRestart,
             process_name: None,
+            process_exe: None,
             destination: DestinationMatcher::DomainExact("example.com".to_string()),
             egress_id: None,
         }
@@ -549,6 +552,8 @@ mod tests {
     fn mk_flow() -> FlowContext {
         FlowContext {
             process_name: Some("curl".to_string()),
+            process_exe: None,
+            app_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),

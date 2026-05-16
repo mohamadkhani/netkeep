@@ -420,6 +420,7 @@ impl SettingsApp {
                         action,
                         duration,
                         process_name,
+                        process_exe: None,
                         destination,
                         egress_id,
                     };

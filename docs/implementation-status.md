@@ -1,8 +1,8 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 143 tests passing (`cargo test --workspace`)
+**Test Status:** 164 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
-**Last Updated:** 2026-05-16
+**Last Updated:** 2026-05-17
 
 ## Completed Work
 
@@ -35,8 +35,14 @@
 - [x] TCP control packets (SYN/ACK/FIN) accepted immediately so handshake completes before classification
 - [x] `RawPacket::tcp_payload_empty` flag to distinguish control packets from data packets
 - [x] `RawPacket::tcp_fin` / `tcp_rst` flags to distinguish connection teardown from pure ACKs in verdict cache
-- [x] Real ProcessResolver via `/proc/net/{tcp,tcp6,udp,udp6}` → inode → `/proc/<pid>/fd` → `/proc/<pid>/comm`
-- [ ] **Not done:** DNS snoop cache for UDP/QUIC domain inference (SNI covers TCP/HTTPS)
+- [x] Real ProcessResolver via `/proc/net/{tcp,tcp6,udp,udp6}` → inode → `/proc/<pid>/fd` → `/proc/<pid>/exe`
+- [x] `ProcessInfo` struct: `{ name, exe: Option<String>, app_name: Option<String> }` returned by `resolve()`
+- [x] `process_exe` stored in `Rule` and `FlowContext` as exe-path rule identity
+- [x] `app_name` from `pacman -Qo <exe>` shown in decision dialog and daemon logs
+- [x] `ss` fallback: `ss -Hnp [-t|-u] src :<port>` when `/proc/net` + inode scan both fail
+- [x] IP-based attribution cache (`proc_attr`): `(dst_ip, dst_port) → CachedProcessAttr`, TTL 15 min, max 1024
+- [x] Domain-based attribution cache (`domain_proc_attr`): `(domain, dst_port) → CachedProcessAttr`, TTL 1 hour, max 512 — handles CDN IP rotation
+- [x] DNS snoop cache for UDP/QUIC domain inference via INPUT hook NFQUEUE (queue+1, bypass flag)
 - [ ] **Not done:** Integration tests with actual kernel NFQUEUE
 
 ### Phase 3: Persistence + CLI ✓
@@ -256,6 +262,26 @@
 
 - **Docs:** `docs/nfqueue-packet-interception.md` TCP handling section rewritten; `docs/process-resolver.md` lookup chain and Race Conditions section updated; `docs/process-attribution-races.md` Bug 22 worked example added.
 
+## Process Resolver: exe-path identity + app_name + ss fallback + attribution caches (2026-05-17)
+
+**Bug 24:** One-off `process=None` mid-session for long-running flows (e.g. YouTube video) when CDN rotates IP addresses.
+
+- **Root cause:** The per-socket resolver cache (Layer 1) and the three attribution layers only help with retransmits of *existing* sockets. When Chromium opens a brand-new connection to a *different CDN IP* serving the same domain (googlevideo.com CDN rotation), the new socket races `/proc` fresh. If it loses, `process_name = None` produces an `(unknown)` prompt even though the user already approved Chromium for that domain.
+- **Fix (nfqueue-level Layer 0 caches):**
+  - IP-based: `(dst_ip, dst_port) → CachedProcessAttr`, TTL 15 min, max 1024. Filled on every successful classification; consulted when `process_name` is None after classify.
+  - Domain-based: `(domain, dst_port) → CachedProcessAttr`, TTL 1 hour, max 512. Filled when a successful classification has a destination domain; handles CDN IP rotation by keying on the stable domain rather than the rotating IP.
+- **Files:** `crates/enforcer/src/nfqueue.rs`.
+
+**Improvements:** `ProcessInfo` struct, exe-path rule identity, `app_name` from `pacman -Qo`, `ss` fallback.
+
+- **`ProcessInfo { name, exe, app_name }`** — `resolve()` now returns `Option<ProcessInfo>` instead of `Option<String>`. `exe` is the full `/proc/<pid>/exe` path; `app_name` is the package manager name when it differs from `name`.
+- **`process_exe` in `Rule` and `FlowContext`** — stored as the primary rule identity. `policy_engine::process_matches` prefers exe-path equality when both the rule and flow have it, falling back to name comparison.
+- **`app_name` from `pacman -Qo <exe>`** — shown in the decision dialog as a secondary line (`pkg: cursor-bin`) and in daemon logs as `(cursor-bin)`. Cached per exe-path in `pacman_cache`. Suppressed when it equals the process name.
+- **`ss` fallback** — `ss -Hnp [-t|-u] src :<port>` tried when the full `/proc/net` + inode scan fails all retries. Parses `pid=N` from the `users` field.
+- **DB migration** — `ALTER TABLE rules ADD COLUMN process_exe TEXT NULL` on startup.
+- **Tests:** 164 total (was 163). 1 new test for `ss_local_matches` IPv4-mapped handling.
+- **Docs:** `docs/process-resolver.md` lookup chain and ProcessInfo section updated; `docs/process-attribution-races.md` Bug 24 entry added.
+
 ## Settings UI Polish (2026-05-16)
 
 Four improvements to the settings window applied to both `design/settings_window.html` and the Rust implementation.
@@ -307,6 +333,8 @@ struct Rule {
     pub duration: RuleDuration,        // UntilRestart | Permanent
     pub process_name: Option<String>,  // Process name matcher (e.g., "firefox", "ssh")
     pub destination: DestinationMatcher, // IpExact | Cidr | DomainExact | DomainWildcard | Any
+    pub egress_id: Option<String>,     // References Egress entity
+    pub process_exe: Option<String>,   // Full /proc/<pid>/exe path (preferred identity)
 }
 ```
 
@@ -325,13 +353,15 @@ struct PendingDecision {
 
 ```rust
 struct FlowContext {
-    pub process_name: Option<String>,      // e.g., "firefox"
-    pub destination_ip: String,            // e.g., "142.251.33.46"
-    pub destination_port: u16,             // e.g., 443
-    pub destination_domain: Option<String>, // e.g., "google.com" (from DNS or SNI)
-    pub protocol: TransportProtocol,       // Tcp | Udp | Quic | Other
-    pub direction: FlowDirection,          // Outbound | Inbound
-    pub device_label: Option<String>,      // e.g., "vpn-work" (gateway device label)
+    pub process_name: Option<String>,       // e.g., "firefox"
+    pub destination_ip: String,             // e.g., "142.251.33.46"
+    pub destination_port: u16,              // e.g., 443
+    pub destination_domain: Option<String>, // e.g., "google.com" (from DNS, SNI, or HTTP Host)
+    pub protocol: TransportProtocol,        // Tcp | Udp | Quic | Other
+    pub direction: FlowDirection,           // Outbound | Inbound
+    pub device_label: Option<String>,       // e.g., "vpn-work" (gateway device label)
+    pub process_exe: Option<String>,        // full /proc/<pid>/exe path
+    pub app_name: Option<String>,           // package manager name (e.g. "cursor-bin")
 }
 ```
 
@@ -348,10 +378,12 @@ CREATE TABLE rules (
     process_name TEXT,
     destination_type TEXT NOT NULL,  -- 'IpExact', 'Cidr', 'DomainExact', 'DomainWildcard'
     destination_value TEXT NOT NULL, -- The actual IP/domain/CIDR
-    created_at_secs INTEGER NOT NULL,
-    updated_at_secs INTEGER NOT NULL
+    egress_id TEXT,              -- references egress.id (nullable)
+    process_exe TEXT             -- full /proc/<pid>/exe path for precise rule identity (nullable)
 );
 ```
+
+`process_exe` is added via migration (`ALTER TABLE rules ADD COLUMN process_exe TEXT NULL`) on startup for existing databases. It enables exe-path rule matching which is immune to `/proc/<pid>/comm` 15-char truncation and basename collisions.
 
 ### flow_events table
 

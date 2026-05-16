@@ -206,11 +206,105 @@ Two new fields were added to `RawPacket`: `tcp_fin: bool` and `tcp_rst: bool`, p
 
 `retry_find_socket` already had a retry loop (`[0, 5, 15, 40]` ms) for the `/proc/net/tcp` inode lookup. But `find_pid_for_inode` (the `/proc/*/fd/` scan) had **no retry** at all. Electron spawns a dedicated `--type=utility` network-service subprocess; during the `fork`→`exec` window its fds are not visible. Without the ACK eviction bug the window was rarely hit; with it, every client ACK triggered a re-classification that landed squarely in the fork/exec gap.
 
-**Fix:** Added `[0, 3, 8]` ms retry to `find_pid_for_inode` (same pattern as `retry_find_socket`).
+**Fix:** Added `[0, 3, 8]` ms retry to `find_pid_for_inode` (same pattern as `retry_find_socket`). Extended to `[0, 3, 8, 20]` ms in Bug 23 to cover Cursor AppImage's longer fork/exec gap.
 
 ### Why two separate Allow rules were created
 
 Rule `ui-1778793567` was created when `process=Some("electron")` — the GPUI dialog offered a `DomainWildcard("cursor.sh")` destination. Layer 3 (`process_matches`) requires an exact destination (`IpExact` or `DomainExact`) to forgive `process=None`; wildcards still require a strict match. When the next connection arrived with `process=None`, the wildcard rule did not match, and the user was prompted again — producing rule `ui-1778793599` with `DomainExact("api2.cursor.sh")` and no process constraint.
+
+---
+
+## Bug 23 — "electron" process name + inode=0 false match (fixed 2026-05-16)
+
+Two independent bugs that both produce misleading process attribution for Cursor (and other Electron apps).
+
+### Root cause 1 — wrong process name: "electron" instead of "cursor"
+
+Cursor (and any Electron-based app installed as an AppImage, or packaged with the Electron binary under an app-specific directory) has its utility subprocess's `/proc/<pid>/exe` pointing to a binary literally named `electron`. `read_exe_basename(pid)` faithfully returns `"electron"`, which is the correct filesystem name but the wrong user-facing label.
+
+Previous fixup code only walked to parent for single-character names and known shell wrappers (`sh`, `bash`, etc.). `"electron"` had length 8, so it passed through unchanged.
+
+**Fix.** Added `"electron"` and `"AppRun"` (the AppImage entry-point) to the generic-name trigger. For these names three fallback strategies are tried in order:
+
+1. **`APPIMAGE` env var** — the AppImage runtime sets this in every process in the tree (including utility subprocesses). `/proc/<pid>/environ` is read, the file stem of the AppImage path is extracted and lowercased, and a trailing `-<version>` component is stripped: `"Cursor-0.45.5.AppImage"` → `"cursor"`.
+2. **Exe parent directory** — for packages like `/opt/cursor/electron`, the directory name `"cursor"` is used. Generic directory names (`bin`, `usr`, `lib`, `tmp`, etc.) are excluded so this only fires for app-specific install dirs.
+3. **Parent process exe basename** — filtered to exclude other generic names so we don't walk further up into systemd.
+
+**Tests:** 6 new unit tests in `parse_environ_for_app_name` cover AppImage path parsing, hyphenated names, version stripping, the `ELECTRON_APP_NAME` env var path, missing vars, and short-name rejection.
+
+### Root cause 2 — inode=0 causes guaranteed process=None
+
+`/proc/net/tcp` rows for TIME_WAIT sockets (state `0x06`) have `inode=0`. If a TIME_WAIT socket exists with the same `(src_ip, src_port)` as an incoming new connection's SYN, `parse_proc_net` could match that row first and return `inode=0`. `find_pid_for_inode(0)` then searches for `"socket:[0]"` in `/proc/*/fd/` — a string that never appears in any real process's fd directory — and always returns `None`.
+
+This is deterministic (not a race): whenever a port is reused quickly and a TIME_WAIT entry is still present, the first attempt always returns inode=0, all retries also return inode=0, and the process is always `None`.
+
+**Fix.** Added `if inode == 0 { continue; }` in both `parse_proc_net` and `parse_proc_net_port_only`. The scan continues past the TIME_WAIT row to find the real ESTABLISHED/SYN_SENT entry.
+
+**Tests:** 2 new unit tests: `inode_zero_row_is_skipped_and_real_entry_returned` (TIME_WAIT row present but real entry follows it), `inode_zero_only_row_returns_none` (only a TIME_WAIT row — returns `None` so the retry loop fires).
+
+### Additional hardening
+
+`find_pid_for_inode` retries extended from `[0, 3, 8]` ms (3 attempts, 11 ms) to `[0, 3, 8, 20]` ms (4 attempts, 31 ms) to cover Cursor AppImage's longer fork/exec gap.
+
+---
+
+## Bug 24 — CDN IP rotation causes one-off `process=None` mid-session (fixed 2026-05-17)
+
+### Root cause
+
+The three layers described above only help *after* the first packet of a connection races `/proc`. For long-running sessions (e.g. a YouTube video playing for several minutes), a different failure mode appears: the CDN rotates IP addresses. Chromium opens a new connection to a fresh IP that the Layer 1 per-socket cache has no entry for. The new connection races `/proc` — if it loses, `process_name = None` for that packet.
+
+Layer 3 helps if the rule used `DomainExact` or `IpExact`, but not if it used `DomainWildcard` or if the new CDN IP is not in the user's approved IP list. The result: one rogue `(unknown)` dialog appearing 4+ minutes into a session, after dozens of successful attributions to the same process.
+
+### Layer 0 — nfqueue-level attribution caches
+
+Two new caches live in `NfqueueProcessor` (file: `crates/enforcer/src/nfqueue.rs`), at a layer *above* the resolver and *below* the decision engine:
+
+```
+                          packet arrives at NFQUEUE
+                                    │
+                                    ▼
+     ┌──────────────────────────────────────────────────────────┐
+     │ Layer 0a: IP-based attribution cache                    │
+     │ keyed (dst_ip, dst_port), TTL 15 min, max 1024 entries  │
+     │ If process_name=None after classify:                    │
+     │   look up (dst_ip, dst_port) → restore process attrs    │
+     └─────────────────────────────┬────────────────────────────┘
+                                   │ still None
+                                   ▼
+     ┌──────────────────────────────────────────────────────────┐
+     │ Layer 0b: Domain-based attribution cache                │
+     │ keyed (domain, dst_port), TTL 1 hour, max 512 entries   │
+     │ If domain known and process_name=None after 0a:         │
+     │   look up (domain, dst_port) → restore process attrs    │
+     └─────────────────────────────┬────────────────────────────┘
+                                   │
+                                   ▼
+                             (Layers 1–3 unchanged)
+```
+
+**IP-based cache** (`proc_attr`): when a packet is successfully classified with a non-None `process_name`, the resolver stores `(dst_ip, dst_port) → CachedProcessAttr { process_name, process_exe, app_name, expires_at }`. On the next packet to the same server IP (retransmit or re-connection), if attribution fails, the cached attrs are restored. TTL: 15 minutes, max 1024 entries (LRU-evicted on overflow).
+
+**Domain-based cache** (`domain_proc_attr`): when a successfully classified packet also has a `destination_domain`, `(domain, dst_port) → CachedProcessAttr` is stored. When a *new CDN IP* serves the same domain and the IP cache has no entry (because it's a different IP), this cache provides the attribution. TTL: 1 hour, max 512 entries.
+
+The domain cache uses a longer TTL because CDN IP rotation is slow (minutes to hours) and domains are stable within a browsing session. The IP cache uses a shorter TTL to avoid attributing a reused port on a different machine to the wrong process.
+
+### `CachedProcessAttr`
+
+```rust
+struct CachedProcessAttr {
+    process_name: String,
+    process_exe:  Option<String>,
+    app_name:     Option<String>,
+    expires_at:   u64,   // unix seconds
+}
+```
+
+When restored from either cache, all three fields are patched back into the `FlowContext` before it is passed to the policy engine and decision engine.
+
+### What this is not
+
+Layer 0 is not a substitute for proper per-socket resolution. It is specifically for *re-connections to the same logical server* within a session, where we have high confidence the same process is responsible. Two different processes connecting to the same destination at overlapping times could theoretically interfere — but in practice a process rarely connects to a service it doesn't own while another process is already connected to it.
 
 ---
 

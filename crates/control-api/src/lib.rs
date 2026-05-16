@@ -136,6 +136,7 @@ mod tests {
             action: RuleAction::Allow,
             duration: RuleDuration::UntilRestart,
             process_name: None,
+            process_exe: None,
             destination: DestinationMatcher::IpExact("1.1.1.1".to_string()),
             egress_id: None,
         }
@@ -203,6 +204,8 @@ mod tests {
             id: "p1".to_string(),
             flow: FlowContext {
                 process_name: Some("firefox".to_string()),
+                process_exe: None,
+                app_name: None,
                 destination_ip: "8.8.8.8".to_string(),
                 destination_port: 443,
                 destination_domain: Some("google.com".to_string()),

@@ -69,9 +69,24 @@ pub struct RawPacket {
     pub tcp_rst: bool,
 }
 
-/// Resolves the local process name from a socket endpoint.
+/// Full information about the local process that owns a network socket.
+#[derive(Debug, Clone)]
+pub struct ProcessInfo {
+    /// Display name — exe basename, possibly mapped to a user-friendly label
+    /// (e.g. "cursor" instead of "electron" for Electron AppImage apps).
+    pub name: String,
+    /// Full path to the executable as read from `/proc/<pid>/exe`.
+    /// Used as the unique identity for rule matching.
+    pub exe: Option<String>,
+    /// App name from the system package manager (e.g. `pacman -Qo <exe>` on
+    /// Arch Linux). Shown alongside `name` in the decision dialog when it
+    /// differs (e.g. name="electron", app_name="cursor").
+    pub app_name: Option<String>,
+}
+
+/// Resolves the local process owning a network socket.
 pub trait ProcessResolver {
-    fn resolve(&self, src_ip: &str, src_port: u16, protocol: TransportProtocol) -> Option<String>;
+    fn resolve(&self, src_ip: &str, src_port: u16, protocol: TransportProtocol) -> Option<ProcessInfo>;
 }
 
 /// Resolves a domain name from the DNS cache for a given destination IP.
@@ -101,11 +116,15 @@ where
     }
 
     pub fn classify(&self, packet: &RawPacket) -> FlowContext {
-        let process_name = self.process_resolver.resolve(
+        let proc_info = self.process_resolver.resolve(
             &packet.src_ip,
             packet.src_port,
             packet.protocol,
         );
+
+        let process_name = proc_info.as_ref().map(|p| p.name.clone());
+        let process_exe  = proc_info.as_ref().and_then(|p| p.exe.clone());
+        let app_name     = proc_info.as_ref().and_then(|p| p.app_name.clone());
 
         let destination_domain = self.resolve_domain(packet);
 
@@ -119,6 +138,8 @@ where
 
         FlowContext {
             process_name,
+            process_exe,
+            app_name,
             destination_ip: packet.dst_ip.clone(),
             destination_port: packet.dst_port,
             destination_domain,
@@ -156,8 +177,12 @@ pub struct FakeProcessResolver {
 }
 
 impl ProcessResolver for FakeProcessResolver {
-    fn resolve(&self, _src_ip: &str, _src_port: u16, _protocol: TransportProtocol) -> Option<String> {
-        self.result.clone()
+    fn resolve(&self, _src_ip: &str, _src_port: u16, _protocol: TransportProtocol) -> Option<ProcessInfo> {
+        self.result.as_ref().map(|name| ProcessInfo {
+            name: name.clone(),
+            exe: None,
+            app_name: None,
+        })
     }
 }
 

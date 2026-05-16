@@ -71,6 +71,7 @@ impl Render for DecisionApp {
             .child(components::decision_header(remaining))
             .child(components::flow_info_section(
                 &process,
+                &item.flow.app_name,
                 &proto,
                 item.flow.destination_port,
                 &item.flow.destination_domain,

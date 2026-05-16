@@ -25,6 +25,20 @@ struct CachedVerdict {
     expires_at: u64,
 }
 
+/// Cached process attribution keyed by `(dst_ip, dst_port)`.
+///
+/// When the process resolver succeeds for a connection to server S, we store
+/// the resolved process here. Later connections to the same server where
+/// proc_resolver loses the /proc race re-use this attribution rather than
+/// triggering a new pending decision for the user.
+#[derive(Clone)]
+struct CachedProcessAttr {
+    process_name: String,
+    process_exe:  Option<String>,
+    app_name:     Option<String>,
+    expires_at:   u64,
+}
+
 /// Real packet processor that reads from an NFQUEUE and applies verdicts.
 ///
 /// Open with `NfqueueProcessor::open`, then call `run_loop` on a dedicated thread.
@@ -47,6 +61,14 @@ pub struct NfqueueProcessor<C, FR> {
     /// `ct state established,related accept` would accept all retransmits before
     /// they reach NFQUEUE again.
     decided:    HashMap<ConnectionKey, CachedVerdict>,
+    /// Maps `(dst_ip, dst_port)` → resolved process.
+    /// Handles re-use of the same CDN endpoint.
+    proc_attr:        HashMap<(String, u16), CachedProcessAttr>,
+    /// Maps `(domain, dst_port)` → resolved process.
+    /// Secondary fallback when a CDN rotates to a new IP not yet in `proc_attr`.
+    /// Keyed by the destination domain resolved from SNI/DNS so that any IP
+    /// serving `*.googlevideo.com:443` is attributed to the same process.
+    domain_proc_attr: HashMap<(String, u16), CachedProcessAttr>,
 }
 
 // Cached decisions expire after 10 minutes. TCP FINs evict the entry early
@@ -54,6 +76,13 @@ pub struct NfqueueProcessor<C, FR> {
 const CACHE_TTL_SECS: u64 = 600;
 // Maximum cache entries before a sweep evicts expired entries.
 const CACHE_MAX: usize = 8192;
+
+// IP-based attribution cache TTL and cap.
+const PROC_ATTR_TTL_SECS: u64 = 900;   // 15 min — outlasts most streaming sessions
+const PROC_ATTR_MAX: usize = 1024;
+// Domain-based attribution cache TTL and cap (longer, CDN IPs rotate more than domains).
+const DOMAIN_ATTR_TTL_SECS: u64 = 3600; // 1 hour
+const DOMAIN_ATTR_MAX: usize = 512;
 
 impl<C, FR> NfqueueProcessor<C, FR>
 where
@@ -63,7 +92,7 @@ where
     pub fn open(queue_num: u16, classifier: C, registrar: FR, dns_cache: SniDnsCache) -> std::io::Result<Self> {
         let mut queue = Queue::open()?;
         queue.bind(queue_num)?;
-        Ok(Self { queue, classifier, registrar, dns_cache, decided: HashMap::new() })
+        Ok(Self { queue, classifier, registrar, dns_cache, decided: HashMap::new(), proc_attr: HashMap::new(), domain_proc_attr: HashMap::new() })
     }
 
     /// Blocks indefinitely, processing one packet per iteration.
@@ -143,7 +172,57 @@ where
         if let Some(sni) = &raw.sni_hint {
             self.dns_cache.insert(&raw.dst_ip, sni);
         }
-        let flow = self.classifier.classify(raw);
+        let mut flow = self.classifier.classify(raw);
+
+        let attr_key = (raw.dst_ip.clone(), raw.dst_port);
+        if flow.process_name.is_none() {
+            // Proc resolver lost the race.
+            // 1. Try IP-based attribution (same CDN endpoint seen before).
+            let cached_ip = self.proc_attr.get(&attr_key).and_then(|c| {
+                if c.expires_at > now_secs { Some(c.clone()) } else { None }
+            });
+            if cached_ip.is_none() { self.proc_attr.remove(&attr_key); }
+
+            // 2. Fall back to domain-based attribution (CDN rotated to a new IP).
+            let cached_dom = if cached_ip.is_none() {
+                flow.destination_domain.as_ref().and_then(|d| {
+                    self.domain_proc_attr.get(&(d.clone(), raw.dst_port)).and_then(|c| {
+                        if c.expires_at > now_secs { Some(c.clone()) } else { None }
+                    })
+                })
+            } else {
+                None
+            };
+
+            if let Some(c) = cached_ip.or(cached_dom) {
+                flow.process_name = Some(c.process_name.clone());
+                flow.process_exe  = c.process_exe.clone();
+                flow.app_name     = c.app_name.clone();
+            }
+        } else {
+            // Successful resolution — populate both caches.
+            let entry = CachedProcessAttr {
+                process_name: flow.process_name.clone().unwrap_or_default(),
+                process_exe:  flow.process_exe.clone(),
+                app_name:     flow.app_name.clone(),
+                expires_at:   now_secs + PROC_ATTR_TTL_SECS,
+            };
+            if self.proc_attr.len() >= PROC_ATTR_MAX {
+                self.proc_attr.retain(|_, v| v.expires_at > now_secs);
+            }
+            self.proc_attr.insert(attr_key, entry.clone());
+
+            if let Some(domain) = &flow.destination_domain {
+                if self.domain_proc_attr.len() >= DOMAIN_ATTR_MAX {
+                    self.domain_proc_attr.retain(|_, v| v.expires_at > now_secs);
+                }
+                self.domain_proc_attr.insert(
+                    (domain.clone(), raw.dst_port),
+                    CachedProcessAttr { expires_at: now_secs + DOMAIN_ATTR_TTL_SECS, ..entry },
+                );
+            }
+        }
+
         let decision = self.registrar.register(flow, now_secs);
 
         // Only cache definitive decisions. Pending/Ask flows must NOT be cached:

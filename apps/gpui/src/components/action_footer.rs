@@ -52,9 +52,13 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
     // Compute the DestinationMatcher for the current scope selection
     let dest_matcher = build_dest_matcher(&flow, &dest_scope);
 
-    // Process_name for the rule
+    // Process_name/exe for the rule (only set when Specific scope)
     let rule_process_name = match &process_scope {
         ProcessScope::Specific => flow.process_name.clone(),
+        ProcessScope::All => None,
+    };
+    let rule_process_exe = match &process_scope {
+        ProcessScope::Specific => flow.process_exe.clone(),
         ProcessScope::All => None,
     };
 
@@ -66,6 +70,8 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
     let dest_deny = dest_matcher.clone();
     let proc_allow = rule_process_name.clone();
     let proc_deny = rule_process_name.clone();
+    let proc_exe_allow = rule_process_exe.clone();
+    let proc_exe_deny = rule_process_exe.clone();
 
     let state_weak_pill = state_weak.clone();
     let session_selected = !make_permanent;
@@ -134,6 +140,7 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                     selected_egress,
                     dest_allow,
                     proc_allow,
+                    proc_exe_allow,
                     is_too_broad,
                 ))
                 .child(deny_button(
@@ -142,6 +149,7 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                     flow_deny,
                     dest_deny,
                     proc_deny,
+                    proc_exe_deny,
                     is_too_broad,
                 )),
         )
@@ -573,6 +581,7 @@ fn allow_button(
     selected_egress: Egress,
     dest_matcher: DestinationMatcher,
     rule_process_name: Option<String>,
+    rule_process_exe: Option<String>,
     disabled: bool,
 ) -> gpui::AnyElement {
     let is_default = selected_egress.is_system_default;
@@ -605,6 +614,7 @@ fn allow_button(
                     let eid = egress_id.clone();
                     let dest = dest_matcher.clone();
                     let proc = rule_process_name.clone();
+                    let proc_exe = rule_process_exe.clone();
                     cx.spawn(async move |cx| {
                         let action = if eid.is_some() { RuleAction::Route } else { RuleAction::Allow };
                         let rule = Rule {
@@ -617,6 +627,7 @@ fn allow_button(
                                 RuleDuration::UntilRestart
                             },
                             process_name: proc,
+                            process_exe: proc_exe,
                             destination: dest,
                             egress_id: eid,
                         };
@@ -663,6 +674,7 @@ fn deny_button(
     _flow: FlowContext,
     dest_matcher: DestinationMatcher,
     rule_process_name: Option<String>,
+    rule_process_exe: Option<String>,
     disabled: bool,
 ) -> gpui::AnyElement {
     div()
@@ -691,6 +703,7 @@ fn deny_button(
                     let mk_perm = make_permanent;
                     let dest = dest_matcher.clone();
                     let proc = rule_process_name.clone();
+                    let proc_exe = rule_process_exe.clone();
                     cx.spawn(async move |cx| {
                         let rule = Rule {
                             id: format!("ui-{}", daemon::unix_now()),
@@ -702,6 +715,7 @@ fn deny_button(
                                 RuleDuration::UntilRestart
                             },
                             process_name: proc,
+                            process_exe: proc_exe,
                             destination: dest,
                             egress_id: None,
                         };

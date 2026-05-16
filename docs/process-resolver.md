@@ -1,6 +1,6 @@
 # Process Resolver: Mapping Network Packets to Processes
 
-This document explains how LogiGuard identifies which process owns an intercepted network connection, using only the Linux `/proc` filesystem — no external tools or libraries required.
+This document explains how LogiGuard identifies which process owns an intercepted network connection, using the Linux `/proc` filesystem and optional system tools (`ss`, package managers).
 
 > **Adjacent reading.** Race interactions between this resolver, the decision engine, and the policy engine — and the three layers of defense that absorb them — are in [`docs/process-attribution-races.md`](process-attribution-races.md). Read that doc *too* if you are touching the resolver and the failure modes are not just an isolated parse bug.
 
@@ -25,7 +25,7 @@ You do **not** have the process name. The kernel knows which process opened the 
         ▼
 ┌────────────────────────────────────────────────┐
 │  per-socket cache  (60 s TTL, 4096 entries)   │
-│  hit → return cached name, skip everything    │
+│  hit → return cached ProcessInfo              │
 └──────────────────────┬─────────────────────────┘
                        │ miss
                        ▼
@@ -39,18 +39,37 @@ You do **not** have the process name. The kernel knows which process opened the 
         /proc/*/fd/*
           scan symlinks for socket:[inode]
           UID-filtered first pass, full scan fallback
-          retry [0, 3, 8] ms — fork/exec fd-visibility gap
+          retry [0, 3, 8, 20] ms — fork/exec fd-visibility gap
                 │
                 └── pid
                         │
                         ▼
-                /proc/<pid>/exe  (preferred)
+                /proc/<pid>/exe  (symlink → full binary path)
                 /proc/<pid>/comm (fallback — kernel truncates to 15 chars)
-                parent-process exe basename for shell wrapper names
-                  process name
+                for "electron"/"AppRun" names:
+                  APPIMAGE env var → strip version suffix (AppImage installs)
+                  exe parent directory (e.g. /opt/cursor/electron → "cursor")
+                  parent-process exe basename (filtered, non-generic only)
+                for single-char or shell wrapper names:
+                  parent-process exe basename
                         │
                         ▼
-            insert into per-socket cache
+                package manager lookup (exe path)
+                  pacman -Qo <exe>     (Arch Linux — current)
+                  dpkg -S <exe>        (Debian/Ubuntu — planned)
+                  rpm -qf <exe>        (RHEL/Fedora/openSUSE — planned)
+                  apk info --who-owns  (Alpine — planned)
+                  → app_name (e.g. "cursor-bin") stored in ProcessInfo
+                  cached per exe-path in pacman_cache
+                        │
+                        ▼
+         if /proc miss: ss fallback
+           ss -Hnp [-t|-u] src :<port>
+           extract pid= from users field
+           re-enter from /proc/<pid>/exe above
+                        │
+                        ▼
+            insert ProcessInfo into per-socket cache
 ```
 
 ---
@@ -154,19 +173,47 @@ for entry in fs::read_dir("/proc")? {
 
 ---
 
-## Step 3: Read the Process Name
+## Step 3: Build ProcessInfo
 
-```
-/proc/<pid>/comm   →   "firefox\n"
-```
-
-`comm` contains the short process name (up to 15 characters), newline-terminated. Trim and return.
+`resolve()` no longer returns `Option<String>`. It returns `Option<ProcessInfo>`:
 
 ```rust
-fs::read_to_string(format!("/proc/{pid}/comm"))?.trim().to_string()
+pub struct ProcessInfo {
+    pub name: String,           // user-facing process name (e.g. "cursor", "chromium")
+    pub exe: Option<String>,    // full /proc/<pid>/exe path — used for rule identity
+    pub app_name: Option<String>, // package manager name when it differs from `name`
+}
 ```
 
-For the full executable path, `/proc/<pid>/exe` is a symlink to the binary. For command-line arguments, `/proc/<pid>/cmdline` has null-separated args. `comm` is sufficient for display and rule matching.
+### Name
+
+The primary name comes from `/proc/<pid>/exe` (basename preferred over `/proc/<pid>/comm` which the kernel truncates at 15 characters). For generic names (`"electron"`, `"AppRun"`, single-char names, shell wrappers) the fixup strategies described in Bug 23 apply.
+
+### Exe path
+
+`read_exe_path(pid)` reads the symlink at `/proc/<pid>/exe`, returning the full path (e.g. `/opt/cursor/resources/app.asar.unpacked/node_modules/@cursor-arm/cursor-linux-x64/cursor`). A trailing ` (deleted)` suffix (kernel notation for a binary replaced by an update while running) is stripped. The exe path is stored in `Rule.process_exe` and `FlowContext.process_exe` and used as the primary identity for rule matching when both the rule and the incoming flow have it — it is immune to `/proc/<pid>/comm`'s 15-character truncation and basename collisions between packages with the same executable name.
+
+### App name (package manager lookup)
+
+After resolving the name and exe, `lookup_pacman(exe_path)` is called:
+
+1. Check `pacman_cache: Mutex<HashMap<String, Option<String>>>` — returns cached result (including cached `None`) without spawning a subprocess.
+2. Run `pacman -Qo -- <exe_path>` — parses "owned by PKG" from stdout.
+3. Store result (success or `None`) in cache.
+4. Suppress `app_name` when it equals `name` (avoids showing "firefox (firefox)").
+
+The result is stored in `ProcessInfo.app_name` and propagated to `FlowContext.app_name`. The decision dialog shows it as a secondary line under the process name (`pkg: cursor-bin`). Daemon logs include it as `(cursor-bin)` when present.
+
+### ss fallback
+
+When the full `/proc/net` + inode scan returns `None` (all retries exhausted), `try_ss_fallback(ip, port, protocol)` is attempted:
+
+1. Run `ss -Hnp [-t|-u] src :<port>` — `-t` for TCP, `-u` for UDP.
+2. Filter lines where the local address matches `(ip, port)` using `ss_local_matches` (handles IPv4, IPv6, IPv4-mapped).
+3. Extract `pid=N` from the `users:(("name",pid=N,...))` field via `extract_pid_from_ss_line`.
+4. If a pid is found, re-enter the `/proc/<pid>/exe` → name → app_name path.
+
+`ss` is a last resort — it spawns a subprocess and is slower than the `/proc` path. It fires only when `/proc/net` lookup has already failed all four retry attempts.
 
 ---
 
@@ -182,7 +229,9 @@ All three look identical from the resolver's perspective — `Option<String>` re
 
 ### Per-socket cache (in-memory, 60 s TTL)
 
-To stop the kernel-publishing race from producing inconsistent results *across retransmits of the same connection*, every successful resolution is cached by `(src_ip, src_port, protocol)`. A retransmit of the same socket within the TTL returns the cached name without re-reading `/proc/net/*`. Implementation lives in `ProcProcessResolver::cache` (`Mutex<HashMap<SocketKey, CachedName>>`); entries past TTL are evicted lazily on the next insert that crosses the 4096-entry cap.
+To stop the kernel-publishing race from producing inconsistent results *across retransmits of the same connection*, every successful resolution is cached by `(src_ip, src_port, protocol)`. A retransmit of the same socket within the TTL returns the cached `ProcessInfo` without re-reading `/proc/net/*`. Implementation lives in `ProcProcessResolver::cache` (`Mutex<HashMap<SocketKey, CachedEntry>>`); entries past TTL are evicted lazily on the next insert that crosses the 4096-entry cap.
+
+`CachedEntry` stores `{ name, exe, app_name, inserted_at }` — the full `ProcessInfo` including the exe path and package name, so repeated lookups for the same socket do not re-query `pacman` or re-read `/proc/<pid>/exe`.
 
 Even with this cache, the **first** packet of a *new* connection still has to win or lose the `/proc` race on its own. The fallback paths in `decision-engine` and `policy-engine` absorb that residual loss; see [`docs/process-attribution-races.md`](process-attribution-races.md) for the full picture.
 
@@ -213,6 +262,34 @@ fn parses_ipv4_local_address() {
 ```
 
 The inode→pid scan (`find_pid_for_inode`) and comm read (`read_comm`) are I/O-only wrappers with no logic — they do not need unit tests. Integration behavior is covered by the `ProcessResolver` trait abstraction: the rest of the system uses `FakeProcessResolver` in tests and `ProcProcessResolver` at runtime.
+
+---
+
+## Multi-Package-Manager Support Plan
+
+Currently only `pacman` (Arch Linux) is supported. The goal is a single `query_package_owner(exe_path) -> Option<String>` function that works transparently across all major Linux distributions.
+
+### Planned backends
+
+| Package manager | Command | Output to parse | Distros |
+|---|---|---|---|
+| `pacman` | `pacman -Qo -- <exe>` | `<exe> is owned by <pkg> <ver>` | Arch, Manjaro, EndeavourOS |
+| `dpkg` | `dpkg -S <exe>` | `<pkg>: <exe>` | Debian, Ubuntu, Mint |
+| `rpm` | `rpm -qf <exe>` | `<pkg>-<ver>.<arch>` (trim version) | RHEL, Fedora, CentOS, openSUSE |
+| `apk` | `apk info --who-owns <exe>` | `<exe> is owned by <pkg>-<ver>` | Alpine |
+| `pacman` (also covers) | same | same | Parabola, Artix, CachyOS |
+
+### Implementation approach
+
+1. **Probe once on startup.** Check `which pacman dpkg rpm apk` (or try each binary) and cache which ones exist. Store the result in `ProcProcessResolver` as an enum `PackageManager`. Cost: one shell lookup on daemon start.
+2. **Abstract behind one function.** `query_package_owner(exe_path, pm: PackageManager) -> Option<String>` dispatches to the right command and parser. The per-exe `pacman_cache` field is renamed to `pkg_cache`.
+3. **Parse defensively.** Each parser trims version suffixes (`-1.2.3-4` for pacman, `-<ver>.<arch>` for rpm) and lowercases the result so display is consistent.
+4. **Fallback order.** If the probed package manager returns `None` for an exe (AppImage, manually installed binary), `None` is cached and the display falls back to the process `name`. No multi-PM chaining — each distro has one primary package manager.
+5. **Unknown distro.** If none of the above are found, `query_package_owner` always returns `None`. The feature degrades gracefully; the rest of the attribution pipeline is unaffected.
+
+### Current state
+
+Only `pacman` is wired. The probe/dispatch layer does not exist yet. To add a new package manager: (a) add a `PackageManager` variant, (b) add a `query_<pm>` function with parser, (c) add the variant to `probe_package_manager()`, (d) add unit tests for the parser with representative `dpkg -S` / `rpm -qf` / `apk info` output.
 
 ---
 

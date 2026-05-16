@@ -112,6 +112,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                     action,
                     duration,
                     process_name,
+                    process_exe: None,
                     destination,
                     egress_id,
                 }),
@@ -157,6 +158,8 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                 ControlRequest::RegisterUnknownFlow {
                     flow: FlowContext {
                         process_name: Some(cmd_args[1].clone()),
+                        process_exe: None,
+                        app_name: None,
                         destination_ip: cmd_args[2].clone(),
                         destination_port: 443,
                         destination_domain: domain,

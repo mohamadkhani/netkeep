@@ -518,3 +518,106 @@ Four settings-window UI improvements applied in `design/settings_window.html` fi
   - `settings/mod.rs` (`open_rule_form_dialog`): `route_input: Entity<InputState>` removed; `available_egresses: Vec<(String, String)>` captured at open time from `self.state.read(cx).egresses`; `selected_route: Arc<Mutex<String>>` holds the selected egress id.
   - When action is `ROUTE`, the dialog shows one button per non-system egress (highlighted when selected); empty list shows a hint to add egresses first.
   - `on_ok` reads `route_ok.lock().unwrap()` instead of an input entity.
+
+### 2026-05-16 (session 28 — process resolver: electron name + inode=0 fix)
+
+Two bugs in `crates/flow-classifier/src/proc_resolver.rs` investigated and fixed.
+
+- [x] **Cursor (and any AppImage Electron app) shows as "electron" in the dialog.**
+  - **Root cause.** `read_exe_basename(pid)` returns `"electron"` — the actual binary name — for Electron-based apps installed as AppImages or with the Electron runtime placed inside an app directory (e.g. `/opt/cursor/electron`). The existing name-fixup code only handled single-char names and shell wrappers; `"electron"` passed through unchanged.
+  - **Fix.** Added `"electron"` and `"AppRun"` (AppImage entry-point) to the generic-name trigger. Three fallback strategies tried in order:
+    1. **`APPIMAGE` env var** — inherited by every subprocess in the tree; file stem lowercased and version suffix stripped: `"Cursor-0.45.5.AppImage"` → `"cursor"`.
+    2. **Exe parent directory** — `/opt/cursor/electron` → `"cursor"`. Generic dirs (`bin`, `usr`, `lib`, `tmp`, etc.) are excluded.
+    3. **Parent process exe basename** — filtered to exclude other generic names.
+  - New pure helper `parse_environ_for_app_name(environ: &str) -> Option<String>` decouples the parsing logic from I/O so it is unit-testable.
+  - **File:** `crates/flow-classifier/src/proc_resolver.rs`.
+
+- [x] **process=None for connections that reuse a recently-closed port (TIME_WAIT inode=0 bug).**
+  - **Root cause.** `/proc/net/tcp` rows for TIME_WAIT sockets carry `inode=0`. If a port is reused quickly enough that the TIME_WAIT row is still present when the new SYN arrives, `parse_proc_net` matches the TIME_WAIT row first and returns `inode=0`. `find_pid_for_inode(0)` then searches for `"socket:[0]"` — a string that never appears in any real process's fd directory — and deterministically returns `None`. Every retry of both loops also returns `None`, so the failure is guaranteed rather than racy.
+  - **Fix.** Added `if inode == 0 { continue; }` in both `parse_proc_net` and `parse_proc_net_port_only`. The scan skips TIME_WAIT rows and continues to the real ESTABLISHED/SYN_SENT entry.
+  - **Additional hardening:** `find_pid_for_inode` retries extended from `[0, 3, 8]` ms to `[0, 3, 8, 20]` ms (31 ms max) for Cursor AppImage's longer fork/exec gap.
+  - **File:** `crates/flow-classifier/src/proc_resolver.rs`.
+
+- [x] **Tests:** 9 new tests — 6 for `parse_environ_for_app_name` (AppImage path parsing, hyphenated names, version stripping, `ELECTRON_APP_NAME` var, missing vars, short-name rejection), 2 for inode=0 skip (TIME_WAIT row skipped + only TIME_WAIT returns None). Workspace total **143 → 152** tests, no regressions.
+
+- [x] **Documentation:** Updated `docs/process-resolver.md` (lookup chain ASCII diagram, new fallback strategies). Updated `docs/process-attribution-races.md` (Bug 23 entry covering both root causes, fix details, and test coverage).
+
+### 2026-05-16 (session 29 — DNS snoop cache: third domain detection method)
+
+Closes the last significant gap in domain attribution: UDP/QUIC flows and non-HTTP/non-TLS TCP could not be matched against domain-based rules because neither SNI nor HTTP Host extraction applies.
+
+- [x] **Root cause.** DNS queries are bypassed in `output_early` (`udp dport 53 accept`) so NFQUEUE never sees DNS traffic. DNS responses are INPUT packets — they are not in any OUTPUT hook. For UDP flows (e.g. a game client, QUIC, `dig`), the SniDnsCache was always empty, so `destination_domain = None` even when the app had just performed a DNS lookup a millisecond earlier.
+
+- [x] **Fix — DNS snoop worker (`crates/enforcer/src/dns_snoop.rs`).**
+  - `parse_dns_packet(data: &[u8]) -> Vec<(IpAddr, String)>` — pure DNS wire-format parser. Reads QNAME from the question section as the queried domain (correct even for CNAME chains), then extracts A (type 1) and AAAA (type 28) answer RDATA as resolved IPs. Handles label-pointer compression, NXDOMAIN (RCODE≠0) rejection, and malformed/truncated input.
+  - `DnsSnoopWorker` — binds to queue `main_queue + 1` on the INPUT hook (nftables `bypass` flag), calls `parse_dns_from_ip_packet` to strip IP/UDP headers, then writes `resolved_ip → queried_domain` into the shared `SniDnsCache`. Always returns `Verdict::Accept` — never blocks DNS.
+
+- [x] **nftables change (`crates/enforcer/src/lib.rs`).**
+  - When `queue_num` is `Some(q)` and `q < u16::MAX`, `NftablesBootstrap::setup` now also adds:
+    ```
+    add chain inet logiguard input_dns { type filter hook input priority 0; policy accept; }
+    add rule inet logiguard input_dns udp sport 53 queue num {q+1} bypass
+    ```
+  - With `bypass`: if `DnsSnoopWorker` is not running, DNS responses pass through instantly (no latency regression, no DNS failure risk).
+
+- [x] **Daemon wiring (`apps/daemon/src/main.rs`).**
+  - After `NfqueueProcessor` starts successfully, opens `DnsSnoopWorker::open(queue_num + 1, dns_cache.clone())` and spawns its `run_loop` on a background thread. Both share the same `Arc<Mutex<...>>` inside `SniDnsCache`, so DNS response entries are visible to the main NFQUEUE classify path immediately.
+
+- [x] **Tests.** 8 new tests in `dns_snoop::tests` — A record, AAAA record, query (not response), NXDOMAIN, truncated/empty input, zero ANCOUNT, domain lowercasing, multiple round-robin A records. Workspace total **152 → 163** tests, no regressions.
+
+- [x] **Documentation.** Updated `docs/nfqueue-domain-inference.md` — "DNS snoop cache" section replacing the previous "Still uncovered" note; explains QNAME approach, CNAME chain correctness, race window for UDP, and bypass safety.
+
+### 2026-05-17 (session 30 — exe-path identity, app_name, ss fallback, attribution caches)
+
+Six related improvements to process attribution, all motivated by two user-reported issues: (1) processes showing as "electron" instead of the real app name, and (2) a one-off `(unknown)` dialog appearing during YouTube playback after 4 minutes.
+
+- [x] **`ProcessInfo` struct replaces `Option<String>` return from `resolve()`.**
+  - New: `ProcessInfo { name: String, exe: Option<String>, app_name: Option<String> }`.
+  - `exe` = full `/proc/<pid>/exe` path — immune to `/proc/<pid>/comm` 15-char truncation and basename collisions.
+  - `app_name` = package manager name when it differs from `name` (e.g. `"cursor-bin"` for `"electron"`).
+  - `CachedEntry` in the per-socket cache now stores the full `ProcessInfo` (was just `name: String`).
+  - `FakeProcessResolver::resolve()` returns `ProcessInfo { name, exe: None, app_name: None }`.
+  - All tests updated: `CachedName` → `CachedEntry`, `resolve().as_deref()` → `resolve().map(|p| p.name).as_deref()`.
+  - **File:** `crates/flow-classifier/src/lib.rs`, `crates/flow-classifier/src/proc_resolver.rs`.
+
+- [x] **`process_exe` and `app_name` in `Rule` and `FlowContext`.**
+  - Both fields added with `#[serde(default)]` for backward-compatible deserialization.
+  - `process_exe` stored in `Rule` when user creates a rule from the decision dialog (via `ProcessScope::Specific`).
+  - `policy_engine::process_matches` prefers exe-path equality when both sides have it; falls back to name comparison.
+  - DB migration: `ALTER TABLE rules ADD COLUMN process_exe TEXT NULL` on startup.
+  - State-store SELECT/INSERT updated to include `process_exe` at column index 8.
+  - **Files:** `crates/core-types/src/lib.rs`, `crates/policy-engine/src/lib.rs`, `crates/state-store/src/lib.rs`.
+
+- [x] **`app_name` from `pacman -Qo <exe>` (Arch Linux).**
+  - `pacman_query_owner(exe_path)` runs `pacman -Qo -- <exe>` and parses "owned by PKG" from stdout.
+  - `lookup_pacman(&self, exe)` checks `pacman_cache: Mutex<HashMap<String, Option<String>>>` first; falls through to the subprocess only on a miss. Caches both hits and misses.
+  - Suppressed when `app_name == name` (avoids showing "chromium (chromium)").
+  - Shown in daemon logs: `process="electron" (cursor-bin)`.
+  - Shown in decision dialog: secondary muted line `pkg: cursor-bin` under the process name.
+  - **Files:** `crates/flow-classifier/src/proc_resolver.rs`, `crates/control-service/src/lib.rs`, `apps/gpui/src/components/flow_info.rs`, `apps/gpui/src/app.rs`.
+
+- [x] **`ss` fallback when `/proc/net` scan fails.**
+  - `try_ss_fallback(ip, port, protocol)` runs `ss -Hnp [-t|-u] src :<port>`, filters lines via `ss_local_matches` (handles IPv4, IPv6, IPv4-mapped), extracts `pid=N` from the `users:(("name",pid=N,...))` field.
+  - If a pid is found, re-enters the standard `/proc/<pid>/exe` → name → app_name path.
+  - Called only after all `/proc/net` retry attempts are exhausted.
+  - **File:** `crates/flow-classifier/src/proc_resolver.rs`.
+
+- [x] **Layer 0 attribution caches in `NfqueueProcessor` (CDN IP rotation fix).**
+  - IP-based cache (`proc_attr`): `HashMap<(dst_ip, dst_port), CachedProcessAttr>`, TTL 15 min, max 1024. Consulted when `process_name = None` after classification; filled on every successful classification.
+  - Domain-based cache (`domain_proc_attr`): `HashMap<(domain, dst_port), CachedProcessAttr>`, TTL 1 hour, max 512. Keyed on the stable domain name — handles CDN IP rotation (same domain, different IP each connection). Filled whenever a successful classification includes a `destination_domain`.
+  - Both caches store `CachedProcessAttr { process_name, process_exe, app_name, expires_at }`.
+  - **File:** `crates/enforcer/src/nfqueue.rs`.
+
+- [x] **Decision dialog shows package name.**
+  - `flow_info_section` gains `app_name: &Option<String>` parameter.
+  - `process_value()` renders a secondary muted line (`pkg: cursor-bin`) at 10px when `app_name` is present. Icon aligns to top with `items_start()` + `pt(px(1.))`.
+  - `design/decision_dialog_window.html` updated: `app-name-row` div (hidden by default), `setAppName(name)` JS function, "Electron app" scenario button.
+  - **Files:** `apps/gpui/src/components/flow_info.rs`, `apps/gpui/src/app.rs`, `design/decision_dialog_window.html`.
+
+- [x] **Tests:** 164 total (was 163). 1 new test added for `ss_local_matches` IPv4-mapped address handling. All 164 pass, no regressions.
+
+- [x] **Documentation:**
+  - `docs/process-resolver.md`: lookup chain updated (ss fallback step, pacman step, `ProcessInfo` in cache); Step 3 section replaced with full `ProcessInfo` explanation; multi-package-manager support plan added.
+  - `docs/process-attribution-races.md`: Bug 24 entry added with Layer 0 diagram and `CachedProcessAttr` definition.
+  - `docs/implementation-status.md`: test count updated to 164; Phase 2 checklist updated; Bug 24 entry added; `Rule`, `FlowContext` data structures updated; DB schema updated.
+  - `develop.md`: this session log entry.

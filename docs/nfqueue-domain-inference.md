@@ -153,12 +153,30 @@ Once `extract_http_host` populates `sni_hint`, the `SniDnsCache` records `dst_ip
 
 12 unit tests in `nfqueue::tests::http_host_*` cover the happy path, case-insensitivity, port stripping (both IPv4 and bracketed IPv6), CONNECT-method proxies, multi-header ordering, truncation safety, garbage rejection, and explicit no-match against TLS ClientHello / non-HTTP payloads.
 
-**Still uncovered** (would need a DNS snoop cache):
-- Plain UDP flows to non-HTTPS services.
-- QUIC/HTTP3 where SNI is encrypted in the packet payload.
-- Non-HTTP, non-TLS TCP services (SSH, raw protocols, custom apps).
+**DNS snoop cache — third domain detection method (implemented 2026-05-16):**
 
-For these, a DNS snoop cache would be needed — intercept UDP packets where `src_port == 53`, parse the DNS response wire format (A/AAAA answers), and populate the same `SniDnsCache`. The race condition (DNS response racing with the first UDP packet) is less critical for UDP since UDP has no handshake and the first packet is already application data.
+For plain UDP services, QUIC/HTTP3 (encrypted SNI), and non-HTTP/non-TLS TCP, neither of the above methods produces a domain name. The solution is a passive DNS response snooper:
+
+`crates/enforcer/src/dns_snoop.rs` — `DnsSnoopWorker` binds to a second NFQUEUE (queue number `= main_queue + 1`) on the **INPUT hook** with the `bypass` flag:
+
+```
+add chain inet logiguard input_dns { type filter hook input priority 0; policy accept; }
+add rule inet logiguard input_dns udp sport 53 queue num {n+1} bypass
+```
+
+`bypass` means: if the worker is not running (daemon restarting, queue overflow), DNS responses pass through unaffected — no latency impact and no DNS failure risk.
+
+The worker:
+1. Receives raw IP + UDP + DNS response packets from the INPUT hook.
+2. Parses the DNS wire format (`parse_dns_packet`): reads QNAME from the question section as the queried domain, then extracts A (type 1) and AAAA (type 28) RDATA as resolved IPs.
+3. Writes `resolved_ip → queried_domain` into the shared `SniDnsCache`.
+4. Always returns `Verdict::Accept` — it never blocks DNS traffic.
+
+**Why QNAME, not the answer NAME field:** Using the question section's QNAME is correct even for CNAME chains. If an app queries `api.cursor.sh` which CNAMEs to `cursor-api.cloudfront.net` then resolves to `1.2.3.4`, we correctly store `1.2.3.4 → api.cursor.sh` because that is the domain the user-facing rule will name.
+
+**Race condition for UDP:** DNS responses arrive just before the first UDP data packet. For interactive apps the DNS response typically precedes the data packet by at least one round-trip, so the cache is populated in time. For very fast back-to-back query+connect scenarios the first UDP packet still shows IP-only; subsequent connections to the same IP (which are common) resolve correctly.
+
+8 unit tests in `dns_snoop::tests` cover A and AAAA records, query/response discrimination, NXDOMAIN, truncated input, zero-answer responses, domain lowercasing, and multiple round-robin A records.
 
 ## Testing Strategy
 

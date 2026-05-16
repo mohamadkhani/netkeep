@@ -238,6 +238,8 @@ mod tests {
     fn mk_flow() -> FlowContext {
         FlowContext {
             process_name: Some("curl".to_string()),
+            process_exe: None,
+            app_name: None,
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),

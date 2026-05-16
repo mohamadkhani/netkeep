@@ -157,6 +157,8 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
     };
     let flow = FlowContext {
         process_name: Some("socks-client".to_string()),
+        process_exe: None,
+        app_name: None,
         destination_ip,
         destination_port: port,
         destination_domain,

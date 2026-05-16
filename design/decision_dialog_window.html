@@ -158,6 +158,7 @@
     <button onclick="setScenario('domain')" class="active text-[10px] font-label-caps px-3 py-1 rounded transition-colors" id="btn-domain">Domain known</button>
     <button onclick="setScenario('ip')" class="text-[10px] font-label-caps px-3 py-1 rounded transition-colors text-on-surface-variant" id="btn-ip">IP only</button>
     <button onclick="setScenario('unknown')" class="text-[10px] font-label-caps px-3 py-1 rounded transition-colors text-on-surface-variant" id="btn-unknown">Both unknown</button>
+    <button onclick="setScenario('electron')" class="text-[10px] font-label-caps px-3 py-1 rounded transition-colors text-on-surface-variant" id="btn-electron">Electron app</button>
 </div>
 
 <!-- Scrim -->
@@ -194,7 +195,13 @@
             </div>
             <div class="col-span-8 flex items-center gap-2" id="flow-process">
                 <span class="material-symbols-outlined text-[#f97316] text-[16px]">local_fire_department</span>
-                <span class="font-data-mono text-data-mono text-on-surface" id="process-name-display">firefox</span>
+                <div class="flex flex-col gap-0.5">
+                    <span class="font-data-mono text-data-mono text-on-surface" id="process-name-display">firefox</span>
+                    <span class="hidden items-center gap-1 font-body-sm text-[10px] text-on-surface-variant" id="app-name-row">
+                        <span class="material-symbols-outlined text-[11px]">package_2</span>
+                        <span id="app-name-display"></span>
+                    </span>
+                </div>
             </div>
 
             <!-- Destination -->
@@ -365,7 +372,7 @@
 
 <script>
     // --- State ---
-    let scenario = 'domain'; // 'domain' | 'ip' | 'unknown'
+    let scenario = 'domain'; // 'domain' | 'ip' | 'unknown' | 'electron'
     let processScope = 'specific'; // 'specific' | 'all'
     let domainScope = 'exact';     // 'exact' | 'wildcard' | 'any'
     // Number of active octets: 4=/32, 3=/24, 2=/16, 1=/8
@@ -379,6 +386,18 @@
         return     { prefix: '/8',  addr: '142.0.0.0/8' };
     }
 
+    function setAppName(name) {
+        const row = document.getElementById('app-name-row');
+        if (name) {
+            document.getElementById('app-name-display').textContent = name;
+            row.classList.remove('hidden');
+            row.classList.add('flex');
+        } else {
+            row.classList.add('hidden');
+            row.classList.remove('flex');
+        }
+    }
+
     // --- Scenario switcher (demo only) ---
     function setScenario(s) {
         scenario = s;
@@ -386,7 +405,7 @@
         domainScope = 'exact';
         cidrScope = '/32';
 
-        ['domain','ip','unknown'].forEach(id => {
+        ['domain','ip','unknown','electron'].forEach(id => {
             document.getElementById('btn-' + id).classList.remove('active');
             document.getElementById('btn-' + id).classList.add('text-on-surface-variant');
         });
@@ -399,8 +418,13 @@
             b.classList.add('text-on-surface-variant');
         });
 
+        // Reset domain toggle labels (electron scenario overrides them)
+        document.getElementById('dom-exact').textContent = 'accounts.google.com';
+        document.getElementById('dom-wildcard').textContent = '*.google.com';
+
         if (s === 'domain') {
             document.getElementById('process-name-display').textContent = 'firefox';
+            setAppName(null);
             document.getElementById('dest-display').textContent = 'accounts.google.com';
             document.getElementById('dest-display').className = 'font-data-mono text-data-mono text-primary hover:underline cursor-pointer';
             document.getElementById('proc-specific-label').textContent = 'firefox';
@@ -415,9 +439,30 @@
             document.getElementById('dest-scope-unknown').classList.remove('flex');
             document.getElementById('unknown-warning').classList.add('hidden');
             document.getElementById('unknown-warning').classList.remove('flex');
+        } else if (s === 'electron') {
+            document.getElementById('process-name-display').textContent = 'electron';
+            setAppName('cursor-bin');
+            document.getElementById('dest-display').textContent = 'api2.cursor.sh';
+            document.getElementById('dest-display').className = 'font-data-mono text-data-mono text-primary hover:underline cursor-pointer';
+            document.getElementById('proc-specific-label').textContent = 'cursor-bin';
+            document.getElementById('proc-specific').classList.add('active');
+            document.getElementById('proc-specific').classList.remove('text-on-surface-variant');
+            document.getElementById('dom-exact').classList.add('active');
+            document.getElementById('dom-exact').classList.remove('text-on-surface-variant');
+            document.getElementById('dest-scope-domain').classList.remove('hidden');
+            document.getElementById('dest-scope-ip').classList.add('hidden');
+            document.getElementById('dest-scope-ip').classList.remove('flex');
+            document.getElementById('dest-scope-unknown').classList.add('hidden');
+            document.getElementById('dest-scope-unknown').classList.remove('flex');
+            document.getElementById('unknown-warning').classList.add('hidden');
+            document.getElementById('unknown-warning').classList.remove('flex');
+            // override domain buttons to reflect cursor.sh
+            document.getElementById('dom-exact').textContent = 'api2.cursor.sh';
+            document.getElementById('dom-wildcard').textContent = '*.cursor.sh';
         } else if (s === 'ip') {
             activeOctets = 4;
             document.getElementById('process-name-display').textContent = 'curl';
+            setAppName(null);
             document.getElementById('dest-display').textContent = '(unknown)';
             document.getElementById('dest-display').className = 'font-data-mono text-data-mono text-on-surface-variant italic';
             document.getElementById('proc-specific-label').textContent = 'curl';
@@ -434,6 +479,7 @@
         } else {
             activeOctets = 4;
             document.getElementById('process-name-display').textContent = '(unknown)';
+            setAppName(null);
             document.getElementById('dest-display').textContent = '(unknown)';
             document.getElementById('dest-display').className = 'font-data-mono text-data-mono text-on-surface-variant italic';
             document.getElementById('proc-specific-label').textContent = 'unknown';
@@ -519,6 +565,10 @@
         if (scenario === 'domain') {
             if (domainScope === 'exact') destLabel = '<strong class="text-on-surface">accounts.google.com</strong>';
             else if (domainScope === 'wildcard') destLabel = '<strong class="text-on-surface">*.google.com</strong>';
+            else destLabel = '<strong class="text-on-surface">any destination</strong>';
+        } else if (scenario === 'electron') {
+            if (domainScope === 'exact') destLabel = '<strong class="text-on-surface">api2.cursor.sh</strong>';
+            else if (domainScope === 'wildcard') destLabel = '<strong class="text-on-surface">*.cursor.sh</strong>';
             else destLabel = '<strong class="text-on-surface">any destination</strong>';
         } else {
             destLabel = `<strong class="text-on-surface">${cidrFromActive(activeOctets).addr}</strong>`;

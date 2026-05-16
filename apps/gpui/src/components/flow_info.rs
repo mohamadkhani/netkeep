@@ -6,6 +6,7 @@ use crate::colors;
 
 pub fn flow_info_section(
     process_name: &str,
+    app_name: &Option<String>,
     protocol: &str,
     port: u16,
     domain: &Option<String>,
@@ -36,7 +37,7 @@ pub fn flow_info_section(
         // Process row
         .child(grid_row(
             label_element("PROCESS", ui_font.clone()),
-            process_value(process_name, ui_font.clone()),
+            process_value(process_name, app_name.as_deref(), ui_font.clone()),
         ))
         // Destination row
         .child(grid_row(
@@ -99,23 +100,40 @@ fn label_element(label: &str, ui_font: SharedString) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn process_value(process_name: &str, ui_font: SharedString) -> gpui::AnyElement {
+fn process_value(process_name: &str, app_name: Option<&str>, ui_font: SharedString) -> gpui::AnyElement {
+    let name_col = {
+        let mut col = v_flex()
+            .gap(px(2.))
+            .child(
+                div()
+                    .font_family(ui_font.clone())
+                    .text_color(colors::text())
+                    .text_size(px(13.))
+                    .child(SharedString::from(process_name.to_string())),
+            );
+        if let Some(pkg) = app_name {
+            col = col.child(
+                div()
+                    .font_family(ui_font)
+                    .text_color(colors::muted())
+                    .text_size(px(10.))
+                    .child(SharedString::from(format!("pkg: {pkg}"))),
+            );
+        }
+        col
+    };
+
     h_flex()
         .gap_2()
-        .items_center()
+        .items_start()
         .child(
             div()
                 .text_color(colors::orange())
                 .text_size(px(16.))
+                .pt(px(1.))
                 .child("\u{1F525}"), // 🔥 fire
         )
-        .child(
-            div()
-                .font_family(ui_font)
-                .text_color(colors::text())
-                .text_size(px(13.))
-                .child(SharedString::from(process_name.to_string())),
-        )
+        .child(name_col)
         .into_any_element()
 }
 
