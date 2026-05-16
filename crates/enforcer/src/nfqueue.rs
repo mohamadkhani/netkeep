@@ -127,6 +127,14 @@ where
             return (Verdict::Accept, None);
         }
 
+        // ICMP/ICMPv6 (protocol=Other, src_port=0) reaches here only if the
+        // nftables bypass rule is somehow missing. Accept immediately — the
+        // process resolver cannot match port-less packets and NDP in particular
+        // must never be blocked.
+        if matches!(raw.protocol, TransportProtocol::Other) {
+            return (Verdict::Accept, None);
+        }
+
         let key = ConnectionKey {
             src_ip:   raw.src_ip.clone(),
             src_port: raw.src_port,

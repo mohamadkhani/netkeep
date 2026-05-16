@@ -290,6 +290,18 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             script.push_str(
                 "add rule inet logiguard output_early tcp dport 53 accept\n",
             );
+            // ICMP and ICMPv6 must bypass NFQUEUE. These are layer-3 control
+            // protocols with no TCP/UDP port — the process resolver cannot match
+            // them to a user process. ICMPv6 also includes NDP (types 133–137)
+            // which the kernel generates autonomously; queuing it would produce
+            // spurious "unknown process" dialogs and blocking it would break IPv6
+            // neighbor discovery entirely.
+            script.push_str(
+                "add rule inet logiguard output_early meta l4proto icmp accept\n",
+            );
+            script.push_str(
+                "add rule inet logiguard output_early meta l4proto icmpv6 accept\n",
+            );
             script.push_str(&format!(
                 "add rule inet logiguard output_early queue num {q}\n",
             ));
@@ -310,6 +322,12 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             ));
             script.push_str(
                 "add rule inet logiguard forward ip6 daddr ::ffff:7f00:0000/104 accept\n",
+            );
+            script.push_str(
+                "add rule inet logiguard forward meta l4proto icmp accept\n",
+            );
+            script.push_str(
+                "add rule inet logiguard forward meta l4proto icmpv6 accept\n",
             );
             script.push_str(&format!(
                 "add rule inet logiguard forward queue num {q}\n",
