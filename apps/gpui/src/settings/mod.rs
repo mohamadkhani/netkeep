@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{
-    DestinationMatcher, Egress, ProxyAuth, ProxyConfig, ProxyProtocol, Rule,
-    RuleAction, RuleDuration,
+    DestinationMatcher, Egress, ProxyAuth, ProxyConfig, ProxyProtocol, Rule, RuleAction,
+    RuleDuration,
 };
 use gpui::{
     div, prelude::FluentBuilder as _, px, AppContext as _, Context, Entity, InteractiveElement,
@@ -100,7 +100,7 @@ impl SettingsApp {
         // Create table delegates
         let rules_table = cx.new(|cx| {
             TableState::new(
-                RulesDelegate::new(vec![], weak.clone(), socket_path.clone()),
+                RulesDelegate::new(vec![], vec![], weak.clone(), socket_path.clone()),
                 window,
                 cx,
             )
@@ -197,6 +197,7 @@ impl SettingsApp {
 
         self.rules_table.update(cx, |table, _| {
             table.delegate_mut().rules = rules;
+            table.delegate_mut().egresses = egresses.clone();
             table.delegate_mut().state_weak = weak.clone();
             table.delegate_mut().socket_path = socket.clone();
         });
@@ -499,19 +500,25 @@ impl SettingsApp {
                 )
                 .footer(
                     h_flex()
-                        .px(px(16.)).py(px(8.))
-                        .gap(px(8.)).justify_end()
+                        .px(px(16.))
+                        .py(px(8.))
+                        .gap(px(8.))
+                        .justify_end()
                         .child(
-                            action_btn("dialog-cancel", "Cancel", crate::colors::muted())
-                                .on_click(|_, win, cx| { win.close_dialog(cx); })
+                            action_btn("dialog-cancel", "Cancel", crate::colors::muted()).on_click(
+                                |_, win, cx| {
+                                    win.close_dialog(cx);
+                                },
+                            ),
                         )
                         .child(
-                            action_btn("dialog-ok", ok_label, crate::colors::primary())
-                                .on_click(move |_, win, cx| {
+                            action_btn("dialog-ok", ok_label, crate::colors::primary()).on_click(
+                                move |_, win, cx| {
                                     do_save_btn(cx);
                                     win.close_dialog(cx);
-                                })
-                        )
+                                },
+                            ),
+                        ),
                 )
                 .child(
                     v_flex()
@@ -562,14 +569,15 @@ impl SettingsApp {
                                 .iter()
                                 .map(|(eid, ename)| {
                                     let is_sel = cur_route == *eid;
-                                    let color =
-                                        if is_sel { colors::primary() } else { colors::muted() };
+                                    let color = if is_sel {
+                                        colors::primary()
+                                    } else {
+                                        colors::muted()
+                                    };
                                     let eid_c = eid.clone();
                                     let rt = route_arc.clone();
                                     div()
-                                        .id(gpui::ElementId::Name(
-                                            format!("eg-sel-{eid_c}").into(),
-                                        ))
+                                        .id(gpui::ElementId::Name(format!("eg-sel-{eid_c}").into()))
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -591,23 +599,15 @@ impl SettingsApp {
                                 .collect();
                             if egress_btns.is_empty() {
                                 el.child(
-                                    div()
-                                        .text_color(colors::muted())
-                                        .text_size(px(11.))
-                                        .child("No egresses configured — add one in the Egress tab."),
+                                    div().text_color(colors::muted()).text_size(px(11.)).child(
+                                        "No egresses configured — add one in the Egress tab.",
+                                    ),
                                 )
                             } else {
                                 el.child(
-                                    v_flex()
-                                        .gap(px(4.))
-                                        .child(field_label("ROUTE VIA"))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_wrap()
-                                                .gap(px(6.))
-                                                .children(egress_btns),
-                                        ),
+                                    v_flex().gap(px(4.)).child(field_label("ROUTE VIA")).child(
+                                        div().flex().flex_wrap().gap(px(6.)).children(egress_btns),
+                                    ),
                                 )
                             }
                         })
@@ -753,7 +753,12 @@ impl SettingsApp {
             .to_string();
         let init_targets_vec: Vec<String> = existing
             .as_ref()
-            .map(|e| e.targets.iter().map(|t| helpers::route_summary(t)).collect())
+            .map(|e| {
+                e.targets
+                    .iter()
+                    .map(|t| helpers::route_summary(t))
+                    .collect()
+            })
             .unwrap_or_default();
         let init_dns = existing
             .as_ref()
@@ -1492,19 +1497,25 @@ impl SettingsApp {
                 )
                 .footer(
                     h_flex()
-                        .px(px(16.)).py(px(8.))
-                        .gap(px(8.)).justify_end()
+                        .px(px(16.))
+                        .py(px(8.))
+                        .gap(px(8.))
+                        .justify_end()
                         .child(
-                            action_btn("dialog-cancel", "Cancel", crate::colors::muted())
-                                .on_click(|_, win, cx| { win.close_dialog(cx); })
+                            action_btn("dialog-cancel", "Cancel", crate::colors::muted()).on_click(
+                                |_, win, cx| {
+                                    win.close_dialog(cx);
+                                },
+                            ),
                         )
                         .child(
-                            action_btn("dialog-ok", ok_label, crate::colors::primary())
-                                .on_click(move |_, win, cx| {
+                            action_btn("dialog-ok", ok_label, crate::colors::primary()).on_click(
+                                move |_, win, cx| {
                                     do_save_btn(cx);
                                     win.close_dialog(cx);
-                                })
-                        )
+                                },
+                            ),
+                        ),
                 )
                 .child(
                     v_flex()

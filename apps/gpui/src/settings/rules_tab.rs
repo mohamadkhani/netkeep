@@ -1,7 +1,7 @@
 //! Rules tab — DataTable delegate for firewall rules with toggle/delete actions.
 
 use control_api::ControlRequest;
-use core_types::{Rule, RuleAction, RuleDuration};
+use core_types::{Egress, Rule, RuleAction, RuleDuration};
 use gpui::{
     px, App, AppContext as _, Context, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, WeakEntity, Window,
@@ -20,6 +20,7 @@ use super::SettingsState;
 
 pub struct RulesDelegate {
     pub rules: Vec<Rule>,
+    pub egresses: Vec<Egress>,
     pub state_weak: WeakEntity<SettingsState>,
     pub socket_path: String,
     columns: Vec<Column>,
@@ -28,11 +29,13 @@ pub struct RulesDelegate {
 impl RulesDelegate {
     pub fn new(
         rules: Vec<Rule>,
+        egresses: Vec<Egress>,
         state_weak: WeakEntity<SettingsState>,
         socket_path: String,
     ) -> Self {
         Self {
             rules,
+            egresses,
             state_weak,
             socket_path,
             columns: vec![
@@ -159,19 +162,24 @@ impl TableDelegate for RulesDelegate {
             }
             // Route column
             5 => {
-                let route = rule.egress_id.clone().unwrap_or_default();
-                Label::new(if route.is_empty() {
+                let route = rule.egress_id.as_deref().unwrap_or("");
+                let display_name = if route.is_empty() {
                     "—".to_string()
                 } else {
-                    route
-                })
-                .text_size(px(12.))
-                .text_color(if route_is_empty(&rule) || dimmed {
-                    colors::muted()
-                } else {
-                    colors::text()
-                })
-                .into_any_element()
+                    self.egresses
+                        .iter()
+                        .find(|e| e.id == route)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_else(|| route.to_string())
+                };
+                Label::new(display_name)
+                    .text_size(px(12.))
+                    .text_color(if route_is_empty(&rule) || dimmed {
+                        colors::muted()
+                    } else {
+                        colors::text()
+                    })
+                    .into_any_element()
             }
             // Controls column — toggle + delete
             6 => {
