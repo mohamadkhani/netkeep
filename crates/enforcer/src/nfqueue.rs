@@ -150,13 +150,23 @@ where
             return (Verdict::Accept, None);
         }
 
-        // Pure ACK (and SYN during handshake) — no application payload, nothing
-        // to classify. Return the cached verdict if one exists; otherwise accept.
-        // Do NOT evict the cache: pure ACKs flow freely in established connections
-        // and evicting here would force full re-classification on the next data
-        // segment, which re-runs the /proc resolver and can return process=None
-        // when the proc lookup races with a brief fd-visibility gap.
-        if raw.tcp_payload_empty {
+        // Pure ACK (mid-connection, no SYN) — no application payload, nothing
+        // new to classify. Return the cached verdict if one exists; otherwise
+        // accept. Do NOT evict the cache: pure ACKs flow freely in established
+        // connections and evicting here would force full re-classification on
+        // the next data segment, which re-runs the /proc resolver and can
+        // return process=None when the proc lookup races with a brief
+        // fd-visibility gap.
+        //
+        // SYNs are NOT short-circuited even though they're payload-empty: the
+        // SYN is the conntrack-NEW packet, and any NAT decision (e.g. our
+        // POSTROUTING masquerade for routed marks) is locked in at NEW time.
+        // If the SYN goes unmarked, the conntrack records a no-NAT mapping
+        // and the connection is permanently nailed to whichever interface the
+        // kernel's pre-rule routing chose — typically the VPN. A later data
+        // packet getting a routing mark cannot undo that. So we must classify
+        // SYNs and stamp the mark on packet 1.
+        if raw.tcp_payload_empty && !raw.tcp_syn {
             if let Some(cached) = self.decided.get(&key) {
                 if cached.expires_at > now_secs {
                     let v = if cached.accept { Verdict::Accept } else { Verdict::Drop };
@@ -306,7 +316,7 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         }
     };
 
-    let (src_port, dst_port, protocol, sni_hint, tcp_payload_empty, tcp_fin, tcp_rst) =
+    let (src_port, dst_port, protocol, sni_hint, tcp_payload_empty, tcp_fin, tcp_rst, tcp_syn) =
         match sliced.transport.as_ref() {
             Some(TransportSlice::Tcp(t)) => {
                 let payload = t.payload();
@@ -325,6 +335,7 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
                     payload.is_empty(),
                     t.fin(),
                     t.rst(),
+                    t.syn(),
                 )
             }
             Some(TransportSlice::Udp(u)) => {
@@ -332,9 +343,9 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
                 // Best-effort QUIC detection: UDP to/from port 443.
                 let proto =
                     if dp == 443 || sp == 443 { TransportProtocol::Quic } else { TransportProtocol::Udp };
-                (sp, dp, proto, None, false, false, false)
+                (sp, dp, proto, None, false, false, false, false)
             }
-            _ => (0, 0, TransportProtocol::Other, None, false, false, false),
+            _ => (0, 0, TransportProtocol::Other, None, false, false, false, false),
         };
 
     Some(RawPacket {
@@ -348,6 +359,7 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         tcp_payload_empty,
         tcp_fin,
         tcp_rst,
+        tcp_syn,
     })
 }
 

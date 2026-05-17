@@ -321,6 +321,21 @@ Four improvements to the settings window applied to both `design/settings_window
 
 - **Fix:** `resolve_action` compares `(specificity, action_rank, rule.id)`; greater `id` wins when the first two tie.
 
+## Bug Fixes (routing, 2026-05-17)
+
+**Bug 12:** Direct application `Route` (e.g. `curl https://www.digikala.com` matching a `Route via LAN` rule, no `SO_MARK` on the socket) silently exited via the **VPN** instead of LAN, even with the egress correctly configured. Symptom: `Established connection ... from <VPN-IP>` on the curl side, or — once partial fixes were in place — TCP handshake completing on VPN, TLS handshake timing out, curl `(28)` after 10s.
+
+Compound bug — five interacting failure modes:
+
+1. **`output_early` was `type filter`.** Setting a verdict mark from NFQUEUE userspace didn't trigger any reroute, so the packet exited whichever interface the original (pre-mark) routing decision chose. Initial fix: change to `type route`. Insufficient on its own — see #2.
+2. **`type route` + NFQUEUE-set mark do not compose.** The kernel's `nf_route_table_hook4` runs its pre/post mark-change check on the return path of `nft_do_chain`. When the chain returns `NF_QUEUE` the function exits there; after `nf_reinject()` the iterator resumes at the *next* hook entry, so the chain that queued the packet never sees the verdict-mark. **Fix:** a three-chain dance — `output_early` (route, NFQUEUE) → `output_save_mark` (filter, -125; meta→ct, clear meta) → `output_reroute` (route, -100; restore meta from ct). The mark write is now *inside* a later route chain's own `nft_do_chain`, so its post-check sees pre=0 vs post=X and fires `ip_route_me_harder()`.
+3. **`ip_route_me_harder()` updates dst but not src.** Reroute landed the packet on `enp3s0`, but the source IP was still the VPN's CGNAT address, dropped at ISP egress (BCP38) and producing asymmetric return paths. **Fix:** new `postrouting` chain (`type nat hook postrouting priority srcnat`) with `meta mark >= base oifname != "lo" masquerade` (plus a `ct mark >= base` twin for the relay path where `output_nat` overwrote `meta mark` with `0x2024`). Conntrack records the SNAT once at NEW; reverse-NAT on the return path is transparent to the application.
+4. **SYNs were short-circuited (`tcp_payload_empty` → Accept, no mark).** Even after #1–#3, the SYN still went out unmarked. Conntrack-NAT freezes the no-NAT decision at the conntrack-NEW packet, so a later data packet's mark could not undo that. **Fix:** classify SYNs. New `tcp_syn: bool` on `RawPacket` (populated from `t.syn()` in `parse_raw_packet`). `nfqueue::decide()` short-circuits only on `tcp_payload_empty && !tcp_syn`. Trade-off: flows without a matching Allow rule have their SYN dropped while `Pending` is open — application retransmits at ~1s and resumes once the user decides. Matches OpenSnitch / Little Snitch behavior.
+5. **VPN-poisoned `main` table caused unmatched marks to leak via VPN, not fail closed.** A separate `type unreachable` policy rule at a fixed pref had an ordering inversion problem (fires before lookup, dropping everything). **Fix:** put the unreachable *inside the lookup table* at metric 1000, with the primary route at metric 100. Lower metric wins normally; if the primary install fails or its interface goes down, the in-table unreachable returns `EHOSTUNREACH` instead of falling through to `main`. Also made `SystemRouteManager::add_route` transactional and stopped advancing `next_mark` on failure in `ensure_route_mark`.
+
+- **Files:** [`crates/enforcer/src/lib.rs`](../crates/enforcer/src/lib.rs) (chain layout, masquerade, in-table unreachable, transactional `add_route`), [`crates/enforcer/src/nfqueue.rs`](../crates/enforcer/src/nfqueue.rs) (SYN classification, `tcp_syn` parse), [`crates/flow-classifier/src/lib.rs`](../crates/flow-classifier/src/lib.rs) (`RawPacket.tcp_syn`), [`apps/daemon/src/main.rs`](../apps/daemon/src/main.rs) (`ensure_route_mark` guard).
+- **Verification:** `curl --max-time 10 -v https://www.digikala.com` with a `Route via eg-lan-enp3s0` rule active and the VPN tun up — full TLS 1.3 handshake completes; conntrack records the SNAT (`10.x.x.x → 192.168.7.7`).
+
 ## Critical Data Structures
 
 ### Rule

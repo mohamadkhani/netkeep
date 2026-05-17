@@ -62,9 +62,32 @@ LogiGuard programs nftables on startup via `nft` (shelled out). The rules use th
 | Chain | Type | Hook | Priority | Purpose |
 |---|---|---|---|---|
 | `output_nat` | nat | output | -199 | Save relay fwmark to conntrack; set throne bypass mark |
-| `output_early` | filter | output | -150 | Restore relay mark; queue everything else |
+| `output_early` | **route** | output | -150 | Restore relay mark from ct; loopback/DNS/ICMP bypass; queue everything else to NFQUEUE |
+| `output_save_mark` | filter | output | -125 | After NFQUEUE: copy `meta mark → ct mark`, then clear `meta mark` |
+| `output_reroute` | **route** | output | -100 | Restore `meta mark` from `ct mark` *inside the chain*; the inside-chain change triggers `ip_route_me_harder()` |
 | `forward` | filter | forward | 0 | Queue forwarded packets (gateway mode) |
-| `output_late` | filter | output | +10 | (reserved for future post-proxy mark restore) |
+| `input_dns` | filter | input | 0 | Queue DNS responses (queue N+1) for the SNI cache snoop |
+| `postrouting` | nat | postrouting | 100 (srcnat) | Masquerade routed-mark traffic so source IP matches the actual egress interface |
+
+### Why three OUTPUT chains for one routing decision
+
+A naïve `type route` chain that *itself* hosts the NFQUEUE rule does not trigger a reroute when userspace stamps a verdict-mark. The kernel's `nf_route_table_hook4`:
+
+```c
+mark = skb->mark;                       // capture
+ret  = nft_do_chain(&pkt, priv);
+if (ret != NF_DROP && ret != NF_STOLEN &&
+    (skb->mark != mark || ...))
+    err = ip_route_me_harder(...);      // reroute check
+```
+
+runs the reroute check on the *return path* of `nft_do_chain`. When the chain returns `NF_QUEUE`, the function exits there. After `nf_reinject()` later resumes iteration with the userspace-applied mark, it resumes at the *next* hook entry — the route chain that queued the packet never gets a chance to compare pre- vs post-marks. Result: no reroute, packet exits whichever interface the original (unmarked) routing decision chose. Typically the VPN.
+
+The three-chain dance works around this by putting the mark write **inside a later route chain's** `nft_do_chain`:
+
+1. `output_early` (route, -150) queues the packet. NFQUEUE stamps `meta mark = X` via the verdict. Chain exits via reinject. No reroute (as described).
+2. `output_save_mark` (filter, -125) sees `meta mark = X`, copies it into `ct mark`, then clears `meta mark` to 0. The chain is `filter` so no reroute check runs here.
+3. `output_reroute` (route, -100) enters with `meta mark = 0`, fires `ct mark >= base meta mark set ct mark`, and exits with `meta mark = X`. The kernel's post-chain check sees `0 != X` and calls `ip_route_me_harder()` with the new mark. The route lookup now hits the fwmark policy rule and lands the packet on the right egress interface.
 
 ### Key rules (simplified)
 
@@ -80,25 +103,53 @@ table inet logiguard {
   }
 
   chain output_early {
-    type filter hook output priority -150; policy accept;
+    type route hook output priority -150; policy accept;
 
     # Relay sockets: restore routing mark from conntrack, skip NFQUEUE.
     ct mark >= 20000 meta mark set ct mark accept
+    meta mark >= 20000 ct mark set meta mark accept
 
-    # Loopback bypass (defense-in-depth).
+    # Loopback / DNS / ICMP / ICMPv6 bypass.
     oifname "lo" accept
     ip daddr 127.0.0.0/8 accept
     ip6 daddr ::1 accept
     ip6 daddr ::ffff:7f00:0000/104 accept
-
-    # DNS must bypass NFQUEUE — queuing it would block name resolution.
     udp dport 53 accept
     tcp dport 53 accept
+    meta l4proto icmp accept
+    meta l4proto icmpv6 accept
 
     # All other output goes to NFQUEUE. The userspace daemon maintains a
     # per-5-tuple verdict cache so that already-decided connections are
     # fast-pathed in Rust rather than being re-classified every packet.
     queue num 0
+  }
+
+  # After NFQUEUE: stash the verdict-mark in ct mark and clear meta mark
+  # so the next chain can produce a real mark-change inside its own
+  # nft_do_chain (the only thing that triggers ip_route_me_harder).
+  chain output_save_mark {
+    type filter hook output priority -125; policy accept;
+    meta mark >= 20000 ct mark set meta mark meta mark set 0
+  }
+
+  # Restore meta mark from ct mark. Pre-mark is 0 (just cleared), post-mark
+  # is X — the kernel sees the change and reroutes via the fwmark table.
+  chain output_reroute {
+    type route hook output priority -100; policy accept;
+    ct mark >= 20000 meta mark set ct mark
+  }
+
+  # POSTROUTING masquerade — rewrite source IP to match the rerouted
+  # egress interface. Necessary because ip_route_me_harder updates the
+  # destination route but does NOT redo source-address selection: without
+  # this, the packet leaves the new interface still carrying whichever
+  # source IP the original (pre-mark) routing decision picked — typically
+  # a non-routable VPN address, which ISP egress filters drop (BCP38).
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    meta mark >= 20000 oifname != "lo" masquerade
+    ct mark   >= 20000 oifname != "lo" masquerade
   }
 
   chain forward {
@@ -168,19 +219,29 @@ if raw.tcp_fin || raw.tcp_rst {
 
 FIN or RST signals the connection is ending. The cached verdict for this 5-tuple is evicted so a future connection that reuses the same port gets a fresh decision rather than inheriting the old one.
 
-### SYN and pure ACKs — empty payload, no classification
+### Pure ACK (mid-connection) — empty payload, cached-or-accept
 
 ```rust
-if raw.tcp_payload_empty {
-    // return cached verdict if present, else Accept without classifying
+if raw.tcp_payload_empty && !raw.tcp_syn {
     if let Some(cached) = self.decided.get(&key) { ... }
     return (Verdict::Accept, None);
 }
 ```
 
-A SYN has no application payload — no SNI can be extracted and no domain hint is available. If the SYN were dropped the TCP handshake would never complete and the TLS ClientHello would never arrive. Pure ACKs (client acknowledging server data) are similarly content-free.
+Pure ACKs (client acknowledging server data, mid-connection) carry no application payload — there's nothing new to classify and re-running the `/proc` resolver risks `process_name = None` when the fd scan races an Electron network-service fork/exec. They consult the verdict cache and fall through to Accept on miss. They do *not* evict the cache (evicting on ACK was an earlier bug — see 2026-05-15).
 
-**Crucially**, pure ACKs do *not* evict the verdict cache — they consult it (returning the cached verdict for denied connections) or fall through to Accept. Evicting on ACK was an earlier bug: every client ACK for a server response would clear the cache and force full re-classification of the next request, re-running the `/proc` resolver and risking `process_name = None` when the fd scan raced a Electron network-service fork/exec. Fixing this (2026-05-15) eliminated the most common source of duplicate process attributions for multi-process apps.
+### SYNs — classified, NOT short-circuited
+
+SYNs *also* have `tcp_payload_empty = true`, but they take the slow path. The short-circuit condition is `tcp_payload_empty && !tcp_syn`, so a SYN falls through to full classification.
+
+The reason is **conntrack-NAT lifecycle**. NAT decisions (DNAT in OUTPUT, SNAT/masquerade in POSTROUTING) are made *once*, at the conntrack-NEW packet. The decision is then frozen for the lifetime of the connection. If the SYN exits the kernel unmarked:
+
+1. Initial routing decision uses `main` table → typically VPN. Source address picks the VPN's IP.
+2. Conntrack-NEW packet hits POSTROUTING. Our masquerade rule's condition (`meta mark >= base`) is false → no SNAT recorded.
+3. Conntrack permanently records "no NAT" for this connection.
+4. A later data packet (TLS ClientHello) gets classified, mark-stamped, rerouted to the right interface — but the recorded "no NAT" means it leaves carrying the VPN's source IP. ISP egress filters drop it (BCP38), connection wedges, application times out.
+
+Classifying SYNs lets the rule match on packet 1, stamps the mark, fires the reroute *and* the masquerade at the same NEW packet, and conntrack records the correct SNAT for the rest of the connection. The trade-off is that flows without an explicit Allow rule will have their SYN dropped while a `Pending` dialog is open — the application retransmits SYNs (~1s intervals on Linux) and resumes once the user decides. This matches OpenSnitch / Little Snitch interactive-firewall behavior.
 
 ### Data packets — classification + caching
 
@@ -201,6 +262,81 @@ The solution uses **conntrack marks** as stable per-connection storage:
 3. `output_early` (priority -150): reads `ct mark`, restores `meta mark`, accepts the packet so it is not re-queued.
 
 The routing decision therefore sees LogiGuard's mark, not the proxy's. The `LOGIGUARD_ROUTE_MARK_BASE` env var (default 20000) sets the threshold — any mark ≥ this value belongs to LogiGuard.
+
+---
+
+## End-to-end Route Action Flow
+
+What happens when a rule says `action = Route via egress eg-lan-enp3s0` and a user app (e.g. curl) opens a connection to `185.x.x.x:443`:
+
+```text
+curl creates socket; kernel route lookup with no mark → main table
+                                                       → typically VPN
+                                                       → source IP = VPN
+                                                       
+SYN ──▶ output_nat (-199)        meta mark=0 → no-op
+        │
+        ▼
+        output_early (-150, route)
+        │   rules 4-13 do not match
+        │   queue num 0 ──▶ NFQUEUE
+        │                    │
+        │                    │  userspace classifies:
+        │                    │  process=curl, domain=www.digikala.com (DNS-snoop cache hit)
+        │                    │  rule matches Route via eg-lan-enp3s0
+        │                    │  route_mark(Device(enp3s0)) = 0x4e20 (lazily installs table 30000)
+        │                    │  verdict = Accept, NFQA_MARK = 0x4e20
+        │                    │
+        ◀──── reinject; skb->mark = 0x4e20 ──
+        │
+        ▼
+        output_save_mark (-125, filter)
+        │   meta mark=0x4e20 ≥ 20000 → ct mark = 0x4e20; meta mark = 0
+        │
+        ▼
+        output_reroute (-100, route)
+        │   pre-mark = 0
+        │   ct mark=0x4e20 → meta mark = ct mark = 0x4e20
+        │   post-mark = 0x4e20  →  ip_route_me_harder(mark=0x4e20)
+        │                          → lookup table 30000
+        │                          → default via 192.168.7.253 dev enp3s0
+        │                          → skb->dst updated
+        ▼
+        (other LOCAL_OUT chains)
+        │
+        ▼
+POSTROUTING
+        │
+        ▼
+        postrouting (srcnat=100, nat)
+        │   meta mark=0x4e20 ≥ 20000, oifname = enp3s0 → masquerade
+        │   source IP rewritten 10.34.158.72 → 192.168.7.7
+        │   conntrack records SNAT mapping for the lifetime of the connection
+        ▼
+NIC → enp3s0 → wire
+        ▼
+        SYN+ACK comes back to 192.168.7.7
+        → conntrack reverse-NAT → curl's socket receives at its original tuple
+```
+
+Subsequent packets on the same flow short-circuit at NFQUEUE via the 5-tuple verdict cache (`Accept`, `fwmark=0x4e20`) and ride the same path. The connection lives entirely on `enp3s0` with the correct ISP-routable source IP, even though the user app never set `SO_MARK` on its socket.
+
+---
+
+## Fail-closed Routing Tables
+
+Each `(target, fwmark)` policy table installed by `SystemRouteManager` contains **two** routes:
+
+```sh
+ip route replace default      via <gw> dev <iface> table <T> metric  100
+ip route replace unreachable  default              table <T> metric 1000
+```
+
+Lower metric wins, so under normal conditions traffic uses the primary route. If the primary install fails (e.g. interface is down), or the rule lookup hits the table before the primary is in place, the `unreachable` default takes effect and the kernel returns `EHOSTUNREACH` — packets are *not* allowed to fall through to `main`.
+
+This matters because on systems where another tool has poisoned the `main` table (e.g. a VPN-tun proxy app installing scope-link routes covering the entire IPv4 space), fall-through silently routes via the wrong interface instead of failing. The in-table `unreachable` keeps the failure boundary inside one table and avoids the global pref-ordering trap of using a separate `type unreachable` policy rule.
+
+`SystemRouteManager::add_route` is itself transactional: if the primary route install fails, the lookup rule and any in-progress unreachable installs are rolled back, and `ensure_route_mark` in the daemon only advances `next_mark` after success — so transient install failures don't burn marks.
 
 ---
 

@@ -74,14 +74,21 @@ fn ensure_route_mark(target: &RouteTarget) -> Result<u32, String> {
         return Ok(mark);
     }
     let mark = state.next_mark;
-    state.next_mark = state
+    let next = state
         .next_mark
         .checked_add(1)
         .ok_or_else(|| "device route mark overflow".to_string())?;
+    // Install BEFORE committing the mark. If add_route fails, the mark is
+    // unused and next_mark must not advance — otherwise a transient install
+    // failure (e.g. interface briefly down) burns a mark on every retry and
+    // eventually overflows the allocator. add_route is itself transactional
+    // (see SystemRouteManager::add_route), so on failure the kernel is left
+    // in the same state it was in before this call.
     state
         .manager
         .add_route(target, mark)
         .map_err(|e| format!("install route policy for {target:?} failed: {e}"))?;
+    state.next_mark = next;
     state.marks_by_target.insert(target.clone(), mark);
     eprintln!("routed policy installed: target={target:?} fwmark={mark}");
     Ok(mark)

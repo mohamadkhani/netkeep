@@ -230,6 +230,27 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         // it only prevents NFQUEUE re-queuing and the drop path.  The ct mark
         // survives across hook priorities (it's per-connection state), so we can
         // restore our SO_MARK after the proxy has overwritten the packet mark.
+        //
+        // Reroute strategy — three chains:
+        //
+        //   priority -150  output_early       (type route, has the NFQUEUE rule)
+        //   priority -125  output_save_mark   (type filter)
+        //   priority -100  output_reroute     (type route)
+        //
+        // The naive idea "put NFQUEUE in a type-route chain so the kernel does
+        // ip_route_me_harder when userspace stamps a mark" does NOT work. The
+        // kernel's route-chain hook fn (`nf_route_table_hook4`) only runs its
+        // pre/post mark-change check when `nft_do_chain` returns NF_DROP/etc —
+        // when the chain returns NF_QUEUE the function exits without comparing,
+        // and after nf_reinject() the iteration resumes at the *next* chain, so
+        // our route chain never sees the new mark. No reroute → packet exits
+        // whichever interface the original (pre-mark) routing decision chose.
+        //
+        // Workaround: make the actual mark change happen *inside a later route
+        // chain's* nft_do_chain. So after NFQUEUE, `output_save_mark` (filter)
+        // copies meta mark → ct mark and clears meta mark. Then `output_reroute`
+        // (route) restores meta mark from ct mark — its pre-mark is 0 and post-
+        // mark is X, the kernel sees the change, and ip_route_me_harder fires.
         let mut script = String::new();
         script.push_str("add table inet logiguard\n");
 
@@ -249,7 +270,7 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         ));
 
         script.push_str(
-            "add chain inet logiguard output_early { type filter hook output priority -150; policy accept; }\n",
+            "add chain inet logiguard output_early { type route hook output priority -150; policy accept; }\n",
         );
         // Accept packets already carrying a routing mark (set by a previous NFQUEUE verdict
         // or by our relay sockets). The mark was saved to ct mark by output_nat the first
@@ -306,6 +327,38 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
                 "add rule inet logiguard output_early queue num {q}\n",
             ));
         }
+
+        // Stage 2 of the reroute dance — see the comment above output_early.
+        // Save NFQUEUE-stamped (or relay SO_MARK-stamped) meta mark into ct mark
+        // and clear meta mark. With meta mark = 0 at the entry of the next
+        // chain, the kernel's mark-change comparison will detect a real change
+        // when output_reroute restores it.
+        //
+        // Why a separate chain (not just a few more rules in output_early): the
+        // NFQUEUE rule terminates the chain via NF_QUEUE, and after nf_reinject
+        // continues iteration at the *next* hook entry — anything we add below
+        // `queue num q` in output_early never executes for queued packets.
+        script.push_str(
+            "add chain inet logiguard output_save_mark { type filter hook output priority -125; policy accept; }\n",
+        );
+        script.push_str(&format!(
+            "add rule inet logiguard output_save_mark meta mark >= {route_mark_base} ct mark set meta mark meta mark set 0\n",
+        ));
+
+        // Stage 3 of the reroute dance — restore meta mark from ct mark inside
+        // a route-type chain. The kernel captures `mark = skb->mark` (= 0,
+        // freshly cleared) before nft_do_chain and compares it to the post-
+        // chain value (= X, just restored). Detecting that change triggers
+        // ip_route_me_harder(state->net, sk, skb, RTN_UNSPEC), which re-does
+        // the route lookup with the new mark — finally putting the packet on
+        // the right egress interface for our fwmark policy rule.
+        script.push_str(
+            "add chain inet logiguard output_reroute { type route hook output priority -100; policy accept; }\n",
+        );
+        script.push_str(&format!(
+            "add rule inet logiguard output_reroute ct mark >= {route_mark_base} meta mark set ct mark\n",
+        ));
+
         if let Some(q) = queue_num {
             script.push_str(
                 "add chain inet logiguard forward { type filter hook forward priority 0; policy accept; }\n",
@@ -345,6 +398,40 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
                 ));
             }
         }
+
+        // POSTROUTING masquerade — rewrite source address to match the
+        // egress interface chosen by our fwmark-based policy routing.
+        //
+        // Why this is necessary: when the NFQUEUE verdict in output_early
+        // (`type route`) stamps a fwmark on the SYN, the kernel reruns the
+        // route lookup but does NOT redo source-address selection. So a
+        // packet that the kernel originally bound to (say) the VPN's source
+        // 10.x.x.x can end up leaving via enp3s0 with that same VPN source
+        // IP. Most ISPs drop such packets (BCP 38 / source-address
+        // validation), and even when they don't, return traffic arrives via
+        // the VPN — producing asymmetric routing and timeouts.
+        //
+        // Masquerade fixes this by rewriting the source IP at POSTROUTING
+        // to the primary IP of the actual outgoing interface. Conntrack
+        // reverses it on the inbound path so the application's socket
+        // (still nominally bound to the original source) receives replies
+        // transparently.
+        //
+        // Two rules — one each for meta mark and ct mark — because:
+        //   * NFQUEUE-stamped packets carry the mark in `meta mark`.
+        //   * Relay-path packets had `output_nat` (priority -199) overwrite
+        //     `meta mark` with 0x2024 (the throne-bypass cookie) and saved
+        //     the original into `ct mark`. We must match either.
+        script.push_str(
+            "add chain inet logiguard postrouting { type nat hook postrouting priority 100; policy accept; }\n",
+        );
+        script.push_str(&format!(
+            "add rule inet logiguard postrouting meta mark >= {route_mark_base} oifname != \"lo\" masquerade\n",
+        ));
+        script.push_str(&format!(
+            "add rule inet logiguard postrouting ct mark >= {route_mark_base} oifname != \"lo\" masquerade\n",
+        ));
+
         run_nft_script(&script)
     }
 
@@ -443,36 +530,65 @@ impl RouteManager for SystemRouteManager {
     fn add_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String> {
         let table_id = 10000 + fwmark as u32;
         let dev = device_name(target);
-        // Keep this idempotent and avoid duplicate fwmark rules.
-        run_ip(&["rule", "del", "fwmark", &fwmark.to_string(), "lookup", &table_id.to_string()]).ok();
-        run_ip(&["rule", "add", "fwmark", &fwmark.to_string(), "lookup", &table_id.to_string()])?;
+        let fwmark_s = fwmark.to_string();
+        let table_s = table_id.to_string();
 
-        // Replace route in mark table every time to avoid stale/invalid entries.
-        match target {
+        // Fail-closed fallback lives INSIDE the lookup table at high metric,
+        // so the kernel uses it whenever the primary route below is missing
+        // or unusable. This avoids the policy-rule pref ordering trap (a
+        // per-rule unreachable at a fixed pref easily ends up firing BEFORE
+        // the lookup rule, dropping every marked packet) — and it keeps the
+        // failure boundary inside one routing table instead of fanning out
+        // into the global rule list. Without this, an empty/broken table
+        // would fall through to `main` where a VPN's poisoned routes can
+        // silently exit the wrong interface.
+        run_ip(&[
+            "route",
+            "replace",
+            "unreachable",
+            "default",
+            "table",
+            &table_s,
+            "metric",
+            "1000",
+        ])?;
+
+        // Install the lookup rule. Clear any stale duplicate first.
+        run_ip(&["rule", "del", "fwmark", &fwmark_s, "lookup", &table_s]).ok();
+        if let Err(e) = run_ip(&["rule", "add", "fwmark", &fwmark_s, "lookup", &table_s]) {
+            run_ip(&["route", "flush", "table", &table_s]).ok();
+            return Err(format!("install lookup rule failed: {e}"));
+        }
+
+        // Install primary route. If this fails the in-table unreachable
+        // remains, so the kernel returns EHOSTUNREACH for this mark instead
+        // of falling through to `main`.
+        let route_result = match target {
             RouteTarget::Device(_) => {
                 if let Some(gateway) = default_gateway_for_device(dev) {
                     run_ip(&[
-                        "route",
-                        "replace",
-                        "default",
-                        "via",
-                        &gateway,
-                        "dev",
-                        dev,
-                        "table",
-                        &table_id.to_string(),
-                    ])?;
+                        "route", "replace", "default", "via", &gateway, "dev", dev, "table",
+                        &table_s, "metric", "100",
+                    ])
                 } else {
-                    run_ip(&["route", "replace", "default", "dev", dev, "table", &table_id.to_string()])?;
+                    run_ip(&[
+                        "route", "replace", "default", "dev", dev, "table", &table_s, "metric",
+                        "100",
+                    ])
                 }
             }
-            RouteTarget::Tun(_) => {
-                run_ip(&["route", "replace", "default", "dev", dev, "table", &table_id.to_string()])?;
-            }
+            RouteTarget::Tun(_) => run_ip(&[
+                "route", "replace", "default", "dev", dev, "table", &table_s, "metric", "100",
+            ]),
             RouteTarget::Proxy(_) => {
                 // Proxy routing is handled at the application layer,
                 // not via policy routing tables. No ip-route manipulation needed.
+                Ok(())
             }
+        };
+
+        if let Err(e) = route_result {
+            return Err(format!("install primary route for {target:?} failed: {e}"));
         }
 
         let mut installed = self.installed.lock().map_err(|e| e.to_string())?;
@@ -484,8 +600,13 @@ impl RouteManager for SystemRouteManager {
 
     fn remove_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String> {
         let table_id = 10000 + fwmark as u32;
-        run_ip(&["route", "del", "default", "table", &table_id.to_string()]).ok();
-        run_ip(&["rule", "del", "fwmark", &fwmark.to_string(), "lookup", &table_id.to_string()]).ok();
+        let fwmark_s = fwmark.to_string();
+        let table_s = table_id.to_string();
+        run_ip(&["route", "flush", "table", &table_s]).ok();
+        run_ip(&["rule", "del", "fwmark", &fwmark_s, "lookup", &table_s]).ok();
+        // Best-effort cleanup of a per-rule unreachable left over from an
+        // earlier logiguard version that installed it as a separate rule.
+        run_ip(&["rule", "del", "fwmark", &fwmark_s, "type", "unreachable"]).ok();
 
         let mut installed = self.installed.lock().map_err(|e| e.to_string())?;
         installed.retain(|(t, m)| !(t == target && *m == fwmark));
@@ -621,6 +742,7 @@ mod tests {
             tcp_payload_empty: false,
             tcp_fin: false,
             tcp_rst: false,
+            tcp_syn: false,
         }
     }
 

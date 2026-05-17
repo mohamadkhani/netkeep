@@ -67,6 +67,13 @@ pub struct RawPacket {
     pub tcp_fin: bool,
     /// True when the TCP RST flag is set (connection forcibly reset).
     pub tcp_rst: bool,
+    /// True when the TCP SYN flag is set (first packet of a connection).
+    /// Distinguishes the connection-initiating handshake from pure ACKs
+    /// mid-connection: both have `tcp_payload_empty=true`, but only the SYN
+    /// must be classified — otherwise conntrack records a no-NAT decision
+    /// for the connection before the routing rule ever runs, and a later
+    /// data packet's fwmark can't undo that.
+    pub tcp_syn: bool,
 }
 
 /// Full information about the local process that owns a network socket.
@@ -262,6 +269,7 @@ mod tests {
             tcp_payload_empty: false,
             tcp_fin: false,
             tcp_rst: false,
+            tcp_syn: false,
         }
     }
 

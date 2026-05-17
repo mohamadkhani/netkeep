@@ -621,3 +621,53 @@ Six related improvements to process attribution, all motivated by two user-repor
   - `docs/process-attribution-races.md`: Bug 24 entry added with Layer 0 diagram and `CachedProcessAttr` definition.
   - `docs/implementation-status.md`: test count updated to 164; Phase 2 checklist updated; Bug 24 entry added; `Rule`, `FlowContext` data structures updated; DB schema updated.
   - `develop.md`: this session log entry.
+
+### 2026-05-17 (session 31 — Route via LAN not working: 5-layer routing fix)
+
+User reported "Route via LAN not working — seems to route via default route (VPN currently) not LAN." Symptom: with a `Route via eg-lan-enp3s0` rule for `curl → www.digikala.com`, curl's `Established connection ... from 10.34.158.72` showed the VPN's CGNAT source IP, not enp3s0's `192.168.7.7`. After partial fixes: TCP handshake completed on VPN, TLS hello timed out at 10s. After the final fix: full TLS 1.3 handshake completes, connection runs symmetrically on LAN.
+
+Root cause was compound — five interacting failure modes had to be solved together. None alone is sufficient; each unblocks the next.
+
+- [x] **`output_early` chain type `filter` → `route`.**
+  - Initial hypothesis: NFQUEUE-stamped marks need a route-type chain to trigger `ip_route_me_harder()`.
+  - Necessary but insufficient — see next item.
+  - **File:** [`crates/enforcer/src/lib.rs`](crates/enforcer/src/lib.rs).
+
+- [x] **Three-chain reroute dance (the actual reroute mechanism).**
+  - The kernel's `nf_route_table_hook4` runs its pre/post mark-change check on the return path of `nft_do_chain`. When the chain returns `NF_QUEUE` the function exits there; after `nf_reinject()` the iterator resumes at the *next* hook entry, so the chain that queued the packet never sees the verdict-mark. Verified by reading `net/netfilter/nft_chain_route.c`.
+  - Also verified the `nfq` crate (0.2.5) does not expose `NFQA_CT` writes, so saving to ct mark from userspace isn't possible.
+  - Solution: put the mark write *inside a later route chain's own `nft_do_chain`* so its post-check fires.
+    - `output_early` (route, -150): NFQUEUE rule. Userspace stamps `meta mark = X`. Chain exits via `NF_QUEUE` → reinject; no reroute fires here.
+    - `output_save_mark` (filter, -125): `meta mark >= base ct mark set meta mark meta mark set 0`. Saves the verdict-mark into ct mark and clears meta mark to 0.
+    - `output_reroute` (route, -100): `ct mark >= base meta mark set ct mark`. Pre-mark 0 vs post-mark X — kernel detects the change, calls `ip_route_me_harder()`, packet is now routed via the fwmark table.
+  - **File:** [`crates/enforcer/src/lib.rs`](crates/enforcer/src/lib.rs) (`SystemNftablesBootstrap::setup`).
+
+- [x] **POSTROUTING masquerade chain.**
+  - `ip_route_me_harder()` updates dst but does NOT redo source-address selection. So the rerouted packet leaves enp3s0 still carrying the VPN's source IP — ISP drops it under BCP38 / SAV, return traffic takes the VPN path → asymmetric routing → TLS timeout.
+  - New `postrouting` chain (`type nat hook postrouting priority srcnat`) with `meta mark >= base oifname != "lo" masquerade` plus a `ct mark >= base` twin (relay path: `output_nat` overwrote `meta mark` with `0x2024`, original is in ct mark). Conntrack records the SNAT once at NEW and reverses transparently.
+  - **File:** [`crates/enforcer/src/lib.rs`](crates/enforcer/src/lib.rs).
+
+- [x] **Classify SYNs (not just data packets).**
+  - Tcpdump revealed: SYN went out via VPN unmarked; later data packet rerouted to enp3s0 *with the VPN source IP*. Conntrack-NAT freezes the no-NAT decision at the conntrack-NEW (SYN) packet, so masquerade on a later data packet can't undo it.
+  - New `tcp_syn: bool` on `RawPacket`, populated via `t.syn()` in `parse_raw_packet`. `nfqueue::decide()` short-circuits only on `tcp_payload_empty && !tcp_syn`; SYNs fall through to full classification (DNS-snoop cache hit on dst_ip + /proc resolver → rule match → Route + mark on packet 1).
+  - **Behavior change:** flows without a matching Allow rule have their SYN dropped while `Pending` is open. Applications retransmit SYNs at ~1s intervals and resume once the user decides. Matches OpenSnitch / Little Snitch interactive-firewall default.
+  - **Files:** [`crates/flow-classifier/src/lib.rs`](crates/flow-classifier/src/lib.rs), [`crates/enforcer/src/nfqueue.rs`](crates/enforcer/src/nfqueue.rs).
+
+- [x] **In-table `unreachable` fallback + transactional `add_route`.**
+  - The user's VPN-tun proxy app floods `main` with `dev <VPN> scope link` routes covering nearly all of IPv4. So if our lookup table is missing or empty, packets fall through to `main` and silently exit via VPN.
+  - First attempt (separate `type unreachable` policy rule at fixed pref 32700) had an ordering inversion: pref 32700 < auto-assigned lookup pref 32763, so unreachable fired first and would have dropped every marked packet.
+  - Final design: in-table `unreachable default metric 1000` alongside `default via <gw> dev <iface> metric 100`. Lower metric wins under normal conditions; if the primary route fails to install (or its interface goes down), the in-table unreachable returns `EHOSTUNREACH`. No pref games, failure stays within one table.
+  - `SystemRouteManager::add_route` is now transactional — on `ip route` failure both the lookup rule and any partial installs are rolled back. `ensure_route_mark` only advances `next_mark` after success, so transient install failures don't burn marks.
+  - **Files:** [`crates/enforcer/src/lib.rs`](crates/enforcer/src/lib.rs), [`apps/daemon/src/main.rs`](apps/daemon/src/main.rs).
+
+- [x] **Tests:** 164 total, all pass. No new tests added — these are nftables / kernel-routing changes that can't be exercised in unit tests; verification was on the live system with curl + tcpdump + conntrack.
+
+- [x] **Verification:** `curl --max-time 10 -v https://www.digikala.com` against a `Route via eg-lan-enp3s0` rule with the VPN tun up. Full TLS 1.3 handshake (Client Hello → Server Hello → certs → CERT verify → Finished → change_cipher → Finished) completes. Conntrack records the SNAT mapping `10.34.158.72:port → 192.168.7.7:port` for the connection lifetime.
+
+- [x] **Side observation worth recording (no fix this session):** if logiguard is first started while a VPN is up, `seed_initial_egresses()` uses `ip route get 8.8.8.8` to identify the "LAN" interface and gets the VPN tun. The seeded "LAN" egress then points at the VPN device — confusing for the user. Recorded in `docs/architecture.md` design decision #15 as a known gotcha; a future fix should prefer `/sys/class/net/<iface>/type == 1` (ethernet) over `65534` (tun) when seeding.
+
+- [x] **Documentation:**
+  - `docs/nfqueue-packet-interception.md`: chain table rewritten with all 7 chains; rationale block "Why three OUTPUT chains for one routing decision" explaining the kernel-side limitation; simplified rules block updated; SYN classification section added; new "End-to-end Route Action Flow" diagram; new "Fail-closed Routing Tables" section.
+  - `docs/architecture.md`: design decisions #9 (managed routing) extended with in-table unreachable + transactional add_route; #11 rewritten as the three-chain reroute + POSTROUTING masquerade design with full rationale; #15 (egress seeding) gains the VPN-up gotcha note.
+  - `docs/implementation-status.md`: Bug 12 entry with all five sub-fixes, file refs, and verification steps.
+  - `develop.md`: this session log entry.
