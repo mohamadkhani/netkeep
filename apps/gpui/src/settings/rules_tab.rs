@@ -3,8 +3,8 @@
 use control_api::ControlRequest;
 use core_types::{Rule, RuleAction, RuleDuration};
 use gpui::{
-    App, AppContext as _, Context, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, WeakEntity, Window, px,
+    px, App, AppContext as _, Context, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled, WeakEntity, Window,
 };
 use gpui_component::h_flex;
 use gpui_component::label::Label;
@@ -15,7 +15,6 @@ use crate::components::{action_btn, badge, dest_text};
 use crate::daemon;
 
 use super::SettingsState;
-
 
 // ── Delegate ───────────────────────────────────────────────────────────
 
@@ -39,9 +38,9 @@ impl RulesDelegate {
             columns: vec![
                 Column::new("id", "ID").width(px(90.)),
                 Column::new("process", "Process").width(px(110.)),
-                Column::new("action", "Action").width(px(80.)),
                 Column::new("destination", "Destination").width(px(180.)),
                 Column::new("duration", "Duration").width(px(80.)),
+                Column::new("action", "Action").width(px(80.)),
                 Column::new("route", "Route").width(px(90.)),
                 Column::new("controls", "").width(px(150.)).resizable(false),
             ],
@@ -79,8 +78,15 @@ impl TableDelegate for RulesDelegate {
             // ID column — enabled indicator dot + short rule id
             0 => {
                 let enabled = rule.enabled;
-                let id_short = rule.id.chars().rev().take(8)
-                    .collect::<String>().chars().rev().collect::<String>();
+                let id_short = rule
+                    .id
+                    .chars()
+                    .rev()
+                    .take(8)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>();
                 h_flex()
                     .gap(px(6.))
                     .items_center()
@@ -89,7 +95,11 @@ impl TableDelegate for RulesDelegate {
                             .size(px(7.))
                             .flex_shrink_0()
                             .rounded(px(4.))
-                            .bg(if enabled { colors::green() } else { colors::muted() }),
+                            .bg(if enabled {
+                                colors::green()
+                            } else {
+                                colors::muted()
+                            }),
                     )
                     .child(
                         Label::new(id_short)
@@ -104,8 +114,11 @@ impl TableDelegate for RulesDelegate {
                     Some(p) if !p.is_empty() => p.clone().into(),
                     _ => "—".into(),
                 };
-                let has_proc = rule.process_name.as_deref()
-                    .map(|s| !s.is_empty()).unwrap_or(false);
+                let has_proc = rule
+                    .process_name
+                    .as_deref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
                 Label::new(proc_label)
                     .text_size(px(12.))
                     .text_color(if has_proc && !dimmed {
@@ -115,23 +128,17 @@ impl TableDelegate for RulesDelegate {
                     })
                     .into_any_element()
             }
-            // Action column — colored badge
-            2 => {
-                let (label, color) = match &rule.action {
-                    RuleAction::Allow => ("ALLOW", colors::green()),
-                    RuleAction::Deny => ("DENY", colors::error()),
-                    RuleAction::Ask => ("ASK", colors::orange()),
-                    RuleAction::Route { .. } => ("ROUTE", colors::primary()),
-                };
-                badge(label, if dimmed { colors::muted() } else { color })
-            }
+
             // Destination column
-            3 => {
-                Label::new(dest_text(&rule.destination))
-                    .text_size(px(12.))
-                    .text_color(if dimmed { colors::muted() } else { colors::text() })
-                    .into_any_element()
-            }
+            2 => Label::new(dest_text(&rule.destination))
+                .text_size(px(12.))
+                .text_color(if dimmed {
+                    colors::muted()
+                } else {
+                    colors::text()
+                })
+                .into_any_element(),
+
             // Duration column
             4 => {
                 let (label, color) = match rule.duration {
@@ -140,17 +147,31 @@ impl TableDelegate for RulesDelegate {
                 };
                 badge(label, if dimmed { colors::muted() } else { color })
             }
+            // Action column — colored badge
+            3 => {
+                let (label, color) = match &rule.action {
+                    RuleAction::Allow => ("ALLOW", colors::green()),
+                    RuleAction::Deny => ("DENY", colors::error()),
+                    RuleAction::Ask => ("ASK", colors::orange()),
+                    RuleAction::Route { .. } => ("ROUTE", colors::primary()),
+                };
+                badge(label, if dimmed { colors::muted() } else { color })
+            }
             // Route column
             5 => {
                 let route = rule.egress_id.clone().unwrap_or_default();
-                Label::new(if route.is_empty() { "—".to_string() } else { route })
-                    .text_size(px(12.))
-                    .text_color(if route_is_empty(&rule) || dimmed {
-                        colors::muted()
-                    } else {
-                        colors::text()
-                    })
-                    .into_any_element()
+                Label::new(if route.is_empty() {
+                    "—".to_string()
+                } else {
+                    route
+                })
+                .text_size(px(12.))
+                .text_color(if route_is_empty(&rule) || dimmed {
+                    colors::muted()
+                } else {
+                    colors::text()
+                })
+                .into_any_element()
             }
             // Controls column — toggle + delete
             6 => {
@@ -169,9 +190,17 @@ impl TableDelegate for RulesDelegate {
                         action_btn(
                             format!("rule-en-{id_toggle}"),
                             if enabled { "Disable" } else { "Enable" },
-                            if enabled { colors::muted() } else { colors::green() },
+                            if enabled {
+                                colors::muted()
+                            } else {
+                                colors::green()
+                            },
                         )
-                        .border_color(if enabled { colors::border() } else { colors::green() })
+                        .border_color(if enabled {
+                            colors::border()
+                        } else {
+                            colors::green()
+                        })
                         .on_click(move |_, _, cx| {
                             let mut r = rule_toggle.clone();
                             let sock = socket_toggle.clone();
@@ -179,7 +208,8 @@ impl TableDelegate for RulesDelegate {
                             let tid = id_toggle.clone();
                             cx.spawn(async move |cx| {
                                 r.enabled = !r.enabled;
-                                let _ = cx.background_executor()
+                                let _ = cx
+                                    .background_executor()
                                     .spawn(async move {
                                         daemon::send_request(&sock, &ControlRequest::AddRule(r))
                                     })
@@ -192,7 +222,8 @@ impl TableDelegate for RulesDelegate {
                                         cx.notify();
                                     });
                                 }
-                            }).detach();
+                            })
+                            .detach();
                         }),
                     )
                     .child(
@@ -203,7 +234,8 @@ impl TableDelegate for RulesDelegate {
                                 let sw = state_del.clone();
                                 cx.spawn(async move |cx| {
                                     let rid_cmp = rid.clone();
-                                    let _ = cx.background_executor()
+                                    let _ = cx
+                                        .background_executor()
                                         .spawn(async move {
                                             daemon::send_request(
                                                 &sock,
@@ -217,7 +249,8 @@ impl TableDelegate for RulesDelegate {
                                             cx.notify();
                                         });
                                     }
-                                }).detach();
+                                })
+                                .detach();
                             }),
                     )
                     .into_any_element()
