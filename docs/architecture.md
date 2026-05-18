@@ -176,7 +176,7 @@ Process and domain attribution.
 **Key Functions:**
 - Determine source process (via netstat/procfs lookup)
 - Determine destination domain (via DNS or SNI hints)
-- Handle DNS/SNI conflict (fallback to IP-only)
+- Handle domain resolution: SNI/Host is authoritative; DNS cache is fallback
 - QUIC best-effort domain inference
 
 **Traits:**
@@ -384,7 +384,7 @@ Planned (Phase 2 onward):
 
 2. **Wildcard semantics:** `*.example.com` does NOT match `example.com`. Apex requires explicit rule.
 
-3. **DNS/SNI conflict:** Discard domain inference. Treat as IP-only. Prevents spoofing.
+3. **SNI is authoritative over DNS cache:** SNI (and HTTP Host) come directly from the packet being classified and always take precedence. The DNS cache is a 1:1 `IP → domain` map that cannot represent CDN multi-tenancy (multiple domains sharing one IP). When the cache is stale due to a different domain overwriting it, the per-packet SNI is the correct source. DNS cache is only used as a fallback when no SNI/Host is present in the packet (SYNs, pure ACKs, UDP).
 
 4. **Protocol-specific timeouts:** Different defaults for TCP (may retry) vs UDP (fire-and-forget).
 

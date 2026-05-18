@@ -3,8 +3,8 @@
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{Egress, RouteTarget};
 use gpui::{
-    App, AppContext as _, Context, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
+    div, px, App, AppContext as _, Context, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled, WeakEntity, Window,
 };
 
 use gpui_component::table::{Column, TableDelegate, TableState};
@@ -13,8 +13,8 @@ use crate::colors;
 use crate::components::{action_btn, table_badge};
 use crate::daemon;
 
-use super::SettingsState;
 use super::helpers::route_summary;
+use super::SettingsState;
 
 // ── Delegate ───────────────────────────────────────────────────────────
 
@@ -54,10 +54,18 @@ impl EgressDelegate {
         if egress.is_system_default {
             return ("SYSTEM", colors::muted());
         }
-        if egress.targets.iter().any(|t| matches!(t, RouteTarget::Proxy(_))) {
+        if egress
+            .targets
+            .iter()
+            .any(|t| matches!(t, RouteTarget::Proxy(_)))
+        {
             return ("PROXY", colors::teal());
         }
-        if egress.targets.iter().any(|t| matches!(t, RouteTarget::Tun(_))) {
+        if egress
+            .targets
+            .iter()
+            .any(|t| matches!(t, RouteTarget::Tun(_)))
+        {
             return ("VPN", colors::green());
         }
         ("DIRECT", colors::muted())
@@ -160,8 +168,8 @@ impl TableDelegate for EgressDelegate {
                 let socket_path = self.socket_path.clone();
                 let weak = self.state_weak.clone();
 
-                let egress_edit  = egress.clone();
-                let state_edit   = self.state_weak.clone();
+                let egress_edit = egress.clone();
+                let state_edit = self.state_weak.clone();
 
                 div()
                     .flex()
@@ -169,8 +177,8 @@ impl TableDelegate for EgressDelegate {
                     .gap(px(6.))
                     // Edit button — sets egress_edit_request side-channel
                     .child(
-                        action_btn(format!("eg-edit-{eid}"), "Edit", colors::primary())
-                            .on_click(move |_, _, cx| {
+                        action_btn(format!("eg-edit-{eid}"), "Edit", colors::primary()).on_click(
+                            move |_, _, cx| {
                                 let egress = egress_edit.clone();
                                 if let Some(st) = state_edit.upgrade() {
                                     let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
@@ -178,12 +186,13 @@ impl TableDelegate for EgressDelegate {
                                         cx.notify();
                                     });
                                 }
-                            }),
+                            },
+                        ),
                     )
                     // Delete button
                     .child(
-                        action_btn(format!("eg-del-{eid}"), "Delete", colors::error())
-                            .on_click(move |_, _, cx| {
+                        action_btn(format!("eg-del-{eid}"), "Delete", colors::error()).on_click(
+                            move |_, _, cx| {
                                 let eid_req = eid.clone();
                                 let eid_cmp = eid.clone();
                                 let socket_path = socket_path.clone();
@@ -199,33 +208,36 @@ impl TableDelegate for EgressDelegate {
                                         })
                                         .await;
                                     if let Some(st) = weak.upgrade() {
-                                        let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
-                                            match res {
-                                                Ok(ControlResponse::Ok) => {
-                                                    s.egresses.retain(|e| e.id != eid_cmp);
-                                                    s.load_generation =
-                                                        s.load_generation.saturating_add(1);
-                                                    s.status = Some("Egress removed.".into());
+                                        let _ =
+                                            cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                                match res {
+                                                    Ok(ControlResponse::Ok) => {
+                                                        s.egresses.retain(|e| e.id != eid_cmp);
+                                                        s.load_generation =
+                                                            s.load_generation.saturating_add(1);
+                                                        s.status = Some("Egress removed.".into());
+                                                    }
+                                                    Ok(ControlResponse::Error(msg)) => {
+                                                        s.status =
+                                                            Some(format!("delete failed: {msg}"));
+                                                    }
+                                                    Err(e) => {
+                                                        s.status =
+                                                            Some(format!("delete failed: {e}"));
+                                                    }
+                                                    _ => {
+                                                        s.status = Some(
+                                                            "unexpected delete response".into(),
+                                                        );
+                                                    }
                                                 }
-                                                Ok(ControlResponse::Error(msg)) => {
-                                                    s.status =
-                                                        Some(format!("delete failed: {msg}"));
-                                                }
-                                                Err(e) => {
-                                                    s.status =
-                                                        Some(format!("delete failed: {e}"));
-                                                }
-                                                _ => {
-                                                    s.status =
-                                                        Some("unexpected delete response".into());
-                                                }
-                                            }
-                                            cx.notify();
-                                        });
+                                                cx.notify();
+                                            });
                                     }
                                 })
                                 .detach();
-                            }),
+                            },
+                        ),
                     )
                     .into_any_element()
             }

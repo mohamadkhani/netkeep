@@ -14,7 +14,7 @@ use nfq::{Queue, Verdict};
 /// With the nftables `bypass` flag, if this worker is not running (e.g. NFQUEUE
 /// not configured, daemon restarting) all DNS responses pass through unaffected.
 pub struct DnsSnoopWorker {
-    queue:     Queue,
+    queue: Queue,
     dns_cache: SniDnsCache,
 }
 
@@ -54,7 +54,11 @@ fn parse_dns_from_ip_packet(payload: &[u8]) -> Option<Vec<(IpAddr, String)>> {
         return None;
     }
     let results = parse_dns_packet(udp.payload());
-    if results.is_empty() { None } else { Some(results) }
+    if results.is_empty() {
+        None
+    } else {
+        Some(results)
+    }
 }
 
 /// Parse a DNS response wire-format payload (no IP/UDP headers).
@@ -237,7 +241,7 @@ mod tests {
         encode_name(&mut pkt, domain);
         pkt.extend_from_slice(&[0x00, 0x01]); // QTYPE = A
         pkt.extend_from_slice(&[0x00, 0x01]); // QCLASS = IN
-        // Answer: NAME as pointer to QNAME
+                                              // Answer: NAME as pointer to QNAME
         let ptr_offset = qname_start as u16;
         pkt.push(0xC0 | ((ptr_offset >> 8) as u8));
         pkt.push((ptr_offset & 0xFF) as u8);
@@ -251,7 +255,9 @@ mod tests {
 
     fn build_aaaa_response(domain: &str, ip: Ipv6Addr) -> Vec<u8> {
         let mut pkt = Vec::new();
-        pkt.extend_from_slice(&[0x00, 0x01, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+        pkt.extend_from_slice(&[
+            0x00, 0x01, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ]);
         let qname_start = pkt.len();
         encode_name(&mut pkt, domain);
         pkt.extend_from_slice(&[0x00, 0x1C]); // QTYPE = AAAA
@@ -328,7 +334,9 @@ mod tests {
     #[test]
     fn domain_is_lowercased() {
         let mut pkt = Vec::new();
-        pkt.extend_from_slice(&[0x00, 0x01, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+        pkt.extend_from_slice(&[
+            0x00, 0x01, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ]);
         let qname_start = pkt.len();
         // Encode "Example.COM" with mixed case
         for label in ["Example", "COM"] {
@@ -351,8 +359,7 @@ mod tests {
         // Build a response with ANCOUNT=2 (two A records for round-robin DNS).
         let mut pkt = Vec::new();
         pkt.extend_from_slice(&[
-            0x00, 0x01, 0x81, 0x80,
-            0x00, 0x01, // QDCOUNT=1
+            0x00, 0x01, 0x81, 0x80, 0x00, 0x01, // QDCOUNT=1
             0x00, 0x02, // ANCOUNT=2
             0x00, 0x00, 0x00, 0x00,
         ]);
@@ -363,7 +370,7 @@ mod tests {
         }
         pkt.push(0x00);
         pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // QTYPE=A, QCLASS=IN
-        // Answer 1
+                                                          // Answer 1
         let ptr = qname_start as u16;
         pkt.push(0xC0 | ((ptr >> 8) as u8));
         pkt.push((ptr & 0xFF) as u8);

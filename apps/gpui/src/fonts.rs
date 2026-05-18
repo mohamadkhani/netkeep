@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use gpui::{App, px};
+use gpui::{px, App};
 use gpui_component::Theme;
 
 // Embed the design-matched font files at compile time so they work regardless

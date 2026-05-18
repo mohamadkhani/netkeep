@@ -171,4 +171,3 @@ pub struct ProxyConfig {
     pub auth: ProxyAuth,
     pub enabled: bool,
 }
-

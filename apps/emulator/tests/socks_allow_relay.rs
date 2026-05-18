@@ -34,7 +34,11 @@ fn start_mock_daemon(socket_path: String) -> thread::JoinHandle<()> {
 #[test]
 fn socks_connect_allow_relay_passes_upstream_response() {
     let temp = TempDir::new().expect("tempdir");
-    let socket_path = temp.path().join("daemon.sock").to_string_lossy().to_string();
+    let socket_path = temp
+        .path()
+        .join("daemon.sock")
+        .to_string_lossy()
+        .to_string();
 
     let daemon_thread = start_mock_daemon(socket_path.clone());
 
@@ -69,7 +73,9 @@ fn socks_connect_allow_relay_passes_upstream_response() {
     let mut connect_req = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
     connect_req.extend_from_slice(host);
     connect_req.extend_from_slice(&upstream_addr.port().to_be_bytes());
-    client.write_all(&connect_req).expect("write connect request");
+    client
+        .write_all(&connect_req)
+        .expect("write connect request");
 
     let mut connect_reply = [0u8; 10];
     client
@@ -98,7 +104,11 @@ fn socks_connect_allow_relay_passes_upstream_response() {
 #[test]
 fn socks_pending_keeps_connection_open_until_allow_then_relays() {
     let temp = TempDir::new().expect("tempdir");
-    let socket_path = temp.path().join("daemon.sock").to_string_lossy().to_string();
+    let socket_path = temp
+        .path()
+        .join("daemon.sock")
+        .to_string_lossy()
+        .to_string();
 
     let daemon_thread = thread::spawn({
         let socket_path = socket_path.clone();
@@ -177,7 +187,9 @@ fn socks_pending_keeps_connection_open_until_allow_then_relays() {
     let mut connect_req = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
     connect_req.extend_from_slice(host);
     connect_req.extend_from_slice(&upstream_addr.port().to_be_bytes());
-    client.write_all(&connect_req).expect("write connect request");
+    client
+        .write_all(&connect_req)
+        .expect("write connect request");
 
     let mut connect_reply = [0u8; 10];
     let pending_err = client
@@ -216,4 +228,3 @@ fn socks_pending_keeps_connection_open_until_allow_then_relays() {
     upstream_thread.join().expect("join upstream");
     daemon_thread.join().expect("join daemon");
 }
-

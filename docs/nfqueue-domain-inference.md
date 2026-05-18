@@ -107,11 +107,11 @@ All length fields must be bounds-checked before indexing. Use `payload.get(pos)?
 
 | Protocol | Priority |
 |---|---|
-| TCP | SNI > DNS cache (if same) > IP-only (if conflict) |
+| TCP | **SNI/Host is authoritative** > DNS cache (only when SNI absent) |
 | QUIC | DNS cache only (SNI encrypted in QUIC v1) |
 | UDP | DNS cache only |
 
-When DNS and SNI disagree (possible spoofing or CDN routing), the domain is discarded and only the IP is shown. This is intentional — see design decision #3 in `architecture.md`.
+SNI (and HTTP Host) are extracted directly from the packet being classified and are always trusted over the shared DNS cache. The DNS cache is a 1:1 map (`IP → domain`) that cannot correctly represent CDN multi-tenancy — when two different domains share a CDN IP, the cache entry is overwritten by whichever DNS response arrived last. The per-packet SNI is immune to this because it comes from the actual connection. See design decision #3 in `architecture.md`.
 
 ## SNI Cache — Persisting the Domain Across Packets
 

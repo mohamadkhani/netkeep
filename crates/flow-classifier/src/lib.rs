@@ -93,7 +93,12 @@ pub struct ProcessInfo {
 
 /// Resolves the local process owning a network socket.
 pub trait ProcessResolver {
-    fn resolve(&self, src_ip: &str, src_port: u16, protocol: TransportProtocol) -> Option<ProcessInfo>;
+    fn resolve(
+        &self,
+        src_ip: &str,
+        src_port: u16,
+        protocol: TransportProtocol,
+    ) -> Option<ProcessInfo>;
 }
 
 /// Resolves a domain name from the DNS cache for a given destination IP.
@@ -119,26 +124,29 @@ where
     L: DeviceLabelResolver,
 {
     pub fn new(process_resolver: P, dns_resolver: D, device_label_resolver: L) -> Self {
-        Self { process_resolver, dns_resolver, device_label_resolver }
+        Self {
+            process_resolver,
+            dns_resolver,
+            device_label_resolver,
+        }
     }
 
     pub fn classify(&self, packet: &RawPacket) -> FlowContext {
-        let proc_info = self.process_resolver.resolve(
-            &packet.src_ip,
-            packet.src_port,
-            packet.protocol,
-        );
+        let proc_info =
+            self.process_resolver
+                .resolve(&packet.src_ip, packet.src_port, packet.protocol);
 
         let process_name = proc_info.as_ref().map(|p| p.name.clone());
-        let process_exe  = proc_info.as_ref().and_then(|p| p.exe.clone());
-        let app_name     = proc_info.as_ref().and_then(|p| p.app_name.clone());
+        let process_exe = proc_info.as_ref().and_then(|p| p.exe.clone());
+        let app_name = proc_info.as_ref().and_then(|p| p.app_name.clone());
 
         let destination_domain = self.resolve_domain(packet);
 
         let device_label = if process_name.is_none() {
-            packet.ingress_interface.as_deref().and_then(|iface| {
-                self.device_label_resolver.resolve(iface, &packet.src_ip)
-            })
+            packet
+                .ingress_interface
+                .as_deref()
+                .and_then(|iface| self.device_label_resolver.resolve(iface, &packet.src_ip))
         } else {
             None
         };
@@ -160,16 +168,17 @@ where
         let dns_domain = self.dns_resolver.resolve_dns(&packet.dst_ip);
         let sni_domain = packet.sni_hint.clone();
 
-        match (dns_domain, sni_domain) {
-            // QUIC: SNI is unreliable; use DNS-only, fall back to None.
-            (dns, _) if packet.protocol == TransportProtocol::Quic => dns,
-            // Both present and agree → use it.
-            (Some(dns), Some(sni)) if dns == sni => Some(dns),
-            // Both present but differ → conflict, treat as IP-only.
-            (Some(_), Some(_)) => None,
-            // Only one source → use whichever is available.
-            (Some(dns), None) => Some(dns),
-            (None, Some(sni)) => Some(sni),
+        match (sni_domain, dns_domain) {
+            // QUIC: SNI is encrypted in QUIC v1; use DNS cache only.
+            (_, dns) if packet.protocol == TransportProtocol::Quic => dns,
+            // SNI/Host is authoritative — extracted directly from the packet
+            // being classified. Always prefer it over the shared DNS cache,
+            // which may be stale or overwritten by another domain sharing the
+            // same CDN IP (a single IP → single domain map cannot correctly
+            // represent CDN multi-tenancy).
+            (Some(sni), _) => Some(sni),
+            // No per-packet hint → fall back to DNS cache.
+            (None, Some(dns)) => Some(dns),
             (None, None) => None,
         }
     }
@@ -184,7 +193,12 @@ pub struct FakeProcessResolver {
 }
 
 impl ProcessResolver for FakeProcessResolver {
-    fn resolve(&self, _src_ip: &str, _src_port: u16, _protocol: TransportProtocol) -> Option<ProcessInfo> {
+    fn resolve(
+        &self,
+        _src_ip: &str,
+        _src_port: u16,
+        _protocol: TransportProtocol,
+    ) -> Option<ProcessInfo> {
         self.result.as_ref().map(|name| ProcessInfo {
             name: name.clone(),
             exe: None,
@@ -251,9 +265,15 @@ mod tests {
         device_label: Option<&str>,
     ) -> FlowClassifier<FakeProcessResolver, FakeDnsResolver, FakeDeviceLabelResolver> {
         FlowClassifier::new(
-            FakeProcessResolver { result: process.map(str::to_string) },
-            FakeDnsResolver { result: dns.map(str::to_string) },
-            FakeDeviceLabelResolver { result: device_label.map(str::to_string) },
+            FakeProcessResolver {
+                result: process.map(str::to_string),
+            },
+            FakeDnsResolver {
+                result: dns.map(str::to_string),
+            },
+            FakeDeviceLabelResolver {
+                result: device_label.map(str::to_string),
+            },
         )
     }
 
@@ -302,22 +322,45 @@ mod tests {
     }
 
     #[test]
-    fn dns_sni_conflict_yields_ip_only() {
+    fn sni_overrides_stale_dns_cache_on_cdn_ip() {
+        // A CDN IP serves multiple domains. The DNS cache has one domain
+        // (stale, written by a different connection) but the current packet's
+        // SNI is authoritative. SNI wins.
+        let c = classifier(Some("curl"), Some("other-customer.com"), None);
+        let ctx = c.classify(&packet(
+            TransportProtocol::Tcp,
+            Some("api2.cursor.sh"),
+            None,
+        ));
+        assert_eq!(ctx.destination_domain.as_deref(), Some("api2.cursor.sh"));
+    }
+
+    #[test]
+    fn dns_cache_used_when_no_sni() {
+        // No SNI in packet → fall back to DNS cache.
         let c = classifier(Some("curl"), Some("example.com"), None);
-        let ctx = c.classify(&packet(TransportProtocol::Tcp, Some("other.com"), None));
-        assert_eq!(ctx.destination_domain, None);
+        let ctx = c.classify(&packet(TransportProtocol::Tcp, None, None));
+        assert_eq!(ctx.destination_domain.as_deref(), Some("example.com"));
     }
 
     #[test]
     fn quic_falls_back_to_dns_ignores_sni() {
         // QUIC with both sources: SNI is ignored, DNS is used.
         let c = classifier(Some("app"), Some("quic-cdn.com"), None);
-        let ctx = c.classify(&packet(TransportProtocol::Quic, Some("different.com"), None));
+        let ctx = c.classify(&packet(
+            TransportProtocol::Quic,
+            Some("different.com"),
+            None,
+        ));
         assert_eq!(ctx.destination_domain.as_deref(), Some("quic-cdn.com"));
 
         // QUIC with no DNS: domain is None regardless of SNI.
         let c2 = classifier(Some("app"), None, None);
-        let ctx2 = c2.classify(&packet(TransportProtocol::Quic, Some("different.com"), None));
+        let ctx2 = c2.classify(&packet(
+            TransportProtocol::Quic,
+            Some("different.com"),
+            None,
+        ));
         assert_eq!(ctx2.destination_domain, None);
     }
 

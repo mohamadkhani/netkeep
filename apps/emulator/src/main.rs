@@ -7,8 +7,8 @@ const DEFAULT_SOCKS_ADDR: &str = "127.0.0.1:1080";
 const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
 
 fn main() {
-    let socks_addr = std::env::var("LOGIGUARD_EMULATOR_ADDR")
-        .unwrap_or_else(|_| DEFAULT_SOCKS_ADDR.to_string());
+    let socks_addr =
+        std::env::var("LOGIGUARD_EMULATOR_ADDR").unwrap_or_else(|_| DEFAULT_SOCKS_ADDR.to_string());
     let socket_path =
         std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
 
@@ -29,4 +29,3 @@ fn main() {
         }
     }
 }
-

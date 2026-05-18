@@ -8,18 +8,34 @@ use serde::{Deserialize, Serialize};
 pub enum ControlRequest {
     AddRule(Rule),
     ListRules,
-    DeleteRule { id: String },
+    DeleteRule {
+        id: String,
+    },
     ListPending,
-    ListFlows { limit: usize },
-    RegisterUnknownFlow { flow: FlowContext, now_secs: u64 },
-    AwaitPendingDecision { pending_id: String },
-    ResolvePending { pending_id: String, action: RuleAction },
+    ListFlows {
+        limit: usize,
+    },
+    RegisterUnknownFlow {
+        flow: FlowContext,
+        now_secs: u64,
+    },
+    AwaitPendingDecision {
+        pending_id: String,
+    },
+    ResolvePending {
+        pending_id: String,
+        action: RuleAction,
+    },
     /// Resolve a pending decision and atomically install the rule in one request,
     /// eliminating the race window between two separate ResolvePending + AddRule calls.
-    ResolvePendingWithRule { pending_id: String, action: RuleAction, rule: Rule },
+    ResolvePendingWithRule {
+        pending_id: String,
+        action: RuleAction,
+        rule: Rule,
+    },
     Health,
     Unlock,
-    SubscribeToPending,  // NEW: Subscribe to push notifications
+    SubscribeToPending, // NEW: Subscribe to push notifications
     OpenRoutedTcp {
         host: String,
         port: u16,
@@ -27,13 +43,19 @@ pub enum ControlRequest {
     },
     ListEgresses,
     UpsertEgress(Egress),
-    DeleteEgress { id: String },
+    DeleteEgress {
+        id: String,
+    },
     // Proxy management
     UpsertProxy(ProxyConfig),
-    DeleteProxy { id: String },
+    DeleteProxy {
+        id: String,
+    },
     ListProxies,
     // NFQUEUE management
-    SetNfqueueEnabled { enabled: bool },
+    SetNfqueueEnabled {
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,11 +73,19 @@ pub enum ControlResponse {
     /// Returned when a flow immediately matches a stored rule.
     /// `route_target` is `Some` only when `action == Route`; it holds the
     /// first available target resolved from the rule's egress at decision time.
-    ImmediateVerdict { action: RuleAction, route_target: Option<RouteTarget> },
-    PendingStillWaiting { pending_id: String },
+    ImmediateVerdict {
+        action: RuleAction,
+        route_target: Option<RouteTarget>,
+    },
+    PendingStillWaiting {
+        pending_id: String,
+    },
     /// Returned after a pending decision is resolved.
     /// `route_target` is `Some` only when `action == Route`.
-    PendingResolved { action: RuleAction, route_target: Option<RouteTarget> },
+    PendingResolved {
+        action: RuleAction,
+        route_target: Option<RouteTarget>,
+    },
     Health {
         ready: bool,
         fail_close_active: bool,
@@ -69,7 +99,7 @@ pub enum ControlResponse {
         nfqueue_num: Option<u16>,
     },
     Unlocked,
-    SubscriptionAck,  // NEW: Confirms subscription established
+    SubscriptionAck, // NEW: Confirms subscription established
     RoutedTcpReady {
         listen_addr: String,
     },
@@ -85,12 +115,16 @@ pub enum ControlResponse {
 // NEW: Push notifications sent from daemon to subscribers
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PushNotification {
-    PendingCreated { decision: PendingDecision },
+    PendingCreated {
+        decision: PendingDecision,
+    },
     PendingResolved {
         pending_id: String,
         action: RuleAction,
     },
-    PendingExpired { pending_id: String },
+    PendingExpired {
+        pending_id: String,
+    },
 }
 
 pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
@@ -107,7 +141,7 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
         ControlRequest::ListFlows { limit } if *limit == 0 => {
             Err("flow list limit must be > 0".to_string())
         }
-        ControlRequest::SubscribeToPending => Ok(()),  // Always valid
+        ControlRequest::SubscribeToPending => Ok(()), // Always valid
         ControlRequest::DeleteEgress { id } if id.trim().is_empty() => {
             Err("egress id cannot be empty".to_string())
         }
@@ -150,8 +184,13 @@ mod tests {
 
     #[test]
     fn rejects_empty_delete_rule_id() {
-        let req = ControlRequest::DeleteRule { id: " ".to_string() };
-        assert_eq!(validate_request(&req), Err("rule id cannot be empty".to_string()));
+        let req = ControlRequest::DeleteRule {
+            id: " ".to_string(),
+        };
+        assert_eq!(
+            validate_request(&req),
+            Err("rule id cannot be empty".to_string())
+        );
     }
 
     #[test]
@@ -160,7 +199,10 @@ mod tests {
             pending_id: "".to_string(),
             action: RuleAction::Deny,
         };
-        assert_eq!(validate_request(&req), Err("pending id cannot be empty".to_string()));
+        assert_eq!(
+            validate_request(&req),
+            Err("pending id cannot be empty".to_string())
+        );
     }
 
     #[test]
@@ -168,13 +210,19 @@ mod tests {
         let req = ControlRequest::AwaitPendingDecision {
             pending_id: " ".to_string(),
         };
-        assert_eq!(validate_request(&req), Err("pending id cannot be empty".to_string()));
+        assert_eq!(
+            validate_request(&req),
+            Err("pending id cannot be empty".to_string())
+        );
     }
 
     #[test]
     fn rejects_zero_flow_list_limit() {
         let req = ControlRequest::ListFlows { limit: 0 };
-        assert_eq!(validate_request(&req), Err("flow list limit must be > 0".to_string()));
+        assert_eq!(
+            validate_request(&req),
+            Err("flow list limit must be > 0".to_string())
+        );
     }
 
     #[test]
@@ -188,7 +236,10 @@ mod tests {
         let req = ControlRequest::DeleteEgress {
             id: " ".to_string(),
         };
-        assert_eq!(validate_request(&req), Err("egress id cannot be empty".to_string()));
+        assert_eq!(
+            validate_request(&req),
+            Err("egress id cannot be empty".to_string())
+        );
     }
 
     #[test]

@@ -83,8 +83,7 @@ fn route_target_switch_changes_observable_behavior() -> Result<(), String> {
         return Ok(());
     }
 
-    let db_path =
-        env::var("LOGIGUARD_DB_PATH").unwrap_or_else(|_| "/tmp/logiguard.db".to_string());
+    let db_path = env::var("LOGIGUARD_DB_PATH").unwrap_or_else(|_| "/tmp/logiguard.db".to_string());
     let proxy = env::var("LOGIGUARD_SOCKS_PROXY")
         .unwrap_or_else(|_| "socks5h://127.0.0.1:1080".to_string());
     let tun_name =
@@ -154,10 +153,10 @@ fn route_target_switch_changes_observable_behavior() -> Result<(), String> {
 
     // Cleanup
     if let Some(id) = &created_rule_id {
-        let _ = sqlite_exec(&db_path, &format!(
-            "DELETE FROM rules WHERE id='{}';",
-            id.replace('\'', "''")
-        ));
+        let _ = sqlite_exec(
+            &db_path,
+            &format!("DELETE FROM rules WHERE id='{}';", id.replace('\'', "''")),
+        );
     }
 
     if tun_result == dev_result {

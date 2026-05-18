@@ -68,8 +68,15 @@ pub trait ProxyRepository {
 // Combined supertrait used by ControlService
 // ---------------------------------------------------------------------------
 
-pub trait Repository: RuleRepository + FlowRepository + PendingRepository + EgressRepository + ProxyRepository {}
-impl<T: RuleRepository + FlowRepository + PendingRepository + EgressRepository + ProxyRepository> Repository for T {}
+pub trait Repository:
+    RuleRepository + FlowRepository + PendingRepository + EgressRepository + ProxyRepository
+{
+}
+impl<
+        T: RuleRepository + FlowRepository + PendingRepository + EgressRepository + ProxyRepository,
+    > Repository for T
+{
+}
 
 // ---------------------------------------------------------------------------
 // In-memory implementation (used in tests)
@@ -102,7 +109,8 @@ impl RuleRepository for InMemoryRuleRepository {
     }
 
     fn purge_session_rules(&mut self) {
-        self.rules.retain(|_, v| v.duration == RuleDuration::Permanent);
+        self.rules
+            .retain(|_, v| v.duration == RuleDuration::Permanent);
     }
 }
 
@@ -152,7 +160,10 @@ impl EgressRepository for InMemoryRuleRepository {
     }
 
     fn get_default_egress(&self) -> Option<Egress> {
-        self.egresses.values().find(|e| e.is_system_default).cloned()
+        self.egresses
+            .values()
+            .find(|e| e.is_system_default)
+            .cloned()
     }
 }
 
@@ -431,12 +442,25 @@ impl RuleRepository for SqliteRuleRepository {
             Err(_) => return Vec::new(),
         };
         let mapped = match stmt.query_map([], |row| {
-            let action = i64_to_action(row.get::<_, i64>(2)?)
-                .ok_or(rusqlite::Error::InvalidColumnType(2, "action".to_string(), rusqlite::types::Type::Integer))?;
-            let duration = i64_to_duration(row.get::<_, i64>(3)?)
-                .ok_or(rusqlite::Error::InvalidColumnType(3, "duration".to_string(), rusqlite::types::Type::Integer))?;
+            let action =
+                i64_to_action(row.get::<_, i64>(2)?).ok_or(rusqlite::Error::InvalidColumnType(
+                    2,
+                    "action".to_string(),
+                    rusqlite::types::Type::Integer,
+                ))?;
+            let duration = i64_to_duration(row.get::<_, i64>(3)?).ok_or(
+                rusqlite::Error::InvalidColumnType(
+                    3,
+                    "duration".to_string(),
+                    rusqlite::types::Type::Integer,
+                ),
+            )?;
             let destination = parts_to_destination(row.get::<_, i64>(5)?, row.get::<_, String>(6)?)
-                .ok_or(rusqlite::Error::InvalidColumnType(5, "destination_kind".to_string(), rusqlite::types::Type::Integer))?;
+                .ok_or(rusqlite::Error::InvalidColumnType(
+                    5,
+                    "destination_kind".to_string(),
+                    rusqlite::types::Type::Integer,
+                ))?;
             Ok(Rule {
                 id: row.get(0)?,
                 enabled: row.get::<_, i64>(1)? != 0,
@@ -500,10 +524,19 @@ impl FlowRepository for SqliteRuleRepository {
             Err(_) => return Vec::new(),
         };
         let mapped = match stmt.query_map(params![limit as i64], |row| {
-            let protocol = i64_to_protocol(row.get::<_, i64>(5)?)
-                .ok_or(rusqlite::Error::InvalidColumnType(5, "protocol".to_string(), rusqlite::types::Type::Integer))?;
-            let state = i64_to_state(row.get::<_, i64>(6)?)
-                .ok_or(rusqlite::Error::InvalidColumnType(6, "state".to_string(), rusqlite::types::Type::Integer))?;
+            let protocol = i64_to_protocol(row.get::<_, i64>(5)?).ok_or(
+                rusqlite::Error::InvalidColumnType(
+                    5,
+                    "protocol".to_string(),
+                    rusqlite::types::Type::Integer,
+                ),
+            )?;
+            let state =
+                i64_to_state(row.get::<_, i64>(6)?).ok_or(rusqlite::Error::InvalidColumnType(
+                    6,
+                    "state".to_string(),
+                    rusqlite::types::Type::Integer,
+                ))?;
             Ok(FlowEvent {
                 id: row.get(0)?,
                 process_name: row.get(1)?,
@@ -540,10 +573,9 @@ impl PendingRepository for SqliteRuleRepository {
     }
 
     fn delete_pending(&mut self, id: &str) {
-        let _ = self.conn.execute(
-            "DELETE FROM pending_decisions WHERE id = ?1",
-            params![id],
-        );
+        let _ = self
+            .conn
+            .execute("DELETE FROM pending_decisions WHERE id = ?1", params![id]);
     }
 
     fn list_live_pending(&self, now_secs: u64) -> Vec<PendingDecision> {
@@ -622,9 +654,10 @@ impl EgressRepository for SqliteRuleRepository {
     }
 
     fn list_egresses(&self) -> Vec<Egress> {
-        let mut stmt = match self.conn.prepare(
-            "SELECT id, name, color, is_system_default FROM egresses",
-        ) {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT id, name, color, is_system_default FROM egresses")
+        {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -663,7 +696,8 @@ impl EgressRepository for SqliteRuleRepository {
     }
 
     fn get_egress(&self, id: &str) -> Option<Egress> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare("SELECT id, name, color, is_system_default FROM egresses WHERE id = ?1")
             .ok()?;
         let mut rows = stmt.query(params![id]).ok()?;
@@ -700,9 +734,10 @@ impl EgressRepository for SqliteRuleRepository {
 
 impl SqliteRuleRepository {
     fn load_targets(&self, egress_id: &str) -> Vec<RouteTarget> {
-        let mut stmt = match self.conn.prepare(
-            "SELECT target_kind, target_value FROM egress_targets WHERE egress_id = ?1",
-        ) {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT target_kind, target_value FROM egress_targets WHERE egress_id = ?1")
+        {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -718,10 +753,9 @@ impl SqliteRuleRepository {
     }
 
     fn load_dns_servers(&self, egress_id: &str) -> Vec<String> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT dns_server FROM egress_dns_servers WHERE egress_id = ?1 ORDER BY dns_server")
-        {
+        let mut stmt = match self.conn.prepare(
+            "SELECT dns_server FROM egress_dns_servers WHERE egress_id = ?1 ORDER BY dns_server",
+        ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -800,7 +834,8 @@ impl ProxyRepository for SqliteRuleRepository {
             Err(_) => return Vec::new(),
         };
         let mapped = match stmt.query_map([], |row| {
-            let protocol = i64_to_proxy_protocol(row.get::<_, i64>(2)?).unwrap_or(ProxyProtocol::Socks5);
+            let protocol =
+                i64_to_proxy_protocol(row.get::<_, i64>(2)?).unwrap_or(ProxyProtocol::Socks5);
             let auth = parts_to_auth(
                 row.get::<_, i64>(5)?,
                 row.get::<_, String>(6)?,
@@ -839,7 +874,8 @@ impl ProxyRepository for SqliteRuleRepository {
             .ok()?;
         let mut rows = stmt.query(params![id]).ok()?;
         let row = rows.next().ok()??;
-        let protocol = i64_to_proxy_protocol(row.get::<_, i64>(2).ok()?).unwrap_or(ProxyProtocol::Socks5);
+        let protocol =
+            i64_to_proxy_protocol(row.get::<_, i64>(2).ok()?).unwrap_or(ProxyProtocol::Socks5);
         let auth = parts_to_auth(
             row.get::<_, i64>(5).ok()?,
             row.get::<_, String>(6).ok()?,
@@ -865,7 +901,10 @@ impl ProxyRepository for SqliteRuleRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{DestinationMatcher, Egress, FlowContext, FlowDirection, FlowState, RouteTarget, RuleAction, RuleDuration, TransportProtocol};
+    use core_types::{
+        DestinationMatcher, Egress, FlowContext, FlowDirection, FlowState, RouteTarget, RuleAction,
+        RuleDuration, TransportProtocol,
+    };
     use tempfile::NamedTempFile;
 
     fn mk_rule(id: &str) -> Rule {
@@ -1041,7 +1080,13 @@ mod tests {
 
     // --- Egress tests ---
 
-    fn mk_egress(id: &str, name: &str, color: &str, targets: Vec<RouteTarget>, is_default: bool) -> Egress {
+    fn mk_egress(
+        id: &str,
+        name: &str,
+        color: &str,
+        targets: Vec<RouteTarget>,
+        is_default: bool,
+    ) -> Egress {
         Egress {
             id: id.to_string(),
             name: name.to_string(),
@@ -1056,7 +1101,13 @@ mod tests {
     #[test]
     fn in_memory_egress_crud() {
         let mut repo = InMemoryRuleRepository::default();
-        let eg = mk_egress("eg-vpn", "VPN", "#22c55e", vec![RouteTarget::Tun("tun0".into())], false);
+        let eg = mk_egress(
+            "eg-vpn",
+            "VPN",
+            "#22c55e",
+            vec![RouteTarget::Tun("tun0".into())],
+            false,
+        );
         repo.upsert_egress(&eg);
         assert_eq!(repo.list_egresses().len(), 1);
         assert_eq!(repo.get_egress("eg-vpn").unwrap().name, "VPN");
@@ -1067,7 +1118,13 @@ mod tests {
     #[test]
     fn in_memory_default_egress() {
         let mut repo = InMemoryRuleRepository::default();
-        repo.upsert_egress(&mk_egress("eg-def", "Default Route", "#6b7280", vec![], true));
+        repo.upsert_egress(&mk_egress(
+            "eg-def",
+            "Default Route",
+            "#6b7280",
+            vec![],
+            true,
+        ));
         repo.upsert_egress(&mk_egress("eg-vpn", "VPN", "#22c55e", vec![], false));
         let default = repo.get_default_egress().expect("should exist");
         assert_eq!(default.id, "eg-def");
@@ -1131,7 +1188,10 @@ mod tests {
         eg.dns_servers = vec!["1.1.1.1".into(), "8.8.8.8".into()];
         repo.upsert_egress(&eg);
         let loaded = repo.get_egress("eg-dns").expect("should exist");
-        assert_eq!(loaded.dns_servers, vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()]);
+        assert_eq!(
+            loaded.dns_servers,
+            vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()]
+        );
     }
 
     #[test]
@@ -1139,7 +1199,13 @@ mod tests {
         let file = NamedTempFile::new().expect("temp file");
         let path = file.path().to_string_lossy().to_string();
         let mut repo = SqliteRuleRepository::open(&path).expect("sqlite open");
-        repo.upsert_egress(&mk_egress("eg-def", "Default Route", "#6b7280", vec![], true));
+        repo.upsert_egress(&mk_egress(
+            "eg-def",
+            "Default Route",
+            "#6b7280",
+            vec![],
+            true,
+        ));
         repo.upsert_egress(&mk_egress("eg-vpn", "VPN", "#22c55e", vec![], false));
         let default = repo.get_default_egress().expect("should exist");
         assert_eq!(default.id, "eg-def");

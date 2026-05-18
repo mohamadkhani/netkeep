@@ -671,3 +671,19 @@ Root cause was compound — five interacting failure modes had to be solved toge
   - `docs/architecture.md`: design decisions #9 (managed routing) extended with in-table unreachable + transactional add_route; #11 rewritten as the three-chain reroute + POSTROUTING masquerade design with full rationale; #15 (egress seeding) gains the VPN-up gotcha note.
   - `docs/implementation-status.md`: Bug 12 entry with all five sub-fixes, file refs, and verification steps.
   - `develop.md`: this session log entry.
+
+### 2026-05-18 (session 32 — CDN multi-tenancy breaks domain detection)
+
+User reported that process name and domain detection randomly fail — the same application connecting to the same CDN IP sometimes shows `domain=None` while the very next connection to a different IP for the same service shows the correct domain.
+
+- [x] **Root cause: `SniDnsCache` is a 1:1 map (`IP → domain`) that cannot represent CDN multi-tenancy.** CDN IPs serve many domains. When `api2.cursor.sh` and `api3.cursor.sh` both resolve to the same Cloudflare IP `104.18.18.125`, the DNS snoop worker overwrites the cache entry. The next TLS ClientHello with SNI `api2.cursor.sh` hits the conflict check in `resolve_domain()` — DNS cache says `api3.cursor.sh` but SNI says `api2.cursor.sh`, so the code discards BOTH and returns `domain=None`. The SNI is authoritative (extracted from the actual packet), but the stale cache entry poisoned the comparison.
+
+  The race is also cross-thread: the DNS snoop worker runs on a separate thread and can overwrite the `SniDnsCache` entry *between* the NFQUEUE's `dns_cache.insert(sni)` (line 191) and `classify()`'s `dns_cache.lookup()` (line 160) — even within the same `decide()` call.
+
+- [x] **Fix.** `FlowClassifier::resolve_domain()` now trusts the per-packet SNI/Host when present and only falls back to the DNS cache when no per-packet hint is available. The old conflict check `(Some(dns), Some(sni)) => None` is removed — it was protecting against DNS spoofing but in practice the "spoofed" value was always just a different customer on the same CDN IP, which is harmless. QUIC still uses DNS-cache-only (SNI is encrypted in QUIC v1).
+
+  **File:** `crates/flow-classifier/src/lib.rs`.
+
+- [x] **Tests:** 1 test replaced with 2 (old `dns_sni_conflict_yields_ip_only` split into `sni_overrides_stale_dns_cache_on_cdn_ip` + `dns_cache_used_when_no_sni`). Workspace total **164 → 165** tests, all pass.
+
+- [x] **Documentation:** Updated `docs/nfqueue-domain-inference.md` (Domain Resolution Priority table rewritten). Updated `docs/architecture.md` design decision #3 (from "DNS/SNI conflict → IP-only" to "SNI is authoritative over DNS cache").

@@ -95,7 +95,12 @@ where
     FR: FlowRegistrar,
 {
     pub fn new(source: PS, classifier: C, sink: VS, registrar: FR) -> Self {
-        Self { source, classifier, sink, registrar }
+        Self {
+            source,
+            classifier,
+            sink,
+            registrar,
+        }
     }
 
     /// Process one packet. Returns `None` when the source is exhausted.
@@ -106,9 +111,9 @@ where
 
         let verdict = match &decision {
             FlowDecision::Immediate(RuleAction::Allow, _) => EnforcementVerdict::Allow,
-            FlowDecision::Immediate(RuleAction::Route, Some(target)) => {
-                EnforcementVerdict::Route { target: target.clone() }
-            }
+            FlowDecision::Immediate(RuleAction::Route, Some(target)) => EnforcementVerdict::Route {
+                target: target.clone(),
+            },
             // Route with no resolved target, Deny, Ask, or pending → drop (fail-close).
             FlowDecision::Immediate(RuleAction::Route, None)
             | FlowDecision::Immediate(RuleAction::Deny, _)
@@ -122,7 +127,11 @@ where
             fwmark: None,
         });
 
-        Some(ProcessResult { flow_id: event.flow_id, verdict, decision })
+        Some(ProcessResult {
+            flow_id: event.flow_id,
+            verdict,
+            decision,
+        })
     }
 }
 
@@ -138,7 +147,10 @@ pub struct MarkAllocator {
 
 impl MarkAllocator {
     pub fn new() -> Self {
-        Self { next_mark: 1, marks_by_target: HashMap::new() }
+        Self {
+            next_mark: 1,
+            marks_by_target: HashMap::new(),
+        }
     }
 
     pub fn mark_for_target(&mut self, target: &RouteTarget) -> u32 {
@@ -164,7 +176,10 @@ pub struct DryRunEnforcer<S: VerdictSink> {
 
 impl<S: VerdictSink> DryRunEnforcer<S> {
     pub fn new(sink: S) -> Self {
-        Self { sink, allocator: MarkAllocator::new() }
+        Self {
+            sink,
+            allocator: MarkAllocator::new(),
+        }
     }
 
     pub fn apply_verdict(
@@ -176,7 +191,11 @@ impl<S: VerdictSink> DryRunEnforcer<S> {
             EnforcementVerdict::Route { target } => Some(self.allocator.mark_for_target(target)),
             EnforcementVerdict::Allow | EnforcementVerdict::Deny => None,
         };
-        self.sink.apply(AppliedVerdict { flow_id: flow_id.to_string(), verdict, fwmark })
+        self.sink.apply(AppliedVerdict {
+            flow_id: flow_id.to_string(),
+            verdict,
+            fwmark,
+        })
     }
 
     pub fn sink_mut(&mut self) -> &mut S {
@@ -305,24 +324,16 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             // DNS queries must bypass NFQUEUE. If queued, they appear as flows to the DNS
             // server IP (not the actual destination) and block name resolution entirely,
             // preventing any domain from being reached.
-            script.push_str(
-                "add rule inet logiguard output_early udp dport 53 accept\n",
-            );
-            script.push_str(
-                "add rule inet logiguard output_early tcp dport 53 accept\n",
-            );
+            script.push_str("add rule inet logiguard output_early udp dport 53 accept\n");
+            script.push_str("add rule inet logiguard output_early tcp dport 53 accept\n");
             // ICMP and ICMPv6 must bypass NFQUEUE. These are layer-3 control
             // protocols with no TCP/UDP port — the process resolver cannot match
             // them to a user process. ICMPv6 also includes NDP (types 133–137)
             // which the kernel generates autonomously; queuing it would produce
             // spurious "unknown process" dialogs and blocking it would break IPv6
             // neighbor discovery entirely.
-            script.push_str(
-                "add rule inet logiguard output_early meta l4proto icmp accept\n",
-            );
-            script.push_str(
-                "add rule inet logiguard output_early meta l4proto icmpv6 accept\n",
-            );
+            script.push_str("add rule inet logiguard output_early meta l4proto icmp accept\n");
+            script.push_str("add rule inet logiguard output_early meta l4proto icmpv6 accept\n");
             script.push_str(&format!(
                 "add rule inet logiguard output_early queue num {q}\n",
             ));
@@ -364,9 +375,7 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
                 "add chain inet logiguard forward { type filter hook forward priority 0; policy accept; }\n",
             );
             // Exclude loopback from forward chain
-            script.push_str(
-                "add rule inet logiguard forward oifname \"lo\" accept\n",
-            );
+            script.push_str("add rule inet logiguard forward oifname \"lo\" accept\n");
             script.push_str(&format!(
                 "add rule inet logiguard forward ip daddr 127.0.0.0/8 accept\n",
             ));
@@ -376,15 +385,9 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             script.push_str(
                 "add rule inet logiguard forward ip6 daddr ::ffff:7f00:0000/104 accept\n",
             );
-            script.push_str(
-                "add rule inet logiguard forward meta l4proto icmp accept\n",
-            );
-            script.push_str(
-                "add rule inet logiguard forward meta l4proto icmpv6 accept\n",
-            );
-            script.push_str(&format!(
-                "add rule inet logiguard forward queue num {q}\n",
-            ));
+            script.push_str("add rule inet logiguard forward meta l4proto icmp accept\n");
+            script.push_str("add rule inet logiguard forward meta l4proto icmpv6 accept\n");
+            script.push_str(&format!("add rule inet logiguard forward queue num {q}\n",));
 
             // INPUT chain: passively snoop DNS responses (UDP src_port 53) on a
             // second NFQUEUE queue (queue_num + 1) with `bypass` so that if the
@@ -489,7 +492,9 @@ pub struct SystemRouteManager {
 
 impl SystemRouteManager {
     pub fn new() -> Self {
-        Self { installed: std::sync::Mutex::new(Vec::new()) }
+        Self {
+            installed: std::sync::Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -653,18 +658,29 @@ impl FakeBootstrap {
         self.setup_count.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub fn teardown_count(&self) -> u32 {
-        self.teardown_count.load(std::sync::atomic::Ordering::SeqCst)
+        self.teardown_count
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
 impl NftablesBootstrap for FakeBootstrap {
     fn setup(&self, _queue_num: Option<u16>, _route_mark_base: u32) -> Result<(), String> {
-        self.setup_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if self.fail { Err("fake setup failure".to_string()) } else { Ok(()) }
+        self.setup_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail {
+            Err("fake setup failure".to_string())
+        } else {
+            Ok(())
+        }
     }
     fn teardown(&self) -> Result<(), String> {
-        self.teardown_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if self.fail { Err("fake teardown failure".to_string()) } else { Ok(()) }
+        self.teardown_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail {
+            Err("fake teardown failure".to_string())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -692,7 +708,11 @@ impl FakePacketSource {
 
 impl PacketSource for FakePacketSource {
     fn next_packet(&mut self) -> Option<PacketEvent> {
-        if self.packets.is_empty() { None } else { Some(self.packets.remove(0)) }
+        if self.packets.is_empty() {
+            None
+        } else {
+            Some(self.packets.remove(0))
+        }
     }
 }
 
@@ -761,7 +781,10 @@ mod tests {
     }
 
     fn event(id: &str) -> PacketEvent {
-        PacketEvent { flow_id: id.to_string(), raw: raw_packet() }
+        PacketEvent {
+            flow_id: id.to_string(),
+            raw: raw_packet(),
+        }
     }
 
     fn processor(
@@ -770,7 +793,9 @@ mod tests {
     ) -> PacketProcessor<FakePacketSource, FakeClassifier, RecordingSink, FakeFlowRegistrar> {
         PacketProcessor::new(
             FakePacketSource::new(events),
-            FakeClassifier { result: classified_flow() },
+            FakeClassifier {
+                result: classified_flow(),
+            },
             RecordingSink::default(),
             FakeFlowRegistrar::new(decisions),
         )
@@ -834,7 +859,9 @@ mod tests {
     #[test]
     fn deny_verdict_has_no_mark() {
         let mut enforcer = DryRunEnforcer::new(RecordingSink::default());
-        enforcer.apply_verdict("f1", EnforcementVerdict::Deny).expect("apply");
+        enforcer
+            .apply_verdict("f1", EnforcementVerdict::Deny)
+            .expect("apply");
         assert_eq!(enforcer.sink_mut().applied[0].fwmark, None);
     }
 
@@ -842,8 +869,22 @@ mod tests {
     fn route_verdict_assigns_stable_mark_per_target() {
         let mut enforcer = DryRunEnforcer::new(RecordingSink::default());
         let target = RouteTarget::Tun("tun0".to_string());
-        enforcer.apply_verdict("f1", EnforcementVerdict::Route { target: target.clone() }).expect("apply");
-        enforcer.apply_verdict("f2", EnforcementVerdict::Route { target: target.clone() }).expect("apply");
+        enforcer
+            .apply_verdict(
+                "f1",
+                EnforcementVerdict::Route {
+                    target: target.clone(),
+                },
+            )
+            .expect("apply");
+        enforcer
+            .apply_verdict(
+                "f2",
+                EnforcementVerdict::Route {
+                    target: target.clone(),
+                },
+            )
+            .expect("apply");
         let m1 = enforcer.sink_mut().applied[0].fwmark.expect("mark1");
         let m2 = enforcer.sink_mut().applied[1].fwmark.expect("mark2");
         assert_eq!(m1, m2);
@@ -852,8 +893,22 @@ mod tests {
     #[test]
     fn different_targets_get_different_marks() {
         let mut enforcer = DryRunEnforcer::new(RecordingSink::default());
-        enforcer.apply_verdict("f1", EnforcementVerdict::Route { target: RouteTarget::Tun("tun0".to_string()) }).expect("apply");
-        enforcer.apply_verdict("f2", EnforcementVerdict::Route { target: RouteTarget::Device("eth1".to_string()) }).expect("apply");
+        enforcer
+            .apply_verdict(
+                "f1",
+                EnforcementVerdict::Route {
+                    target: RouteTarget::Tun("tun0".to_string()),
+                },
+            )
+            .expect("apply");
+        enforcer
+            .apply_verdict(
+                "f2",
+                EnforcementVerdict::Route {
+                    target: RouteTarget::Device("eth1".to_string()),
+                },
+            )
+            .expect("apply");
         let m1 = enforcer.sink_mut().applied[0].fwmark.expect("mark1");
         let m2 = enforcer.sink_mut().applied[1].fwmark.expect("mark2");
         assert_ne!(m1, m2);
@@ -878,7 +933,10 @@ mod tests {
 
     #[test]
     fn fake_bootstrap_propagates_failure() {
-        let b = FakeBootstrap { fail: true, ..Default::default() };
+        let b = FakeBootstrap {
+            fail: true,
+            ..Default::default()
+        };
         assert!(b.setup(Some(0), ROUTE_MARK_BASE).is_err());
         assert!(b.teardown().is_err());
     }
@@ -888,7 +946,10 @@ mod tests {
         let target = RouteTarget::Tun("tun0".to_string());
         let mut p = processor(
             vec![event("f-route")],
-            vec![FlowDecision::Immediate(RuleAction::Route, Some(target.clone()))],
+            vec![FlowDecision::Immediate(
+                RuleAction::Route,
+                Some(target.clone()),
+            )],
         );
         let result = p.process_next(1000).expect("result");
         assert_eq!(result.verdict, EnforcementVerdict::Route { target });

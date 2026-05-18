@@ -1,6 +1,6 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 164 tests passing (`cargo test --workspace`)
+**Test Status:** 165 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
 **Last Updated:** 2026-05-17
 
@@ -281,6 +281,14 @@
 - **DB migration** — `ALTER TABLE rules ADD COLUMN process_exe TEXT NULL` on startup.
 - **Tests:** 164 total (was 163). 1 new test for `ss_local_matches` IPv4-mapped handling.
 - **Docs:** `docs/process-resolver.md` lookup chain and ProcessInfo section updated; `docs/process-attribution-races.md` Bug 24 entry added.
+
+**Bug 25:** Domain detection randomly fails for CDN IPs that serve multiple domains.
+
+- **Root cause:** `SniDnsCache` is a 1:1 map (`IP → domain`). CDN IPs (Cloudflare, CloudFront, etc.) serve many domains. When `api2.cursor.sh` and `api3.cursor.sh` both resolve to the same IP, the DNS snoop worker overwrites the cache. The next TLS ClientHello with a different SNI triggers the conflict check in `resolve_domain()` — DNS cache says one domain, SNI says another — both are discarded, yielding `domain=None`. The race is also cross-thread: the DNS snoop worker can overwrite the cache between the NFQUEUE's `insert()` and `classify()`'s `lookup()`.
+- **Fix:** `FlowClassifier::resolve_domain()` now trusts the per-packet SNI/Host when present (authoritative, extracted from the actual packet). DNS cache is only used as a fallback when no SNI/Host is in the packet. The conflict check `(Some(dns), Some(sni)) => None` is removed — it was protecting against DNS spoofing but in practice the "spoofed" value was always a different customer on the same CDN IP. QUIC still uses DNS-cache-only (SNI encrypted in QUIC v1).
+- **Files:** `crates/flow-classifier/src/lib.rs`.
+- **Tests:** +1 (old conflict test split into 2). 164 → 165.
+- **Docs:** `docs/nfqueue-domain-inference.md` Domain Resolution Priority rewritten; `docs/architecture.md` design decision #3 rewritten.
 
 ## Settings UI Polish (2026-05-16)
 
@@ -581,7 +589,7 @@ LOGIGUARD_NFQUEUE=0 \
 ### Current
 
 - Workspace compiles cleanly
-- 143 tests passing (`cargo test --workspace`)
+- 165 tests passing (`cargo test --workspace`)
 - No CI pipeline set up yet
 
 ### Planned
@@ -595,7 +603,7 @@ LOGIGUARD_NFQUEUE=0 \
 
 - **Lines of code (Rust):** ~6,000 (crates + apps)
 - **Test code:** ~2,500 (unit + integration)
-- **Test count:** 143 passing
+- **Test count:** 165 passing
 - **Crates:** 7 (core, policy, decision, flow, enforcer, state, control)
 - **Apps:** 3 (daemon, CLI, GPUI)
 - **Database tables:** 6 (rules, flow_events, pending_decisions, egresses, egress_targets, egress_dns_servers, proxies)

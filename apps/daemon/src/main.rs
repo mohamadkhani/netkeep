@@ -1,10 +1,10 @@
+use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write, copy};
+use std::io::{copy, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::fs::PermissionsExt;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,18 +12,17 @@ use control_api::{ControlRequest, ControlResponse, PushNotification};
 use control_service::{ControlService, HealthConfig, SharedService};
 use core_types::{Egress, RouteTarget};
 use decision_engine::{DecisionEngine, OverflowPolicy};
-use enforcer::{NftablesBootstrap, RouteManager, SystemNftablesBootstrap, SystemRouteManager, ROUTE_MARK_BASE};
 use enforcer::dns_snoop::DnsSnoopWorker;
 use enforcer::nfqueue::NfqueueProcessor;
+use enforcer::{
+    NftablesBootstrap, RouteManager, SystemNftablesBootstrap, SystemRouteManager, ROUTE_MARK_BASE,
+};
 use flow_classifier::{
-    FlowClassifier, FakeDeviceLabelResolver, SniDnsCache,
-    proc_resolver::ProcProcessResolver,
+    proc_resolver::ProcProcessResolver, FakeDeviceLabelResolver, FlowClassifier, SniDnsCache,
 };
+use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
 use hickory_resolver::Resolver;
-use hickory_resolver::config::{
-    NameServerConfig, Protocol, ResolverConfig, ResolverOpts,
-};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use state_store::{EgressRepository, PendingRepository, RuleRepository, SqliteRuleRepository};
 use tokio::sync::broadcast;
 
@@ -111,15 +110,13 @@ fn now_secs() -> u64 {
 /// Detect local interfaces and build initial egress records.
 /// Includes:
 
-
 /// Returns true if the process `peer_pid` has stdin on a physical console
 /// (/dev/tty[0-9]* or /dev/console), not a pseudo-terminal (/dev/pts/*).
 fn is_physical_console(peer_pid: i32) -> bool {
     match fs::read_link(format!("/proc/{}/fd/0", peer_pid)) {
         Ok(target) => {
             let s = target.to_string_lossy();
-            (s.starts_with("/dev/tty") && !s.starts_with("/dev/pts"))
-                || s == "/dev/console"
+            (s.starts_with("/dev/tty") && !s.starts_with("/dev/pts")) || s == "/dev/console"
         }
         Err(_) => false,
     }
@@ -128,7 +125,11 @@ fn is_physical_console(peer_pid: i32) -> bool {
 fn peer_pid(stream: &UnixStream) -> Option<i32> {
     use std::os::unix::io::AsRawFd;
     let fd = stream.as_raw_fd();
-    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     let ret = unsafe {
         libc::getsockopt(
@@ -139,7 +140,11 @@ fn peer_pid(stream: &UnixStream) -> Option<i32> {
             &mut len,
         )
     };
-    if ret == 0 { Some(cred.pid) } else { None }
+    if ret == 0 {
+        Some(cred.pid)
+    } else {
+        None
+    }
 }
 
 fn relay_bidirectional(client: TcpStream, upstream: TcpStream) -> Result<(), String> {
@@ -149,8 +154,12 @@ fn relay_bidirectional(client: TcpStream, upstream: TcpStream) -> Result<(), Str
     let mut u_write = upstream;
     let t1 = std::thread::spawn(move || copy(&mut c_read, &mut u_write).map_err(|e| e.to_string()));
     let t2 = std::thread::spawn(move || copy(&mut u_read, &mut c_write).map_err(|e| e.to_string()));
-    let _ = t1.join().map_err(|_| "relay thread join failed".to_string())??;
-    let _ = t2.join().map_err(|_| "relay thread join failed".to_string())??;
+    let _ = t1
+        .join()
+        .map_err(|_| "relay thread join failed".to_string())??;
+    let _ = t2
+        .join()
+        .map_err(|_| "relay thread join failed".to_string())??;
     Ok(())
 }
 
@@ -163,7 +172,8 @@ fn route_target_to_parts(target: &RouteTarget) -> (i64, &str) {
 }
 
 fn load_dns_servers_for_target(db_path: &str, target: &RouteTarget) -> Result<Vec<String>, String> {
-    let conn = Connection::open(db_path).map_err(|e| format!("open db for egress dns failed: {e}"))?;
+    let conn =
+        Connection::open(db_path).map_err(|e| format!("open db for egress dns failed: {e}"))?;
     let (target_kind, target_value) = route_target_to_parts(target);
     let mut stmt = conn
         .prepare(
@@ -175,7 +185,9 @@ fn load_dns_servers_for_target(db_path: &str, target: &RouteTarget) -> Result<Ve
         )
         .map_err(|e| format!("prepare egress dns query failed: {e}"))?;
     let mapped = stmt
-        .query_map(params![target_kind, target_value], |row| row.get::<_, String>(0))
+        .query_map(params![target_kind, target_value], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(|e| format!("query egress dns failed: {e}"))?;
     Ok(mapped.filter_map(Result::ok).collect())
 }
@@ -227,7 +239,10 @@ fn resolve_socket_addrs(
         let dns_servers = load_dns_servers_for_target(db_path, target)?;
         if !dns_servers.is_empty() {
             let ips = resolve_with_dns_servers(host, &dns_servers)?;
-            let addrs: Vec<SocketAddr> = ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
+            let addrs: Vec<SocketAddr> = ips
+                .into_iter()
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect();
             eprintln!(
                 "routed dns: host={host} target={target:?} resolvers={dns_servers:?} addrs={addrs:?}"
             );
@@ -242,16 +257,17 @@ fn resolve_socket_addrs(
     if socket_addrs.is_empty() {
         return Err(format!("no address found for {addr}"));
     }
-    eprintln!(
-        "routed dns: host={host} target={target:?} resolvers=system addrs={socket_addrs:?}"
-    );
+    eprintln!("routed dns: host={host} target={target:?} resolvers=system addrs={socket_addrs:?}");
     Ok(socket_addrs)
 }
 
 #[cfg(target_os = "linux")]
 fn linux_socket_bind_to_device(fd: i32, iface: &str) -> Result<(), std::io::Error> {
     let cname = std::ffi::CString::new(iface).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "interface name contains NUL")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "interface name contains NUL",
+        )
     })?;
     let ret = unsafe {
         libc::setsockopt(
@@ -381,7 +397,11 @@ fn route_probe_for(ip: &str) -> Option<String> {
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let line = text.lines().next().unwrap_or_default().trim().to_string();
-    if line.is_empty() { None } else { Some(line) }
+    if line.is_empty() {
+        None
+    } else {
+        Some(line)
+    }
 }
 
 /// Route lookup **with** SO_MARK — reflects policy routing for our routed connects (unmarked `ip route get` follows default route only).
@@ -393,7 +413,11 @@ fn route_probe_marked(ip: &str, mark: u32) -> Option<String> {
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let line = text.lines().next().unwrap_or_default().trim().to_string();
-    if line.is_empty() { None } else { Some(line) }
+    if line.is_empty() {
+        None
+    } else {
+        Some(line)
+    }
 }
 
 fn fwmark_for_route_probe(target: &RouteTarget) -> Option<u32> {
@@ -449,7 +473,10 @@ fn connect_via_tun(addrs: &[SocketAddr], iface: &str) -> Result<TcpStream, Strin
                 std::mem::size_of::<u32>() as u32,
             );
             if ret < 0 {
-                return Err(format!("SO_MARK failed for tun {iface} mark={mark}: {}", std::io::Error::last_os_error()));
+                return Err(format!(
+                    "SO_MARK failed for tun {iface} mark={mark}: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
         }
         let sock_addr: socket2::SockAddr = (*sockaddr).into();
@@ -527,7 +554,9 @@ fn detect_default_iface() -> Option<String> {
 /// Return all TUN-type interfaces on the system (type=65534 in sysfs).
 /// Excludes loopback. Used for initial egress seeding.
 fn detect_tun_ifaces() -> Vec<String> {
-    let Ok(entries) = fs::read_dir("/sys/class/net") else { return vec![] };
+    let Ok(entries) = fs::read_dir("/sys/class/net") else {
+        return vec![];
+    };
     let mut ifaces = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -544,7 +573,12 @@ fn detect_tun_ifaces() -> Vec<String> {
     ifaces
 }
 
-fn open_routed_tcp(host: String, port: u16, target: RouteTarget, db_path: String) -> Result<String, String> {
+fn open_routed_tcp(
+    host: String,
+    port: u16,
+    target: RouteTarget,
+    db_path: String,
+) -> Result<String, String> {
     // Resolve and connect upstream synchronously so any failure is reported
     // to the emulator as a ControlResponse::Error *before* RoutedTcpReady is
     // sent.  Previously the connect happened inside the relay thread, so the
@@ -572,7 +606,10 @@ fn open_routed_tcp(host: String, port: u16, target: RouteTarget, db_path: String
     }?;
 
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let listen_addr = listener.local_addr().map_err(|e| e.to_string())?.to_string();
+    let listen_addr = listener
+        .local_addr()
+        .map_err(|e| e.to_string())?
+        .to_string();
     std::thread::spawn(move || {
         let (client, _) = match listener.accept() {
             Ok(v) => v,
@@ -707,7 +744,9 @@ fn handle_client(
             Err(e) => ControlResponse::Error(e),
         }
     } else {
-        let mut svc = service.lock().map_err(|_| "service lock poisoned".to_string())?;
+        let mut svc = service
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?;
         svc.handle(request)
     };
 
@@ -760,7 +799,10 @@ fn main() {
     // Ensure the parent directory exists before SQLite tries to open the file.
     if let Some(parent) = std::path::Path::new(&db_path).parent() {
         if let Err(e) = fs::create_dir_all(parent) {
-            eprintln!("warning: could not create db directory {}: {e}", parent.display());
+            eprintln!(
+                "warning: could not create db directory {}: {e}",
+                parent.display()
+            );
         }
     }
     let default_timeout_secs =
@@ -774,7 +816,10 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(ROUTE_MARK_BASE);
     init_route_policy(route_mark_base);
-    println!("route mark base: {route_mark_base} (table base: {})", 10000 + route_mark_base);
+    println!(
+        "route mark base: {route_mark_base} (table base: {})",
+        10000 + route_mark_base
+    );
 
     let _ = fs::remove_file(&socket_path);
     let listener = match UnixListener::bind(&socket_path) {
@@ -819,7 +864,9 @@ fn main() {
     // On first run (no user-defined egresses exist yet), seed useful egresses:
     // one LAN egress for the default-route interface, plus one egress per TUN
     // interface found on the system (WireGuard, throne, etc.).
-    let user_egresses: Vec<_> = repo.list_egresses().into_iter()
+    let user_egresses: Vec<_> = repo
+        .list_egresses()
+        .into_iter()
         .filter(|e| !e.is_system_default)
         .collect();
     if user_egresses.is_empty() {
@@ -857,7 +904,7 @@ fn main() {
             quic_timeout_secs,
             other_timeout_secs,
         },
-        notification_tx.clone(),  // Pass sender to service
+        notification_tx.clone(), // Pass sender to service
     )));
 
     {

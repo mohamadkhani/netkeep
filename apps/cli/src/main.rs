@@ -1,8 +1,11 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
-use core_types::{DestinationMatcher, FlowContext, FlowDirection, Rule, RuleAction, RuleDuration, TransportProtocol};
 use control_api::{ControlRequest, ControlResponse};
+use core_types::{
+    DestinationMatcher, FlowContext, FlowDirection, Rule, RuleAction, RuleDuration,
+    TransportProtocol,
+};
 use serde_json::json;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
@@ -88,7 +91,9 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                 Some("ask") => RuleAction::Ask,
                 Some("route") => RuleAction::Route,
                 Some(other) => {
-                    return Err(format!("unknown action: {other}; use allow, deny, ask, or route"))
+                    return Err(format!(
+                        "unknown action: {other}; use allow, deny, ask, or route"
+                    ))
                 }
                 None => RuleAction::Allow,
             };
@@ -132,7 +137,9 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                 return Err("usage: delete-rule <id>".to_string());
             }
             Ok((
-                ControlRequest::DeleteRule { id: cmd_args[1].clone() },
+                ControlRequest::DeleteRule {
+                    id: cmd_args[1].clone(),
+                },
                 output_mode,
             ))
         }
@@ -153,7 +160,11 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                 "other" => TransportProtocol::Other,
                 _ => return Err("protocol must be one of: tcp, udp, quic, other".to_string()),
             };
-            let domain = if cmd_args[3] == "-" { None } else { Some(cmd_args[3].clone()) };
+            let domain = if cmd_args[3] == "-" {
+                None
+            } else {
+                Some(cmd_args[3].clone())
+            };
             Ok((
                 ControlRequest::RegisterUnknownFlow {
                     flow: FlowContext {
@@ -324,12 +335,7 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
                         };
                         format!(
                             "{} name={} default={} available={} targets={:?} dns={}",
-                            e.id,
-                            e.name,
-                            e.is_system_default,
-                            e.is_available,
-                            e.targets,
-                            dns,
+                            e.id, e.name, e.is_system_default, e.is_available, e.targets, dns,
                         )
                     })
                     .collect::<Vec<_>>()
@@ -411,14 +417,15 @@ mod tests {
 
     #[test]
     fn add_rule_domain_exact_default_action_duration() {
-        let args = ["add-rule", "r1", "example.com"]
-            .map(String::from)
-            .to_vec();
+        let args = ["add-rule", "r1", "example.com"].map(String::from).to_vec();
         let (req, _) = parse_request(&args).expect("must parse");
         match req {
             ControlRequest::AddRule(rule) => {
                 assert_eq!(rule.id, "r1");
-                assert_eq!(rule.destination, DestinationMatcher::DomainExact("example.com".to_string()));
+                assert_eq!(
+                    rule.destination,
+                    DestinationMatcher::DomainExact("example.com".to_string())
+                );
                 assert_eq!(rule.action, RuleAction::Allow);
                 assert_eq!(rule.duration, RuleDuration::UntilRestart);
                 assert!(rule.process_name.is_none());
@@ -430,10 +437,15 @@ mod tests {
     #[test]
     fn add_rule_deny_permanent_with_process() {
         let args = [
-            "add-rule", "r1", "ads.google.com",
-            "--action", "deny",
-            "--duration", "permanent",
-            "--process", "firefox",
+            "add-rule",
+            "r1",
+            "ads.google.com",
+            "--action",
+            "deny",
+            "--duration",
+            "permanent",
+            "--process",
+            "firefox",
         ]
         .map(String::from)
         .to_vec();
@@ -450,7 +462,9 @@ mod tests {
 
     #[test]
     fn add_rule_wildcard_destination_detected() {
-        let args = ["add-rule", "r1", "*.example.com"].map(String::from).to_vec();
+        let args = ["add-rule", "r1", "*.example.com"]
+            .map(String::from)
+            .to_vec();
         let (req, _) = parse_request(&args).expect("must parse");
         match req {
             ControlRequest::AddRule(rule) => {
@@ -471,7 +485,10 @@ mod tests {
         let (req, _) = parse_request(&args).expect("must parse");
         match req {
             ControlRequest::AddRule(rule) => {
-                assert_eq!(rule.destination, DestinationMatcher::Cidr("10.0.0.0/8".to_string()));
+                assert_eq!(
+                    rule.destination,
+                    DestinationMatcher::Cidr("10.0.0.0/8".to_string())
+                );
                 assert_eq!(rule.action, RuleAction::Deny);
             }
             _ => panic!(),
@@ -484,7 +501,10 @@ mod tests {
         let (req, _) = parse_request(&args).expect("must parse");
         match req {
             ControlRequest::AddRule(rule) => {
-                assert_eq!(rule.destination, DestinationMatcher::IpExact("1.1.1.1".to_string()));
+                assert_eq!(
+                    rule.destination,
+                    DestinationMatcher::IpExact("1.1.1.1".to_string())
+                );
             }
             _ => panic!(),
         }
@@ -494,7 +514,12 @@ mod tests {
     fn parses_list_flows_default_limit() {
         let args = ["list-flows"].map(String::from).to_vec();
         let (req, _) = parse_request(&args).expect("must parse");
-        assert_eq!(req, ControlRequest::ListFlows { limit: DEFAULT_FLOW_LIST_LIMIT });
+        assert_eq!(
+            req,
+            ControlRequest::ListFlows {
+                limit: DEFAULT_FLOW_LIST_LIMIT
+            }
+        );
     }
 
     #[test]
@@ -515,7 +540,16 @@ mod tests {
     fn parses_delete_rule_request() {
         let args = ["delete-rule", "r1"].map(String::from).to_vec();
         let (req, _) = parse_request(&args).expect("must parse");
-        assert_eq!(req, (ControlRequest::DeleteRule { id: "r1".to_string() }, OutputMode::Text).0);
+        assert_eq!(
+            req,
+            (
+                ControlRequest::DeleteRule {
+                    id: "r1".to_string()
+                },
+                OutputMode::Text
+            )
+                .0
+        );
     }
 
     #[test]
@@ -541,7 +575,9 @@ mod tests {
 
     #[test]
     fn parses_resolve_pending_request() {
-        let args = ["resolve-pending", "pending-1", "deny"].map(String::from).to_vec();
+        let args = ["resolve-pending", "pending-1", "deny"]
+            .map(String::from)
+            .to_vec();
         let (req, _) = parse_request(&args).expect("must parse");
         assert_eq!(
             req,
@@ -579,10 +615,15 @@ mod tests {
     #[test]
     fn add_rule_route_action_with_egress() {
         let args = [
-            "add-rule", "r1", "example.com",
-            "--action", "route",
-            "--egress", "eg-vpn",
-            "--duration", "permanent",
+            "add-rule",
+            "r1",
+            "example.com",
+            "--action",
+            "route",
+            "--egress",
+            "eg-vpn",
+            "--duration",
+            "permanent",
         ]
         .map(String::from)
         .to_vec();

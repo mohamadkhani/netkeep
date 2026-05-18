@@ -7,7 +7,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{FlowContext, FlowDirection, RouteTarget, RuleAction, TransportProtocol};
 
-pub fn send_control_request(socket_path: &str, request: &ControlRequest) -> Result<ControlResponse, String> {
+pub fn send_control_request(
+    socket_path: &str,
+    request: &ControlRequest,
+) -> Result<ControlResponse, String> {
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|e| format!("failed to connect to daemon socket {socket_path}: {e}"))?;
     let payload = serde_json::to_string(request).map_err(|e| e.to_string())?;
@@ -37,7 +40,9 @@ pub fn parse_socks5_target(stream: &mut TcpStream) -> Result<(String, u16), Stri
     stream.write_all(&[0x05, 0x00]).map_err(|e| e.to_string())?;
 
     let mut req_header = [0u8; 4];
-    stream.read_exact(&mut req_header).map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut req_header)
+        .map_err(|e| e.to_string())?;
     if req_header[0] != 0x05 || req_header[1] != 0x01 {
         return Err("only SOCKS5 CONNECT is supported".to_string());
     }
@@ -64,7 +69,9 @@ pub fn parse_socks5_target(stream: &mut TcpStream) -> Result<(String, u16), Stri
         _ => return Err("unsupported address type".to_string()),
     };
     let mut port_buf = [0u8; 2];
-    stream.read_exact(&mut port_buf).map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut port_buf)
+        .map_err(|e| e.to_string())?;
     let port = u16::from_be_bytes(port_buf);
     Ok((host, port))
 }
@@ -97,8 +104,12 @@ pub fn relay_bidirectional(client: TcpStream, upstream: TcpStream) -> Result<(),
     let t1 = thread::spawn(move || copy(&mut c_read, &mut u_write).map_err(|e| e.to_string()));
     let t2 = thread::spawn(move || copy(&mut u_read, &mut c_write).map_err(|e| e.to_string()));
 
-    let _ = t1.join().map_err(|_| "relay thread join failed".to_string())??;
-    let _ = t2.join().map_err(|_| "relay thread join failed".to_string())??;
+    let _ = t1
+        .join()
+        .map_err(|_| "relay thread join failed".to_string())??;
+    let _ = t2
+        .join()
+        .map_err(|_| "relay thread join failed".to_string())??;
     Ok(())
 }
 
@@ -194,16 +205,26 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
             route_target,
             ..
         } => {
-            let upstream = connect_upstream(&host, port, route_target.as_ref(), socket_path).map_err(|e| {
-                let _ = fail_reply(&mut stream);
-                e
-            })?;
+            let upstream = connect_upstream(&host, port, route_target.as_ref(), socket_path)
+                .map_err(|e| {
+                    let _ = fail_reply(&mut stream);
+                    e
+                })?;
             success_reply(&mut stream)?;
             relay_bidirectional(stream, upstream)
         }
-        ControlResponse::PendingCreated { pending_id, deadline_at_secs, .. } => {
-            wait_for_pending_and_continue(stream, socket_path, &pending_id, deadline_at_secs, host, port)
-        }
+        ControlResponse::PendingCreated {
+            pending_id,
+            deadline_at_secs,
+            ..
+        } => wait_for_pending_and_continue(
+            stream,
+            socket_path,
+            &pending_id,
+            deadline_at_secs,
+            host,
+            port,
+        ),
         _ => {
             deny_reply(&mut stream)?;
             Ok(())
@@ -270,10 +291,11 @@ fn wait_for_pending_and_continue(
                 route_target,
                 ..
             } => {
-                let upstream = connect_upstream(&host, port, route_target.as_ref(), socket_path).map_err(|e| {
-                    let _ = fail_reply(&mut stream);
-                    e
-                })?;
+                let upstream = connect_upstream(&host, port, route_target.as_ref(), socket_path)
+                    .map_err(|e| {
+                        let _ = fail_reply(&mut stream);
+                        e
+                    })?;
                 success_reply(&mut stream)?;
                 return relay_bidirectional(stream, upstream);
             }
@@ -284,4 +306,3 @@ fn wait_for_pending_and_continue(
         }
     }
 }
-

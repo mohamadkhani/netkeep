@@ -1,4 +1,4 @@
-use gpui::{FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px};
+use gpui::{div, px, FontWeight, IntoElement, ParentElement, SharedString, Styled};
 use gpui_component::{h_flex, v_flex};
 
 use crate::colors;

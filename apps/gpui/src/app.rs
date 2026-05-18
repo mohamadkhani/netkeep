@@ -1,5 +1,5 @@
 use gpui::{AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, Window};
-use gpui_component::{Theme, v_flex};
+use gpui_component::{v_flex, Theme};
 
 use crate::colors;
 use crate::components;
@@ -16,24 +16,22 @@ impl DecisionApp {
 
         // Start a 1-second countdown ticker
         let state_weak = state.downgrade();
-        cx.spawn(async move |_this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                if let Some(state) = state_weak.upgrade() {
-                    let expired = cx.update_entity(&state, |s, cx| {
-                        s.now_secs = daemon::unix_now();
-                        let remaining = s.item.deadline_at_secs.saturating_sub(s.now_secs);
-                        cx.notify();
-                        remaining == 0
-                    });
-                    if expired {
-                        std::process::exit(0);
-                    }
-                } else {
-                    break;
+        cx.spawn(async move |_this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            if let Some(state) = state_weak.upgrade() {
+                let expired = cx.update_entity(&state, |s, cx| {
+                    s.now_secs = daemon::unix_now();
+                    let remaining = s.item.deadline_at_secs.saturating_sub(s.now_secs);
+                    cx.notify();
+                    remaining == 0
+                });
+                if expired {
+                    std::process::exit(0);
                 }
+            } else {
+                break;
             }
         })
         .detach();
@@ -80,18 +78,16 @@ impl Render for DecisionApp {
                 &item.flow.device_label,
                 mono_font,
             ))
-            .child(components::action_footer(
-                components::ActionFooterProps {
-                    pending_id: item.id.clone(),
-                    flow: item.flow.clone(),
-                    make_permanent,
-                    egresses: state.egresses.clone(),
-                    selected_egress_index: state.selected_egress_index,
-                    process_scope,
-                    dest_scope,
-                    state: state_weak,
-                },
-            ))
+            .child(components::action_footer(components::ActionFooterProps {
+                pending_id: item.id.clone(),
+                flow: item.flow.clone(),
+                make_permanent,
+                egresses: state.egresses.clone(),
+                selected_egress_index: state.selected_egress_index,
+                process_scope,
+                dest_scope,
+                state: state_weak,
+            }))
             .child(components::status_bar(pending_count))
             .into_any_element()
     }

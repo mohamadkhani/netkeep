@@ -111,7 +111,7 @@ pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{FlowDirection, RuleDuration, Rule, TransportProtocol};
+    use core_types::{FlowDirection, Rule, RuleDuration, TransportProtocol};
 
     fn mk_rule(
         id: &str,
@@ -161,7 +161,10 @@ mod tests {
             None,
             DestinationMatcher::DomainWildcard("*.example.com".to_string()),
         );
-        assert_eq!(resolve_action(&[rule.clone()], &flow_sub).map(|r| r.action), Some(RuleAction::Allow));
+        assert_eq!(
+            resolve_action(&[rule.clone()], &flow_sub).map(|r| r.action),
+            Some(RuleAction::Allow)
+        );
         assert_eq!(resolve_action(&[rule], &flow_apex), None);
     }
 
@@ -214,11 +217,13 @@ mod tests {
             "deep subdomain must match apex-only wildcard storage"
         );
         assert_eq!(
-            resolve_action(&[rule.clone()], &flow_apex), None,
+            resolve_action(&[rule.clone()], &flow_apex),
+            None,
             "apex must still NOT match wildcard (separate rule required)"
         );
         assert_eq!(
-            resolve_action(&[rule], &flow_unrelated), None,
+            resolve_action(&[rule], &flow_unrelated),
+            None,
             "wildcard must not be substring-fooled by `notexample.com`"
         );
     }
@@ -482,4 +487,3 @@ mod tests {
         assert_eq!(resolved.egress_id, Some("eg-wifi-wlp0".into()));
     }
 }
-

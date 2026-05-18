@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use core_types::{FlowContext, PendingDecision, RuleAction, TransportProtocol};
 #[cfg(test)]
 use core_types::FlowDirection;
+use core_types::{FlowContext, PendingDecision, RuleAction, TransportProtocol};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverflowPolicy {
@@ -53,7 +53,11 @@ pub struct DecisionEngine {
 }
 
 impl DecisionEngine {
-    pub fn new(pending_limit: usize, default_timeout_secs: u64, overflow_policy: OverflowPolicy) -> Self {
+    pub fn new(
+        pending_limit: usize,
+        default_timeout_secs: u64,
+        overflow_policy: OverflowPolicy,
+    ) -> Self {
         Self {
             pending: HashMap::new(),
             pending_by_flow: HashMap::new(),
@@ -171,11 +175,17 @@ impl DecisionEngine {
         DecisionOutcome::Pending(decision)
     }
 
-    pub fn resolve_pending(&mut self, pending_id: &str, action: RuleAction, egress_id: Option<String>) -> Option<RuleAction> {
+    pub fn resolve_pending(
+        &mut self,
+        pending_id: &str,
+        action: RuleAction,
+        egress_id: Option<String>,
+    ) -> Option<RuleAction> {
         if let Some(decision) = self.pending.remove(pending_id) {
             let key = FlowKey::from(&decision.flow);
             self.pending_by_flow.remove(&key);
-            self.resolved.insert(pending_id.to_string(), (action.clone(), egress_id));
+            self.resolved
+                .insert(pending_id.to_string(), (action.clone(), egress_id));
             Some(action)
         } else {
             None
@@ -211,7 +221,11 @@ impl DecisionEngine {
 
     pub fn list_pending(&self) -> Vec<PendingDecision> {
         let mut items = self.pending.values().cloned().collect::<Vec<_>>();
-        items.sort_by(|a, b| a.created_at_secs.cmp(&b.created_at_secs).then(a.id.cmp(&b.id)));
+        items.sort_by(|a, b| {
+            a.created_at_secs
+                .cmp(&b.created_at_secs)
+                .then(a.id.cmp(&b.id))
+        });
         items
     }
 
@@ -219,7 +233,10 @@ impl DecisionEngine {
     /// Advances `next_id` past any restored ids so no collision occurs.
     pub fn restore_pending(&mut self, decisions: Vec<PendingDecision>) {
         for d in decisions {
-            if let Some(n) = d.id.strip_prefix("pending-").and_then(|s| s.parse::<u64>().ok()) {
+            if let Some(n) =
+                d.id.strip_prefix("pending-")
+                    .and_then(|s| s.parse::<u64>().ok())
+            {
                 if n >= self.next_id {
                     self.next_id = n + 1;
                 }
@@ -267,13 +284,19 @@ mod tests {
     fn duplicate_flow_returns_existing_pending() {
         let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
         let out1 = engine.register_unknown_flow(mk_flow(), 0);
-        let id1 = match &out1 { DecisionOutcome::Pending(p) => p.id.clone(), _ => panic!() };
+        let id1 = match &out1 {
+            DecisionOutcome::Pending(p) => p.id.clone(),
+            _ => panic!(),
+        };
 
         // Same flow key, different src_port / domain variance — still deduped.
         let mut flow2 = mk_flow();
         flow2.destination_domain = None; // domain not inferred on this packet
         let out2 = engine.register_unknown_flow(flow2, 1);
-        let id2 = match &out2 { DecisionOutcome::Pending(p) => p.id.clone(), _ => panic!() };
+        let id2 = match &out2 {
+            DecisionOutcome::Pending(p) => p.id.clone(),
+            _ => panic!(),
+        };
 
         assert_eq!(id1, id2, "second packet should reuse the existing pending");
         assert_eq!(engine.pending_count(), 1, "only one pending should exist");
@@ -302,10 +325,20 @@ mod tests {
             _ => panic!("expected pending"),
         };
 
-        assert_eq!(pending2.id, id1, "retransmit must reuse the existing pending");
-        assert_eq!(engine.pending_count(), 1, "no second pending should be created");
+        assert_eq!(
+            pending2.id, id1,
+            "retransmit must reuse the existing pending"
+        );
+        assert_eq!(
+            engine.pending_count(),
+            1,
+            "no second pending should be created"
+        );
         assert_eq!(pending2.flow.process_name.as_deref(), Some("curl"));
-        assert_eq!(pending2.flow.destination_domain.as_deref(), Some("example.com"));
+        assert_eq!(
+            pending2.flow.destination_domain.as_deref(),
+            Some("example.com")
+        );
     }
 
     #[test]
@@ -371,12 +404,18 @@ mod tests {
     fn resolve_cleans_up_flow_index() {
         let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
         let out = engine.register_unknown_flow(mk_flow(), 0);
-        let id = match out { DecisionOutcome::Pending(p) => p.id, _ => panic!() };
+        let id = match out {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!(),
+        };
         engine.resolve_pending(&id, RuleAction::Allow, None);
 
         // After resolve, the same flow should create a new pending (not deduplicate).
         let out2 = engine.register_unknown_flow(mk_flow(), 1);
-        let id2 = match out2 { DecisionOutcome::Pending(p) => p.id, _ => panic!() };
+        let id2 = match out2 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!(),
+        };
         assert_ne!(id, id2);
         assert_eq!(engine.pending_count(), 1);
     }

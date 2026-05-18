@@ -11,17 +11,17 @@ use crate::{FlowDecision, FlowRegistrar};
 /// 5-tuple key for the per-connection verdict cache.
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct ConnectionKey {
-    src_ip:   String,
+    src_ip: String,
     src_port: u16,
-    dst_ip:   String,
+    dst_ip: String,
     dst_port: u16,
     protocol: TransportProtocol,
 }
 
 #[derive(Clone, Copy)]
 struct CachedVerdict {
-    accept:     bool,
-    fwmark:     Option<u32>,
+    accept: bool,
+    fwmark: Option<u32>,
     expires_at: u64,
 }
 
@@ -34,9 +34,9 @@ struct CachedVerdict {
 #[derive(Clone)]
 struct CachedProcessAttr {
     process_name: String,
-    process_exe:  Option<String>,
-    app_name:     Option<String>,
-    expires_at:   u64,
+    process_exe: Option<String>,
+    app_name: Option<String>,
+    expires_at: u64,
 }
 
 /// Real packet processor that reads from an NFQUEUE and applies verdicts.
@@ -45,13 +45,13 @@ struct CachedProcessAttr {
 /// The loop is intentionally blocking — each `recv` call parks the thread until
 /// a packet arrives, so no busy-waiting occurs.
 pub struct NfqueueProcessor<C, FR> {
-    queue:      Queue,
+    queue: Queue,
     classifier: C,
-    registrar:  FR,
+    registrar: FR,
     /// Shared cache updated whenever an SNI is extracted from a ClientHello.
     /// Allows subsequent packets (which carry no SNI) to still be matched
     /// against domain-based rules by IP lookup.
-    dns_cache:  SniDnsCache,
+    dns_cache: SniDnsCache,
     /// Per-connection verdict cache. Stores the Allow/Deny decision made for the
     /// first classifiable packet of each connection so that retransmits and
     /// subsequent packets get the same verdict immediately without going through
@@ -60,10 +60,10 @@ pub struct NfqueueProcessor<C, FR> {
     /// handshake and putting conntrack in "established" state, and then nftables
     /// `ct state established,related accept` would accept all retransmits before
     /// they reach NFQUEUE again.
-    decided:    HashMap<ConnectionKey, CachedVerdict>,
+    decided: HashMap<ConnectionKey, CachedVerdict>,
     /// Maps `(dst_ip, dst_port)` → resolved process.
     /// Handles re-use of the same CDN endpoint.
-    proc_attr:        HashMap<(String, u16), CachedProcessAttr>,
+    proc_attr: HashMap<(String, u16), CachedProcessAttr>,
     /// Maps `(domain, dst_port)` → resolved process.
     /// Secondary fallback when a CDN rotates to a new IP not yet in `proc_attr`.
     /// Keyed by the destination domain resolved from SNI/DNS so that any IP
@@ -78,7 +78,7 @@ const CACHE_TTL_SECS: u64 = 600;
 const CACHE_MAX: usize = 8192;
 
 // IP-based attribution cache TTL and cap.
-const PROC_ATTR_TTL_SECS: u64 = 900;   // 15 min — outlasts most streaming sessions
+const PROC_ATTR_TTL_SECS: u64 = 900; // 15 min — outlasts most streaming sessions
 const PROC_ATTR_MAX: usize = 1024;
 // Domain-based attribution cache TTL and cap (longer, CDN IPs rotate more than domains).
 const DOMAIN_ATTR_TTL_SECS: u64 = 3600; // 1 hour
@@ -89,10 +89,23 @@ where
     C: Classifier,
     FR: FlowRegistrar,
 {
-    pub fn open(queue_num: u16, classifier: C, registrar: FR, dns_cache: SniDnsCache) -> std::io::Result<Self> {
+    pub fn open(
+        queue_num: u16,
+        classifier: C,
+        registrar: FR,
+        dns_cache: SniDnsCache,
+    ) -> std::io::Result<Self> {
         let mut queue = Queue::open()?;
         queue.bind(queue_num)?;
-        Ok(Self { queue, classifier, registrar, dns_cache, decided: HashMap::new(), proc_attr: HashMap::new(), domain_proc_attr: HashMap::new() })
+        Ok(Self {
+            queue,
+            classifier,
+            registrar,
+            dns_cache,
+            decided: HashMap::new(),
+            proc_attr: HashMap::new(),
+            domain_proc_attr: HashMap::new(),
+        })
     }
 
     /// Blocks indefinitely, processing one packet per iteration.
@@ -108,9 +121,7 @@ where
 
             let (verdict, fwmark) = match parse_raw_packet(msg.get_payload()) {
                 None => (Verdict::Drop, None),
-                Some(raw) => {
-                    self.decide(&raw, now_secs)
-                }
+                Some(raw) => self.decide(&raw, now_secs),
             };
 
             if let Some(mark) = fwmark {
@@ -136,9 +147,9 @@ where
         }
 
         let key = ConnectionKey {
-            src_ip:   raw.src_ip.clone(),
+            src_ip: raw.src_ip.clone(),
             src_port: raw.src_port,
-            dst_ip:   raw.dst_ip.clone(),
+            dst_ip: raw.dst_ip.clone(),
             dst_port: raw.dst_port,
             protocol: raw.protocol,
         };
@@ -169,7 +180,11 @@ where
         if raw.tcp_payload_empty && !raw.tcp_syn {
             if let Some(cached) = self.decided.get(&key) {
                 if cached.expires_at > now_secs {
-                    let v = if cached.accept { Verdict::Accept } else { Verdict::Drop };
+                    let v = if cached.accept {
+                        Verdict::Accept
+                    } else {
+                        Verdict::Drop
+                    };
                     return (v, cached.fwmark);
                 }
                 self.decided.remove(&key);
@@ -180,7 +195,11 @@ where
         // Fast path: return cached verdict if still valid.
         if let Some(cached) = self.decided.get(&key) {
             if cached.expires_at > now_secs {
-                let v = if cached.accept { Verdict::Accept } else { Verdict::Drop };
+                let v = if cached.accept {
+                    Verdict::Accept
+                } else {
+                    Verdict::Drop
+                };
                 return (v, cached.fwmark);
             }
             self.decided.remove(&key);
@@ -197,16 +216,28 @@ where
             // Proc resolver lost the race.
             // 1. Try IP-based attribution (same CDN endpoint seen before).
             let cached_ip = self.proc_attr.get(&attr_key).and_then(|c| {
-                if c.expires_at > now_secs { Some(c.clone()) } else { None }
+                if c.expires_at > now_secs {
+                    Some(c.clone())
+                } else {
+                    None
+                }
             });
-            if cached_ip.is_none() { self.proc_attr.remove(&attr_key); }
+            if cached_ip.is_none() {
+                self.proc_attr.remove(&attr_key);
+            }
 
             // 2. Fall back to domain-based attribution (CDN rotated to a new IP).
             let cached_dom = if cached_ip.is_none() {
                 flow.destination_domain.as_ref().and_then(|d| {
-                    self.domain_proc_attr.get(&(d.clone(), raw.dst_port)).and_then(|c| {
-                        if c.expires_at > now_secs { Some(c.clone()) } else { None }
-                    })
+                    self.domain_proc_attr
+                        .get(&(d.clone(), raw.dst_port))
+                        .and_then(|c| {
+                            if c.expires_at > now_secs {
+                                Some(c.clone())
+                            } else {
+                                None
+                            }
+                        })
                 })
             } else {
                 None
@@ -214,16 +245,16 @@ where
 
             if let Some(c) = cached_ip.or(cached_dom) {
                 flow.process_name = Some(c.process_name.clone());
-                flow.process_exe  = c.process_exe.clone();
-                flow.app_name     = c.app_name.clone();
+                flow.process_exe = c.process_exe.clone();
+                flow.app_name = c.app_name.clone();
             }
         } else {
             // Successful resolution — populate both caches.
             let entry = CachedProcessAttr {
                 process_name: flow.process_name.clone().unwrap_or_default(),
-                process_exe:  flow.process_exe.clone(),
-                app_name:     flow.app_name.clone(),
-                expires_at:   now_secs + PROC_ATTR_TTL_SECS,
+                process_exe: flow.process_exe.clone(),
+                app_name: flow.app_name.clone(),
+                expires_at: now_secs + PROC_ATTR_TTL_SECS,
             };
             if self.proc_attr.len() >= PROC_ATTR_MAX {
                 self.proc_attr.retain(|_, v| v.expires_at > now_secs);
@@ -236,7 +267,10 @@ where
                 }
                 self.domain_proc_attr.insert(
                     (domain.clone(), raw.dst_port),
-                    CachedProcessAttr { expires_at: now_secs + DOMAIN_ATTR_TTL_SECS, ..entry },
+                    CachedProcessAttr {
+                        expires_at: now_secs + DOMAIN_ATTR_TTL_SECS,
+                        ..entry
+                    },
                 );
             }
         }
@@ -270,11 +304,14 @@ where
             if self.decided.len() >= CACHE_MAX {
                 self.decided.retain(|_, v| v.expires_at > now_secs);
             }
-            self.decided.insert(key, CachedVerdict {
-                accept: matches!(verdict, Verdict::Accept),
-                fwmark,
-                expires_at: now_secs + CACHE_TTL_SECS,
-            });
+            self.decided.insert(
+                key,
+                CachedVerdict {
+                    accept: matches!(verdict, Verdict::Accept),
+                    fwmark,
+                    expires_at: now_secs + CACHE_TTL_SECS,
+                },
+            );
         }
 
         (verdict, fwmark)
@@ -308,11 +345,17 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
     let (src_ip, dst_ip) = match sliced.net.as_ref()? {
         NetSlice::Ipv4(s) => {
             let h = s.header();
-            (h.source_addr().to_string(), h.destination_addr().to_string())
+            (
+                h.source_addr().to_string(),
+                h.destination_addr().to_string(),
+            )
         }
         NetSlice::Ipv6(s) => {
             let h = s.header();
-            (h.source_addr().to_string(), h.destination_addr().to_string())
+            (
+                h.source_addr().to_string(),
+                h.destination_addr().to_string(),
+            )
         }
     };
 
@@ -341,11 +384,23 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
             Some(TransportSlice::Udp(u)) => {
                 let (sp, dp) = (u.source_port(), u.destination_port());
                 // Best-effort QUIC detection: UDP to/from port 443.
-                let proto =
-                    if dp == 443 || sp == 443 { TransportProtocol::Quic } else { TransportProtocol::Udp };
+                let proto = if dp == 443 || sp == 443 {
+                    TransportProtocol::Quic
+                } else {
+                    TransportProtocol::Udp
+                };
                 (sp, dp, proto, None, false, false, false, false)
             }
-            _ => (0, 0, TransportProtocol::Other, None, false, false, false, false),
+            _ => (
+                0,
+                0,
+                TransportProtocol::Other,
+                None,
+                false,
+                false,
+                false,
+                false,
+            ),
         };
 
     Some(RawPacket {
@@ -403,7 +458,8 @@ fn extract_tls_sni(payload: &[u8]) -> Option<String> {
     pos += 1 + session_id_len;
 
     // Skip cipher suites
-    let cipher_suites_len = u16::from_be_bytes([*payload.get(pos)?, *payload.get(pos + 1)?]) as usize;
+    let cipher_suites_len =
+        u16::from_be_bytes([*payload.get(pos)?, *payload.get(pos + 1)?]) as usize;
     pos += 2 + cipher_suites_len;
 
     // Skip compression methods
@@ -441,7 +497,9 @@ fn extract_tls_sni(payload: &[u8]) -> Option<String> {
             if ext_data.len() < 5 + name_len {
                 return None;
             }
-            return std::str::from_utf8(&ext_data[5..5 + name_len]).ok().map(str::to_string);
+            return std::str::from_utf8(&ext_data[5..5 + name_len])
+                .ok()
+                .map(str::to_string);
         }
 
         pos += ext_len;
@@ -554,15 +612,29 @@ fn extract_http_host(payload: &[u8]) -> Option<String> {
 /// search on arbitrary binary TCP payloads.
 fn starts_with_http_method(payload: &[u8]) -> bool {
     const METHODS: &[&[u8]] = &[
-        b"GET ", b"POST ", b"PUT ", b"HEAD ", b"DELETE ", b"OPTIONS ",
-        b"PATCH ", b"CONNECT ", b"TRACE ",
+        b"GET ",
+        b"POST ",
+        b"PUT ",
+        b"HEAD ",
+        b"DELETE ",
+        b"OPTIONS ",
+        b"PATCH ",
+        b"CONNECT ",
+        b"TRACE ",
     ];
     METHODS.iter().any(|m| payload.starts_with(m))
 }
 
 fn trim_ascii(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(s.len());
-    let end = s.iter().rposition(|b| !b.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(start);
+    let start = s
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map(|i| i + 1)
+        .unwrap_or(start);
     &s[start..end]
 }
 
@@ -573,9 +645,8 @@ fn looks_like_host_value(s: &str) -> bool {
     if s.is_empty() || s.len() > 253 {
         return false;
     }
-    s.bytes().all(|b| {
-        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
-    })
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
 }
 
 #[cfg(test)]
@@ -652,21 +723,21 @@ mod tests {
         let record_len = (1 + 3 + hello_body_len) as u16;
 
         let mut buf = Vec::new();
-        buf.extend_from_slice(&[0x16, 0x03, 0x01]);          // TLS record header
+        buf.extend_from_slice(&[0x16, 0x03, 0x01]); // TLS record header
         buf.extend_from_slice(&record_len.to_be_bytes());
-        buf.push(0x01);                                        // handshake type: ClientHello
+        buf.push(0x01); // handshake type: ClientHello
         buf.push(0x00);
         buf.extend_from_slice(&(hello_body_len as u16).to_be_bytes());
-        buf.extend_from_slice(&[0x03, 0x03]);                 // client_version TLS 1.2
-        buf.extend_from_slice(&[0u8; 32]);                    // random
-        buf.push(0x00);                                        // session_id_len = 0
-        buf.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f]);    // cipher_suites
-        buf.extend_from_slice(&[0x01, 0x00]);                 // compression: null
+        buf.extend_from_slice(&[0x03, 0x03]); // client_version TLS 1.2
+        buf.extend_from_slice(&[0u8; 32]); // random
+        buf.push(0x00); // session_id_len = 0
+        buf.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f]); // cipher_suites
+        buf.extend_from_slice(&[0x01, 0x00]); // compression: null
         buf.extend_from_slice(&(sni_ext_total as u16).to_be_bytes()); // extensions_len
-        buf.extend_from_slice(&[0x00, 0x00]);                 // SNI extension type
+        buf.extend_from_slice(&[0x00, 0x00]); // SNI extension type
         buf.extend_from_slice(&sni_ext_data_len.to_be_bytes());
         buf.extend_from_slice(&(1 + 2 + name_len).to_be_bytes()); // SNI list_len
-        buf.push(0x00);                                        // entry type: host_name
+        buf.push(0x00); // entry type: host_name
         buf.extend_from_slice(&name_len.to_be_bytes());
         buf.extend_from_slice(sni_bytes);
         buf
@@ -705,7 +776,10 @@ mod tests {
         // not the host:port pair. Otherwise wildcard rules `*.example.com`
         // wouldn't match a flow with `Host: api.example.com:8080`.
         let payload = b"POST / HTTP/1.1\r\nHost: api.example.com:8080\r\n\r\n";
-        assert_eq!(extract_http_host(payload), Some("api.example.com".to_string()));
+        assert_eq!(
+            extract_http_host(payload),
+            Some("api.example.com".to_string())
+        );
     }
 
     #[test]
@@ -719,7 +793,10 @@ mod tests {
         // Random TCP payload that happens to contain `\r\nHost:` bytes by
         // coincidence — must NOT be picked up as an HTTP host. The early
         // method-prefix check is what prevents the false positive.
-        assert_eq!(extract_http_host(b"\x00\x01\x02\r\nHost: tricked.com\r\n\x05"), None);
+        assert_eq!(
+            extract_http_host(b"\x00\x01\x02\r\nHost: tricked.com\r\n\x05"),
+            None
+        );
     }
 
     #[test]
@@ -761,7 +838,7 @@ mod tests {
     fn http_host_truncated_payload_returns_none_safely() {
         // Don't panic on a payload that ends mid-Host-header.
         let payload = b"GET / HTTP/1.1\r\nHost: example.com"; // no CRLF after value
-        // We accept the unfinished value — it's still useful information.
+                                                              // We accept the unfinished value — it's still useful information.
         assert_eq!(extract_http_host(payload), Some("example.com".to_string()));
     }
 

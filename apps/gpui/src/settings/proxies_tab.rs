@@ -3,8 +3,8 @@
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{ProxyAuth, ProxyConfig, ProxyProtocol};
 use gpui::{
-    App, AppContext as _, Context, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
+    div, px, App, AppContext as _, Context, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled, WeakEntity, Window,
 };
 
 use gpui_component::table::{Column, TableDelegate, TableState};
@@ -74,7 +74,11 @@ impl TableDelegate for ProxiesDelegate {
         match col_ix {
             // Name
             0 => div()
-                .text_color(if proxy.enabled { colors::text() } else { colors::muted() })
+                .text_color(if proxy.enabled {
+                    colors::text()
+                } else {
+                    colors::muted()
+                })
                 .child(proxy.name.clone())
                 .into_any_element(),
             // Protocol badge
@@ -88,7 +92,11 @@ impl TableDelegate for ProxiesDelegate {
             }
             // Address
             2 => div()
-                .text_color(if proxy.enabled { colors::text() } else { colors::muted() })
+                .text_color(if proxy.enabled {
+                    colors::text()
+                } else {
+                    colors::muted()
+                })
                 .child(format!("{}:{}", proxy.host, proxy.port))
                 .into_any_element(),
             // Auth
@@ -114,16 +122,16 @@ impl TableDelegate for ProxiesDelegate {
             }
             // Controls (edit + toggle + delete)
             5 => {
-                let proxy_edit   = proxy.clone();
+                let proxy_edit = proxy.clone();
                 let proxy_toggle = proxy.clone();
-                let pid_del      = proxy.id.clone();
+                let pid_del = proxy.id.clone();
 
-                let state_edit   = self.state_weak.clone();
+                let state_edit = self.state_weak.clone();
                 let state_toggle = self.state_weak.clone();
-                let state_del    = self.state_weak.clone();
+                let state_del = self.state_weak.clone();
 
                 let socket_toggle = self.socket_path.clone();
-                let sock_del      = self.socket_path.clone();
+                let sock_del = self.socket_path.clone();
 
                 div()
                     .flex()
@@ -147,50 +155,62 @@ impl TableDelegate for ProxiesDelegate {
                         action_btn(
                             format!("px-tog-{}", proxy.id),
                             if proxy.enabled { "Disable" } else { "Enable" },
-                            if proxy.enabled { colors::muted() } else { colors::green() },
+                            if proxy.enabled {
+                                colors::muted()
+                            } else {
+                                colors::green()
+                            },
                         )
-                        .border_color(if proxy.enabled { colors::border() } else { colors::green() })
+                        .border_color(if proxy.enabled {
+                            colors::border()
+                        } else {
+                            colors::green()
+                        })
                         .on_click(move |_, _, cx| {
-                                let mut toggled = proxy_toggle.clone();
-                                toggled.enabled = !toggled.enabled;
-                                let to_send = toggled.clone();
-                                let weak = state_toggle.clone();
-                                let sock = socket_toggle.clone();
-                                cx.spawn(async move |cx| {
-                                    let res = cx
-                                        .background_executor()
-                                        .spawn(async move {
-                                            daemon::send_request(
-                                                &sock,
-                                                &ControlRequest::UpsertProxy(to_send),
-                                            )
-                                        })
-                                        .await;
-                                    if let Some(st) = weak.upgrade() {
-                                        let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
-                                            match res {
-                                                Ok(ControlResponse::Ok) => {
-                                                    if let Some(p) = s.proxies.iter_mut().find(|p| p.id == toggled.id) {
-                                                        p.enabled = toggled.enabled;
-                                                    }
-                                                    s.status = Some("Proxy updated.".into());
+                            let mut toggled = proxy_toggle.clone();
+                            toggled.enabled = !toggled.enabled;
+                            let to_send = toggled.clone();
+                            let weak = state_toggle.clone();
+                            let sock = socket_toggle.clone();
+                            cx.spawn(async move |cx| {
+                                let res = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        daemon::send_request(
+                                            &sock,
+                                            &ControlRequest::UpsertProxy(to_send),
+                                        )
+                                    })
+                                    .await;
+                                if let Some(st) = weak.upgrade() {
+                                    let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                        match res {
+                                            Ok(ControlResponse::Ok) => {
+                                                if let Some(p) = s
+                                                    .proxies
+                                                    .iter_mut()
+                                                    .find(|p| p.id == toggled.id)
+                                                {
+                                                    p.enabled = toggled.enabled;
                                                 }
-                                                Ok(ControlResponse::Error(msg)) => {
-                                                    s.status = Some(format!("failed: {msg}"));
-                                                }
-                                                Err(e) => {
-                                                    s.status = Some(format!("failed: {e}"));
-                                                }
-                                                _ => {
-                                                    s.status = Some("unexpected response".into());
-                                                }
+                                                s.status = Some("Proxy updated.".into());
                                             }
-                                            cx.notify();
-                                        });
-                                    }
-                                })
-                                .detach();
-                            }),
+                                            Ok(ControlResponse::Error(msg)) => {
+                                                s.status = Some(format!("failed: {msg}"));
+                                            }
+                                            Err(e) => {
+                                                s.status = Some(format!("failed: {e}"));
+                                            }
+                                            _ => {
+                                                s.status = Some("unexpected response".into());
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                            .detach();
+                        }),
                     )
                     // Delete
                     .child(
@@ -211,24 +231,29 @@ impl TableDelegate for ProxiesDelegate {
                                         })
                                         .await;
                                     if let Some(st) = weak.upgrade() {
-                                        let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
-                                            match res {
-                                                Ok(ControlResponse::Ok) => {
-                                                    s.proxies.retain(|p| p.id != pid_cmp);
-                                                    s.status = Some("Proxy removed.".into());
+                                        let _ =
+                                            cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                                match res {
+                                                    Ok(ControlResponse::Ok) => {
+                                                        s.proxies.retain(|p| p.id != pid_cmp);
+                                                        s.status = Some("Proxy removed.".into());
+                                                    }
+                                                    Ok(ControlResponse::Error(msg)) => {
+                                                        s.status =
+                                                            Some(format!("delete failed: {msg}"));
+                                                    }
+                                                    Err(e) => {
+                                                        s.status =
+                                                            Some(format!("delete failed: {e}"));
+                                                    }
+                                                    _ => {
+                                                        s.status = Some(
+                                                            "unexpected delete response".into(),
+                                                        );
+                                                    }
                                                 }
-                                                Ok(ControlResponse::Error(msg)) => {
-                                                    s.status = Some(format!("delete failed: {msg}"));
-                                                }
-                                                Err(e) => {
-                                                    s.status = Some(format!("delete failed: {e}"));
-                                                }
-                                                _ => {
-                                                    s.status = Some("unexpected delete response".into());
-                                                }
-                                            }
-                                            cx.notify();
-                                        });
+                                                cx.notify();
+                                            });
                                     }
                                 })
                                 .detach();

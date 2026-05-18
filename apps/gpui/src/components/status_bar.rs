@@ -1,4 +1,4 @@
-use gpui::{IntoElement, ParentElement, Styled, div, px};
+use gpui::{div, px, IntoElement, ParentElement, Styled};
 use gpui_component::h_flex;
 
 use crate::colors;

@@ -90,13 +90,24 @@ impl ProcProcessResolver {
 }
 
 impl Default for ProcProcessResolver {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProcessResolver for ProcProcessResolver {
-    fn resolve(&self, src_ip: &str, src_port: u16, protocol: TransportProtocol) -> Option<ProcessInfo> {
+    fn resolve(
+        &self,
+        src_ip: &str,
+        src_port: u16,
+        protocol: TransportProtocol,
+    ) -> Option<ProcessInfo> {
         let ip: IpAddr = src_ip.parse().ok()?;
-        let key = SocketKey { ip, port: src_port, protocol };
+        let key = SocketKey {
+            ip,
+            port: src_port,
+            protocol,
+        };
         let now = Instant::now();
 
         // Cache fast path
@@ -126,7 +137,9 @@ impl ProcessResolver for ProcProcessResolver {
         let name = if raw_name.len() <= 1
             || matches!(raw_name.as_str(), "sh" | "bash" | "dash" | "zsh" | "fish")
         {
-            read_ppid(pid).and_then(read_exe_basename).unwrap_or(raw_name)
+            read_ppid(pid)
+                .and_then(read_exe_basename)
+                .unwrap_or(raw_name)
         } else if matches!(raw_name.as_str(), "electron" | "AppRun") {
             // Resolution order for generic Electron/AppImage names:
             //   1. Own cmdline — path before "resources/" gives the app dir name.
@@ -137,12 +150,12 @@ impl ProcessResolver for ProcProcessResolver {
                 .or_else(|| read_ppid(pid).and_then(app_name_from_electron_cmdline))
                 .or_else(|| app_name_from_environ(pid))
                 .or_else(|| {
-                    read_ppid(pid)
-                        .and_then(read_exe_basename)
-                        .filter(|n| !matches!(
+                    read_ppid(pid).and_then(read_exe_basename).filter(|n| {
+                        !matches!(
                             n.as_str(),
                             "electron" | "AppRun" | "sh" | "bash" | "dash" | "zsh" | "fish"
-                        ))
+                        )
+                    })
                 })
                 .unwrap_or(raw_name)
         } else {
@@ -154,18 +167,25 @@ impl ProcessResolver for ProcProcessResolver {
         // Suppress app_name when it equals name — no value in duplicating it.
         let app_name = app_name.filter(|a| a != &name);
 
-        let info = ProcessInfo { name, exe: exe_path, app_name };
+        let info = ProcessInfo {
+            name,
+            exe: exe_path,
+            app_name,
+        };
 
         if let Ok(mut cache) = self.cache.lock() {
             if cache.len() >= CACHE_MAX {
                 cache.retain(|_, v| now.duration_since(v.inserted_at) < CACHE_TTL);
             }
-            cache.insert(key, CachedEntry {
-                name: info.name.clone(),
-                exe: info.exe.clone(),
-                app_name: info.app_name.clone(),
-                inserted_at: now,
-            });
+            cache.insert(
+                key,
+                CachedEntry {
+                    name: info.name.clone(),
+                    exe: info.exe.clone(),
+                    app_name: info.app_name.clone(),
+                    inserted_at: now,
+                },
+            );
         }
 
         Some(info)
@@ -200,8 +220,12 @@ fn try_ss_fallback(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Option
     for line in stdout.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         // ss -H columns: State Recv-Q Send-Q Local Peer [Process]
-        if fields.len() < 6 { continue; }
-        if !ss_local_matches(fields[3], ip, port) { continue; }
+        if fields.len() < 6 {
+            continue;
+        }
+        if !ss_local_matches(fields[3], ip, port) {
+            continue;
+        }
         if let Some(pid) = extract_pid_from_ss_line(line) {
             return Some(pid);
         }
@@ -212,9 +236,13 @@ fn try_ss_fallback(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Option
 /// Return true if `addr` (as printed by `ss`) matches the given IP and port.
 /// Handles IPv4 (`1.2.3.4:port`), IPv6 (`[::1]:port`), and IPv4-mapped forms.
 fn ss_local_matches(addr: &str, ip: IpAddr, port: u16) -> bool {
-    let Some(colon) = addr.rfind(':') else { return false };
+    let Some(colon) = addr.rfind(':') else {
+        return false;
+    };
     let port_str = port.to_string();
-    if &addr[colon + 1..] != port_str { return false; }
+    if &addr[colon + 1..] != port_str {
+        return false;
+    }
     let addr_part = addr[..colon].trim_matches('[').trim_matches(']');
     match (ip, addr_part.parse::<IpAddr>().ok()) {
         (IpAddr::V4(a), Some(IpAddr::V4(b))) => a == b,
@@ -229,7 +257,9 @@ fn ss_local_matches(addr: &str, ip: IpAddr, port: u16) -> bool {
 fn extract_pid_from_ss_line(line: &str) -> Option<u32> {
     let start = line.find("pid=")? + 4;
     let rest = &line[start..];
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 
@@ -273,7 +303,10 @@ fn retry_find_socket(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Opti
         }
         if let Some(result) = find_socket_inode(ip, port, protocol) {
             if attempt > 0 {
-                eprintln!("proc_resolver: found socket after {} retries (delay={}ms)", attempt, delay);
+                eprintln!(
+                    "proc_resolver: found socket after {} retries (delay={}ms)",
+                    attempt, delay
+                );
             }
             return Some(result);
         }
@@ -292,7 +325,11 @@ fn retry_find_socket(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Opti
 /// When such a socket connects to an IPv4 address the kernel records the entry
 /// in `/proc/net/tcp6` as `::ffff:a.b.c.d`, so an IPv4-only or IPv6-only
 /// lookup would miss it.
-fn find_socket_inode(src_ip: IpAddr, src_port: u16, protocol: TransportProtocol) -> Option<(u64, u32)> {
+fn find_socket_inode(
+    src_ip: IpAddr,
+    src_port: u16,
+    protocol: TransportProtocol,
+) -> Option<(u64, u32)> {
     let is_udp = matches!(protocol, TransportProtocol::Udp | TransportProtocol::Quic);
 
     // Always check both address families: many applications use AF_INET6
@@ -347,7 +384,9 @@ pub fn parse_proc_net(content: &str, src_ip: IpAddr, src_port: u16) -> Option<(u
             continue;
         }
         let local = cols[1];
-        let Some(colon) = local.rfind(':') else { continue };
+        let Some(colon) = local.rfind(':') else {
+            continue;
+        };
         if &local[colon + 1..] != port_hex {
             continue;
         }
@@ -370,7 +409,9 @@ pub fn parse_proc_net(content: &str, src_ip: IpAddr, src_port: u16) -> Option<(u
             // inode=0 means a TIME_WAIT or kernel-internal socket — no process
             // owns it, so find_pid_for_inode would always fail. Skip it so we
             // continue searching for the real socket entry.
-            if inode == 0 { continue; }
+            if inode == 0 {
+                continue;
+            }
             let uid: u32 = cols[7].parse().unwrap_or(u32::MAX);
             return Some((inode, uid));
         }
@@ -389,12 +430,16 @@ fn parse_proc_net_port_only(content: &str, src_port: u16) -> Option<(u64, u32)> 
             continue;
         }
         let local = cols[1];
-        let Some(colon) = local.rfind(':') else { continue };
+        let Some(colon) = local.rfind(':') else {
+            continue;
+        };
         if &local[colon + 1..] != port_hex {
             continue;
         }
         let inode: u64 = cols[9].parse().ok()?;
-        if inode == 0 { continue; }
+        if inode == 0 {
+            continue;
+        }
         let uid: u32 = cols[7].parse().unwrap_or(u32::MAX);
         return Some((inode, uid));
     }
@@ -405,9 +450,11 @@ fn parse_proc_net_port_only(content: &str, src_port: u16) -> Option<(u64, u32)> 
 /// and normalize IPv4-mapped IPv6 (`::ffff:a.b.c.d`) to `IpAddr::V4`.
 fn parse_hex_addr(hex: &str) -> Option<IpAddr> {
     match hex.len() {
-        8  => parse_ipv4_hex(hex).map(IpAddr::V4),
+        8 => parse_ipv4_hex(hex).map(IpAddr::V4),
         32 => parse_ipv6_hex(hex).map(|v6| {
-            v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6))
+            v6.to_ipv4_mapped()
+                .map(IpAddr::V4)
+                .unwrap_or(IpAddr::V6(v6))
         }),
         _ => None,
     }
@@ -415,14 +462,18 @@ fn parse_hex_addr(hex: &str) -> Option<IpAddr> {
 
 /// Decode a /proc/net/tcp IPv4 hex address (little-endian u32 → Ipv4Addr).
 fn parse_ipv4_hex(hex: &str) -> Option<Ipv4Addr> {
-    if hex.len() != 8 { return None; }
+    if hex.len() != 8 {
+        return None;
+    }
     let n = u32::from_str_radix(hex, 16).ok()?;
     Some(Ipv4Addr::from(n.to_be()))
 }
 
 /// Decode a /proc/net/tcp6 IPv6 hex address (four little-endian u32 words).
 fn parse_ipv6_hex(hex: &str) -> Option<Ipv6Addr> {
-    if hex.len() != 32 { return None; }
+    if hex.len() != 32 {
+        return None;
+    }
     let mut bytes = [0u8; 16];
     for i in 0..4 {
         let word = u32::from_str_radix(&hex[i * 8..(i + 1) * 8], 16).ok()?;
@@ -472,7 +523,9 @@ fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> Option<u32> {
     for entry in proc.flatten() {
         let pid_str = entry.file_name();
         let pid_str = pid_str.to_string_lossy();
-        let Ok(pid) = pid_str.parse::<u32>() else { continue };
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
 
         // UID filter: read /proc/<pid>/status and skip wrong-owner processes.
         if let Some(uid) = only_uid {
@@ -482,7 +535,9 @@ fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> Option<u32> {
         }
 
         let fd_dir = entry.path().join("fd");
-        let Ok(fds) = fs::read_dir(&fd_dir) else { continue };
+        let Ok(fds) = fs::read_dir(&fd_dir) else {
+            continue;
+        };
 
         for fd in fds.flatten() {
             if let Ok(link) = fs::read_link(fd.path()) {
@@ -497,7 +552,9 @@ fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> Option<u32> {
 
 /// Check whether /proc/<pid>/status reports the given UID (Uid field, real uid).
 fn process_uid_matches(pid: u32, uid: u32) -> bool {
-    let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else { return false };
+    let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return false;
+    };
     for line in status.lines() {
         if let Some(val) = line.strip_prefix("Uid:\t") {
             // Uid line: "real  effective  saved  filesystem"
@@ -602,7 +659,11 @@ fn read_comm(pid: u32) -> Option<String> {
 /// Read the full path of /proc/<pid>/exe.
 fn read_exe_path(pid: u32) -> Option<String> {
     let exe = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    Some(exe.to_string_lossy().trim_end_matches(" (deleted)").to_string())
+    Some(
+        exe.to_string_lossy()
+            .trim_end_matches(" (deleted)")
+            .to_string(),
+    )
 }
 
 /// Read the basename of /proc/<pid>/exe (full path, not truncated).
@@ -704,10 +765,18 @@ mod tests {
         };
         resolver.cache.lock().unwrap().insert(
             key,
-            CachedEntry { name: "curl".to_string(), exe: None, app_name: None, inserted_at: Instant::now() },
+            CachedEntry {
+                name: "curl".to_string(),
+                exe: None,
+                app_name: None,
+                inserted_at: Instant::now(),
+            },
         );
         assert_eq!(
-            resolver.resolve("10.20.30.40", 65000, TransportProtocol::Tcp).map(|p| p.name).as_deref(),
+            resolver
+                .resolve("10.20.30.40", 65000, TransportProtocol::Tcp)
+                .map(|p| p.name)
+                .as_deref(),
             Some("curl"),
         );
     }
@@ -722,12 +791,21 @@ mod tests {
         };
         resolver.cache.lock().unwrap().insert(
             key,
-            CachedEntry { name: "curl".to_string(), exe: None, app_name: None, inserted_at: Instant::now() },
+            CachedEntry {
+                name: "curl".to_string(),
+                exe: None,
+                app_name: None,
+                inserted_at: Instant::now(),
+            },
         );
         // Different port → no hit (returns None because /proc has no entry).
-        assert!(resolver.resolve("10.20.30.40", 65001, TransportProtocol::Tcp).is_none());
+        assert!(resolver
+            .resolve("10.20.30.40", 65001, TransportProtocol::Tcp)
+            .is_none());
         // Different protocol → no hit.
-        assert!(resolver.resolve("10.20.30.40", 65000, TransportProtocol::Udp).is_none());
+        assert!(resolver
+            .resolve("10.20.30.40", 65000, TransportProtocol::Udp)
+            .is_none());
     }
 
     #[test]
@@ -741,13 +819,19 @@ mod tests {
         let stale = Instant::now()
             .checked_sub(CACHE_TTL + Duration::from_secs(1))
             .expect("clock is too young for this test");
-        resolver
-            .cache
-            .lock()
-            .unwrap()
-            .insert(key, CachedEntry { name: "curl".to_string(), exe: None, app_name: None, inserted_at: stale });
+        resolver.cache.lock().unwrap().insert(
+            key,
+            CachedEntry {
+                name: "curl".to_string(),
+                exe: None,
+                app_name: None,
+                inserted_at: stale,
+            },
+        );
         // Stale entry must not be served; fallback to /proc fails → None.
-        assert!(resolver.resolve("10.20.30.40", 65000, TransportProtocol::Tcp).is_none());
+        assert!(resolver
+            .resolve("10.20.30.40", 65000, TransportProtocol::Tcp)
+            .is_none());
     }
 
     #[test]
@@ -770,7 +854,10 @@ mod tests {
         let real_ip: IpAddr = "192.168.1.5".parse().unwrap();
         assert_eq!(parse_proc_net(UDP_WILDCARD_SAMPLE, real_ip, 54321), None);
         // Port-only fallback succeeds.
-        assert_eq!(parse_proc_net_port_only(UDP_WILDCARD_SAMPLE, 54321), Some((55555, 1000)));
+        assert_eq!(
+            parse_proc_net_port_only(UDP_WILDCARD_SAMPLE, 54321),
+            Some((55555, 1000))
+        );
     }
 
     // TIME_WAIT sockets have inode=0 in /proc/net/tcp. A matching (ip, port)
@@ -784,7 +871,10 @@ mod tests {
     fn inode_zero_row_is_skipped_and_real_entry_returned() {
         let ip: IpAddr = "10.0.2.15".parse().unwrap();
         // Must skip the inode=0 TIME_WAIT row and return the real ESTABLISHED entry.
-        assert_eq!(parse_proc_net(TCP_WITH_ZERO_INODE, ip, 8080), Some((99001, 1000)));
+        assert_eq!(
+            parse_proc_net(TCP_WITH_ZERO_INODE, ip, 8080),
+            Some((99001, 1000))
+        );
     }
 
     #[test]
@@ -801,25 +891,37 @@ mod tests {
     #[test]
     fn parse_environ_extracts_appimage_cursor() {
         let environ = "HOME=/home/user\0APPIMAGE=/home/user/Cursor-0.45.5.AppImage\0TERM=xterm\0";
-        assert_eq!(parse_environ_for_app_name(environ).as_deref(), Some("cursor"));
+        assert_eq!(
+            parse_environ_for_app_name(environ).as_deref(),
+            Some("cursor")
+        );
     }
 
     #[test]
     fn parse_environ_extracts_appimage_no_version_suffix() {
         let environ = "APPIMAGE=/opt/myapp.AppImage\0";
-        assert_eq!(parse_environ_for_app_name(environ).as_deref(), Some("myapp"));
+        assert_eq!(
+            parse_environ_for_app_name(environ).as_deref(),
+            Some("myapp")
+        );
     }
 
     #[test]
     fn parse_environ_extracts_hyphenated_app_name() {
         let environ = "APPIMAGE=/downloads/my-editor-1.2.3.AppImage\0";
-        assert_eq!(parse_environ_for_app_name(environ).as_deref(), Some("my-editor"));
+        assert_eq!(
+            parse_environ_for_app_name(environ).as_deref(),
+            Some("my-editor")
+        );
     }
 
     #[test]
     fn parse_environ_uses_electron_app_name_var() {
         let environ = "ELECTRON_APP_NAME=cursor\0OTHER=val\0";
-        assert_eq!(parse_environ_for_app_name(environ).as_deref(), Some("cursor"));
+        assert_eq!(
+            parse_environ_for_app_name(environ).as_deref(),
+            Some("cursor")
+        );
     }
 
     #[test]
@@ -841,7 +943,10 @@ mod tests {
     #[test]
     fn parse_cmdline_cursor_main_process() {
         let cmdline = "/usr/lib/electron42/electron\0/usr/share/cursor/resources/app/cursor.mjs\0";
-        assert_eq!(parse_cmdline_for_app_name(cmdline).as_deref(), Some("cursor"));
+        assert_eq!(
+            parse_cmdline_for_app_name(cmdline).as_deref(),
+            Some("cursor")
+        );
     }
 
     #[test]

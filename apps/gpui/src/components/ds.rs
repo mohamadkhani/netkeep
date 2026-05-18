@@ -4,9 +4,8 @@
 //! panels lives here so that visual consistency is enforced in one place.
 
 use gpui::{
-    AnyElement, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, WeakEntity, div, px,
-    prelude::FluentBuilder as _,
+    div, prelude::FluentBuilder as _, px, AnyElement, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, StatefulInteractiveElement, Styled, WeakEntity,
 };
 use gpui_component::h_flex;
 
@@ -65,14 +64,19 @@ where
             el.bg(colors::primary()).border_color(colors::primary())
         })
         .when(!selected, |el| {
-            el.bg(gpui::transparent_black()).border_color(colors::border())
+            el.bg(gpui::transparent_black())
+                .border_color(colors::border())
         })
         .on_click(on_click)
         .child(
             div()
                 .text_size(px(11.))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if selected { colors::on_primary() } else { colors::muted() })
+                .text_color(if selected {
+                    colors::on_primary()
+                } else {
+                    colors::muted()
+                })
                 .child(label.into()),
         )
         .into_any_element()
@@ -116,11 +120,7 @@ pub fn dest_kind_label(dest: &DestinationMatcher) -> &'static str {
 /// `active_octets` is the number of active (non-masked) octets from the left (1..=4).
 /// Clicking an active octet masks it and all after; clicking a masked octet activates
 /// it and all before. The `/prefix` badge updates live.
-pub fn cidr_picker(
-    ip: &str,
-    active_octets: u8,
-    state_weak: WeakEntity<AppState>,
-) -> AnyElement {
+pub fn cidr_picker(ip: &str, active_octets: u8, state_weak: WeakEntity<AppState>) -> AnyElement {
     let parts: Vec<&str> = ip.splitn(4, '.').collect();
     let o: Vec<String> = (0..4)
         .map(|i| parts.get(i).copied().unwrap_or("0").to_string())
@@ -179,7 +179,8 @@ fn octet_chip(
                 .bg(gpui::hsla(0.61, 1., 0.84, 0.10))
         })
         .when(!is_active, |el| {
-            el.border_color(colors::border()).bg(gpui::transparent_black())
+            el.border_color(colors::border())
+                .bg(gpui::transparent_black())
         })
         .child(
             div()
@@ -195,7 +196,11 @@ fn octet_chip(
         .on_click(move |_, _, cx| {
             if let Some(s) = state_weak.upgrade() {
                 s.update(cx, |st, cx| {
-                    let current = if let DestScope::IpCidr(n) = st.dest_scope { n } else { 4 };
+                    let current = if let DestScope::IpCidr(n) = st.dest_scope {
+                        n
+                    } else {
+                        4
+                    };
                     let new_active = if index <= current {
                         (index - 1).max(1)
                     } else {
@@ -223,10 +228,7 @@ fn octet_sep() -> AnyElement {
 
 /// A row with a 72px muted label on the left and arbitrary content on the right.
 /// Standard layout unit for form-like sections (rule scope, flow info rows, etc.).
-pub fn label_row(
-    label: impl Into<gpui::SharedString>,
-    content: AnyElement,
-) -> AnyElement {
+pub fn label_row(label: impl Into<gpui::SharedString>, content: AnyElement) -> AnyElement {
     h_flex()
         .w_full()
         .items_center()

@@ -1,5 +1,5 @@
 use core_types::FlowDirection;
-use gpui::{FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px};
+use gpui::{div, px, FontWeight, IntoElement, ParentElement, SharedString, Styled};
 use gpui_component::{h_flex, v_flex};
 
 use crate::colors;
@@ -15,9 +15,7 @@ pub fn flow_info_section(
     device_label: &Option<String>,
     mono_font_family: SharedString,
 ) -> gpui::AnyElement {
-    let destination = domain
-        .as_deref()
-        .unwrap_or("(unknown)");
+    let destination = domain.as_deref().unwrap_or("(unknown)");
 
     let direction_str = match direction {
         FlowDirection::Outbound => "OUTBOUND",
@@ -77,16 +75,8 @@ pub fn flow_info_section(
 fn grid_row(label: gpui::AnyElement, value: gpui::AnyElement) -> gpui::AnyElement {
     h_flex()
         .w_full()
-        .child(
-            div()
-                .w(px(120.))
-                .child(label),
-        )
-        .child(
-            div()
-                .flex_1()
-                .child(value),
-        )
+        .child(div().w(px(120.)).child(label))
+        .child(div().flex_1().child(value))
         .into_any_element()
 }
 
@@ -100,17 +90,19 @@ fn label_element(label: &str, ui_font: SharedString) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn process_value(process_name: &str, app_name: Option<&str>, ui_font: SharedString) -> gpui::AnyElement {
+fn process_value(
+    process_name: &str,
+    app_name: Option<&str>,
+    ui_font: SharedString,
+) -> gpui::AnyElement {
     let name_col = {
-        let mut col = v_flex()
-            .gap(px(2.))
-            .child(
-                div()
-                    .font_family(ui_font.clone())
-                    .text_color(colors::text())
-                    .text_size(px(13.))
-                    .child(SharedString::from(process_name.to_string())),
-            );
+        let mut col = v_flex().gap(px(2.)).child(
+            div()
+                .font_family(ui_font.clone())
+                .text_color(colors::text())
+                .text_size(px(13.))
+                .child(SharedString::from(process_name.to_string())),
+        );
         if let Some(pkg) = app_name {
             col = col.child(
                 div()

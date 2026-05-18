@@ -1,10 +1,10 @@
 //! Reusable modal (dialog) components matching the LogiGuard design system.
 
 use gpui::{
-    AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px,
+    div, px, AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
+    ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled, Window,
 };
-use gpui_component::{WindowExt as _, h_flex};
+use gpui_component::{h_flex, WindowExt as _};
 
 use crate::colors;
 
@@ -50,9 +50,11 @@ pub fn modal_header(icon: &str, title: &str) -> impl IntoElement {
                 .p(px(5.))
                 .rounded(px(4.))
                 .cursor_pointer()
-                .on_click(|_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
-                    window.close_dialog(cx);
-                })
+                .on_click(
+                    |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
+                        window.close_dialog(cx);
+                    },
+                )
                 .child("✕"),
         )
 }

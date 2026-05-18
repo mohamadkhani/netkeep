@@ -54,11 +54,7 @@ impl<R: Repository> ControlService<R> {
         )
     }
 
-    pub fn with_nfqueue(
-        repo: R,
-        nfqueue_enabled: bool,
-        nfqueue_num: Option<u16>,
-    ) -> Self {
+    pub fn with_nfqueue(repo: R, nfqueue_enabled: bool, nfqueue_num: Option<u16>) -> Self {
         let default_timeout_secs = 100;
         let pending_limit = 100;
         let health_config = HealthConfig {
@@ -72,7 +68,11 @@ impl<R: Repository> ControlService<R> {
         let (notification_tx, _) = tokio::sync::broadcast::channel(500);
         Self {
             repo,
-            decision_engine: DecisionEngine::new(pending_limit, default_timeout_secs, OverflowPolicy::DenyNew),
+            decision_engine: DecisionEngine::new(
+                pending_limit,
+                default_timeout_secs,
+                OverflowPolicy::DenyNew,
+            ),
             health_config,
             now_secs: 0,
             event_counter: 0,
@@ -152,9 +152,9 @@ impl<R: Repository> ControlService<R> {
         for id in expired_ids {
             self.repo.delete_pending(&id);
             // NEW: Send push notification for expired pending
-            let _ = self.notification_tx.send(PushNotification::PendingExpired {
-                pending_id: id,
-            });
+            let _ = self
+                .notification_tx
+                .send(PushNotification::PendingExpired { pending_id: id });
             // Record expiry as a flow event (best-effort; we may not have full context here)
         }
     }
@@ -233,7 +233,10 @@ impl<R: Repository> ControlService<R> {
                         resolved.rule_id,
                         resolved.action,
                         flow.process_name,
-                        flow.app_name.as_deref().map(|a| format!(" ({})", a)).unwrap_or_default(),
+                        flow.app_name
+                            .as_deref()
+                            .map(|a| format!(" ({})", a))
+                            .unwrap_or_default(),
                         flow.destination_domain,
                         flow.destination_ip
                     );
@@ -258,7 +261,10 @@ impl<R: Repository> ControlService<R> {
                         RuleAction::Ask => {}
                     }
                 }
-                match self.decision_engine.register_unknown_flow(flow.clone(), now_secs) {
+                match self
+                    .decision_engine
+                    .register_unknown_flow(flow.clone(), now_secs)
+                {
                     DecisionOutcome::Immediate(action) => {
                         let state = if action == RuleAction::Allow {
                             FlowState::Allowed
@@ -266,14 +272,19 @@ impl<R: Repository> ControlService<R> {
                             FlowState::Denied
                         };
                         self.record_event(&flow, state, now_secs);
-                        ControlResponse::ImmediateVerdict { action, route_target: None }
+                        ControlResponse::ImmediateVerdict {
+                            action,
+                            route_target: None,
+                        }
                     }
                     DecisionOutcome::Pending(p) => {
                         self.record_event(&flow, FlowState::Pending, now_secs);
                         self.repo.upsert_pending(&p);
                         // NEW: Send push notification to subscribers
                         let decision = p.clone();
-                        let _ = self.notification_tx.send(PushNotification::PendingCreated { decision });
+                        let _ = self
+                            .notification_tx
+                            .send(PushNotification::PendingCreated { decision });
                         ControlResponse::PendingCreated {
                             pending_id: p.id,
                             created_at_secs: p.created_at_secs,
@@ -290,7 +301,10 @@ impl<R: Repository> ControlService<R> {
                     } else {
                         None
                     };
-                    ControlResponse::PendingResolved { action, route_target }
+                    ControlResponse::PendingResolved {
+                        action,
+                        route_target,
+                    }
                 } else if self.decision_engine.is_pending(&pending_id) {
                     ControlResponse::PendingStillWaiting { pending_id }
                 } else {
@@ -298,7 +312,10 @@ impl<R: Repository> ControlService<R> {
                 }
             }
             ControlRequest::ResolvePending { pending_id, action } => {
-                if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action, None) {
+                if let Some(chosen) =
+                    self.decision_engine
+                        .resolve_pending(&pending_id, action, None)
+                {
                     self.repo.delete_pending(&pending_id);
                     let route_target = if chosen == RuleAction::Route {
                         // No rule context here — best-effort: no target
@@ -306,34 +323,51 @@ impl<R: Repository> ControlService<R> {
                     } else {
                         None
                     };
-                    let _ = self.notification_tx.send(PushNotification::PendingResolved {
-                        pending_id: pending_id.clone(),
-                        action: chosen.clone(),
-                    });
-                    ControlResponse::PendingResolved { action: chosen, route_target }
+                    let _ = self
+                        .notification_tx
+                        .send(PushNotification::PendingResolved {
+                            pending_id: pending_id.clone(),
+                            action: chosen.clone(),
+                        });
+                    ControlResponse::PendingResolved {
+                        action: chosen,
+                        route_target,
+                    }
                 } else {
                     ControlResponse::Error("pending decision not found".to_string())
                 }
             }
-            ControlRequest::ResolvePendingWithRule { pending_id, action, rule } => {
+            ControlRequest::ResolvePendingWithRule {
+                pending_id,
+                action,
+                rule,
+            } => {
                 // Install the rule first, then sweep: any other pending decisions
                 // already in the queue that the new rule covers are auto-resolved
                 // without showing additional dialogs.
                 let egress_id = rule.egress_id.clone();
                 self.repo.upsert_rule(rule);
                 self.sweep_pending();
-                if let Some(chosen) = self.decision_engine.resolve_pending(&pending_id, action, egress_id.clone()) {
+                if let Some(chosen) =
+                    self.decision_engine
+                        .resolve_pending(&pending_id, action, egress_id.clone())
+                {
                     self.repo.delete_pending(&pending_id);
                     let route_target = if chosen == RuleAction::Route {
                         self.resolve_route_target(&egress_id)
                     } else {
                         None
                     };
-                    let _ = self.notification_tx.send(PushNotification::PendingResolved {
-                        pending_id: pending_id.clone(),
-                        action: chosen.clone(),
-                    });
-                    ControlResponse::PendingResolved { action: chosen, route_target }
+                    let _ = self
+                        .notification_tx
+                        .send(PushNotification::PendingResolved {
+                            pending_id: pending_id.clone(),
+                            action: chosen.clone(),
+                        });
+                    ControlResponse::PendingResolved {
+                        action: chosen,
+                        route_target,
+                    }
                 } else {
                     ControlResponse::Error("pending decision not found".to_string())
                 }
@@ -419,12 +453,18 @@ impl<R: Repository> ControlService<R> {
                             "sweep_pending: auto-resolving {} ({:?} → {:?})",
                             p.id, p.flow.process_name, action
                         );
-                        self.decision_engine.resolve_pending(&p.id, action.clone(), resolved.egress_id.clone());
+                        self.decision_engine.resolve_pending(
+                            &p.id,
+                            action.clone(),
+                            resolved.egress_id.clone(),
+                        );
                         self.repo.delete_pending(&p.id);
-                        let _ = self.notification_tx.send(PushNotification::PendingResolved {
-                            pending_id: p.id,
-                            action,
-                        });
+                        let _ = self
+                            .notification_tx
+                            .send(PushNotification::PendingResolved {
+                                pending_id: p.id,
+                                action,
+                            });
                     }
                 }
             }
@@ -436,7 +476,10 @@ impl<R: Repository> ControlService<R> {
 /// available. For Device/Tun targets availability is checked via
 /// `/sys/class/net/<name>/operstate`; Proxy targets are available when the
 /// `ProxyRepository` says `enabled == true`.
-fn first_available_target<R: state_store::ProxyRepository>(egress: &Egress, repo: &R) -> Option<RouteTarget> {
+fn first_available_target<R: state_store::ProxyRepository>(
+    egress: &Egress,
+    repo: &R,
+) -> Option<RouteTarget> {
     for target in &egress.targets {
         let available = match target {
             RouteTarget::Tun(name) | RouteTarget::Device(name) => {
@@ -445,9 +488,7 @@ fn first_available_target<R: state_store::ProxyRepository>(egress: &Egress, repo
                 let s = state.trim();
                 s == "up" || s == "unknown"
             }
-            RouteTarget::Proxy(id) => {
-                repo.get_proxy(id).map(|p| p.enabled).unwrap_or(false)
-            }
+            RouteTarget::Proxy(id) => repo.get_proxy(id).map(|p| p.enabled).unwrap_or(false),
         };
         if available {
             return Some(target.clone());
@@ -458,17 +499,21 @@ fn first_available_target<R: state_store::ProxyRepository>(egress: &Egress, repo
 
 /// Newtype wrapper that lets a shared `ControlService` be used as a `FlowRegistrar`
 /// across threads (e.g., handed to the nfqueue processor thread).
-pub struct SharedService<R: Repository>(
-    pub std::sync::Arc<std::sync::Mutex<ControlService<R>>>,
-);
+pub struct SharedService<R: Repository>(pub std::sync::Arc<std::sync::Mutex<ControlService<R>>>);
 
 impl<R: Repository> FlowRegistrar for SharedService<R> {
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
-        self.0.lock().expect("service lock poisoned").register(flow, now_secs)
+        self.0
+            .lock()
+            .expect("service lock poisoned")
+            .register(flow, now_secs)
     }
 
     fn route_mark(&mut self, target: &RouteTarget) -> Option<u32> {
-        self.0.lock().expect("service lock poisoned").route_mark(target)
+        self.0
+            .lock()
+            .expect("service lock poisoned")
+            .route_mark(target)
     }
 }
 
@@ -480,7 +525,10 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                 resolved.rule_id,
                 resolved.action,
                 flow.process_name,
-                flow.app_name.as_deref().map(|a| format!(" ({})", a)).unwrap_or_default(),
+                flow.app_name
+                    .as_deref()
+                    .map(|a| format!(" ({})", a))
+                    .unwrap_or_default(),
                 flow.destination_domain,
                 flow.destination_ip
             );
@@ -502,7 +550,10 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                 RuleAction::Ask => {}
             }
         }
-        match self.decision_engine.register_unknown_flow(flow.clone(), now_secs) {
+        match self
+            .decision_engine
+            .register_unknown_flow(flow.clone(), now_secs)
+        {
             DecisionOutcome::Immediate(action) => {
                 let state = match &action {
                     RuleAction::Allow | RuleAction::Route => FlowState::Allowed,
@@ -530,7 +581,10 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
 #[cfg(test)]
 mod tests {
     use control_api::{ControlRequest, ControlResponse};
-    use core_types::{DestinationMatcher, FlowContext, FlowDirection, Rule, RuleAction, RuleDuration, TransportProtocol};
+    use core_types::{
+        DestinationMatcher, FlowContext, FlowDirection, Rule, RuleAction, RuleDuration,
+        TransportProtocol,
+    };
     use state_store::InMemoryRuleRepository;
 
     use super::{ControlService, HealthConfig};
@@ -606,7 +660,13 @@ mod tests {
             pending_id,
             action: RuleAction::Deny,
         });
-        assert_eq!(resolved, ControlResponse::PendingResolved { action: RuleAction::Deny, route_target: None });
+        assert_eq!(
+            resolved,
+            ControlResponse::PendingResolved {
+                action: RuleAction::Deny,
+                route_target: None
+            }
+        );
     }
 
     #[test]
@@ -638,7 +698,13 @@ mod tests {
         let resolved = service.handle(ControlRequest::AwaitPendingDecision {
             pending_id: pending_id.clone(),
         });
-        assert_eq!(resolved, ControlResponse::PendingResolved { action: RuleAction::Allow, route_target: None });
+        assert_eq!(
+            resolved,
+            ControlResponse::PendingResolved {
+                action: RuleAction::Allow,
+                route_target: None
+            }
+        );
     }
 
     #[test]
@@ -665,7 +731,10 @@ mod tests {
             pending_id: "missing".to_string(),
             action: RuleAction::Allow,
         });
-        assert_eq!(out, ControlResponse::Error("pending decision not found".to_string()));
+        assert_eq!(
+            out,
+            ControlResponse::Error("pending decision not found".to_string())
+        );
     }
 
     #[test]
@@ -681,20 +750,16 @@ mod tests {
             other_timeout_secs: 30,
         };
         let (tx, _) = tokio::sync::broadcast::channel(100);
-        let mut service =
-            ControlService::with_decision_engine_and_health(
-                InMemoryRuleRepository::default(),
-                engine,
-                health,
-                tx,
-            );
+        let mut service = ControlService::with_decision_engine_and_health(
+            InMemoryRuleRepository::default(),
+            engine,
+            health,
+            tx,
+        );
 
         let mut flow = mk_flow();
         flow.protocol = TransportProtocol::Udp;
-        let register = service.handle(ControlRequest::RegisterUnknownFlow {
-            flow,
-            now_secs: 50,
-        });
+        let register = service.handle(ControlRequest::RegisterUnknownFlow { flow, now_secs: 50 });
         match register {
             ControlResponse::PendingCreated {
                 deadline_at_secs, ..
@@ -716,13 +781,12 @@ mod tests {
             other_timeout_secs: 30,
         };
         let (tx, _) = tokio::sync::broadcast::channel(100);
-        let mut service =
-            ControlService::with_decision_engine_and_health(
-                InMemoryRuleRepository::default(),
-                engine,
-                health,
-                tx,
-            );
+        let mut service = ControlService::with_decision_engine_and_health(
+            InMemoryRuleRepository::default(),
+            engine,
+            health,
+            tx,
+        );
         let out = service.handle(ControlRequest::Health);
         assert_eq!(
             out,

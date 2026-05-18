@@ -31,8 +31,8 @@ pub fn unix_now() -> u64 {
 }
 
 pub fn fetch_pending(pending_id: &str) -> anyhow::Result<PendingDecision> {
-    let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
-        .unwrap_or_else(|_| SOCKET_PATH.to_string());
+    let socket_path =
+        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
 
     match send_request(&socket_path, &ControlRequest::ListPending)? {
         ControlResponse::PendingList(mut items) => {
@@ -131,7 +131,11 @@ pub fn detect_egresses() -> Vec<core_types::Egress> {
             }
             // type 1 = Ethernet (physical NICs and bridges)
             // Skip known virtual bridges
-            else if *if_type == 1 && !name.starts_with("docker") && !name.starts_with("virbr") && !name.starts_with("br-") {
+            else if *if_type == 1
+                && !name.starts_with("docker")
+                && !name.starts_with("virbr")
+                && !name.starts_with("br-")
+            {
                 let is_wireless = name.starts_with("wl") || name.starts_with("wlp");
                 let label = if is_wireless {
                     format!("Wi-Fi: {name}")
@@ -157,8 +161,8 @@ pub fn detect_egresses() -> Vec<core_types::Egress> {
 /// Fetch all egresses from the daemon and merge interface availability from the local system.
 /// Falls back to `detect_egresses()` if the daemon is unreachable.
 pub fn fetch_egresses() -> Vec<Egress> {
-    let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
-        .unwrap_or_else(|_| SOCKET_PATH.to_string());
+    let socket_path =
+        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
 
     match send_request(&socket_path, &ControlRequest::ListEgresses) {
         Ok(ControlResponse::EgressList(egresses)) => merge_egress_availability(egresses),
@@ -169,8 +173,10 @@ pub fn fetch_egresses() -> Vec<Egress> {
 /// Refresh `is_available` from a local interface scan; keeps daemon-persisted names, targets, and DNS.
 pub fn merge_egress_availability(mut stored: Vec<Egress>) -> Vec<Egress> {
     let detected = detect_egresses();
-    let by_id: HashMap<String, bool> =
-        detected.into_iter().map(|e| (e.id.clone(), e.is_available)).collect();
+    let by_id: HashMap<String, bool> = detected
+        .into_iter()
+        .map(|e| (e.id.clone(), e.is_available))
+        .collect();
     for e in &mut stored {
         if let Some(av) = by_id.get(&e.id) {
             e.is_available = *av;
@@ -181,8 +187,8 @@ pub fn merge_egress_availability(mut stored: Vec<Egress>) -> Vec<Egress> {
 
 /// Get current NFQUEUE status from daemon.
 pub fn get_nfqueue_status() -> anyhow::Result<(bool, Option<u16>)> {
-    let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
-        .unwrap_or_else(|_| SOCKET_PATH.to_string());
+    let socket_path =
+        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
 
     match send_request(&socket_path, &ControlRequest::Health)? {
         ControlResponse::Health {
@@ -197,8 +203,8 @@ pub fn get_nfqueue_status() -> anyhow::Result<(bool, Option<u16>)> {
 
 /// Toggle NFQUEUE on or off.
 pub fn set_nfqueue_enabled(enabled: bool) -> anyhow::Result<()> {
-    let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
-        .unwrap_or_else(|_| SOCKET_PATH.to_string());
+    let socket_path =
+        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
 
     match send_request(&socket_path, &ControlRequest::SetNfqueueEnabled { enabled })? {
         ControlResponse::Ok => Ok(()),
