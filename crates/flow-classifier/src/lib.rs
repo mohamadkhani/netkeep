@@ -1,4 +1,5 @@
 pub mod proc_resolver;
+pub mod sock_diag;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

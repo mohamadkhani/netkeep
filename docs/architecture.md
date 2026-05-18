@@ -174,7 +174,7 @@ Pending queue and timeout state machine.
 Process and domain attribution.
 
 **Key Functions:**
-- Determine source process (via netstat/procfs lookup)
+- Determine source process (via SOCK_DIAG netlink → `/proc/net` fallback → inode → `/proc/*/fd/` scan)
 - Determine destination domain (via DNS or SNI hints)
 - Handle domain resolution: SNI/Host is authoritative; DNS cache is fallback
 - QUIC best-effort domain inference
@@ -186,9 +186,10 @@ Process and domain attribution.
 - `DeviceLabelResolver` — attach device labels (e.g., "vpn-work")
 
 **Implementation:**
-- `ProcProcessResolver` reads `/proc/net/{tcp,tcp6,udp,udp6}` → inode → `/proc/*/fd/*` → `/proc/<pid>/exe`/`comm`, with a UID-filtered first pass and a parent-exe fallback for known shell wrappers (`sh/bash/dash/zsh/fish`). Successful resolutions are cached by `(src_ip, src_port, protocol)` (60 s TTL, 4096-entry cap) so retransmits do not re-race the kernel.
-  - **Dual-file lookup:** both the IPv4 and IPv6 `/proc/net` files are checked for any src_ip. Modern apps using `AF_INET6` sockets with `IPV6_V6ONLY=0` appear only in `/proc/net/tcp6` even for IPv4 destinations (as `::ffff:a.b.c.d`). `parse_hex_addr()` normalises 8-char and 32-char hex, collapsing IPv4-mapped addresses to `IpAddr::V4`. `parse_proc_net` performs cross-family comparison (V4↔V4, V6↔V6, V4↔V6 via `to_ipv4_mapped()`).
-  - **Retry policy:** 4 attempts at `[0, 5, 15, 40]ms` (60 ms worst case) covering native apps, Electron, JVM, and sandbox wrappers. Only the first SYN of each connection reaches NFQUEUE, so this latency is paid at most once per connection.
+- `ProcProcessResolver` queries the kernel's `SOCK_DIAG` netlink interface for `(inode, uid)` synchronously, then falls back to `/proc/net/{tcp,tcp6,udp,udp6}` when netlink is unavailable. The inode is mapped to a pid via `/proc/*/fd/*` → `/proc/<pid>/exe`/`comm`, with a UID-filtered first pass and a parent-exe fallback for known shell wrappers (`sh/bash/dash/zsh/fish`). Successful resolutions are cached by `(src_ip, src_port, protocol)` (60 s TTL, 4096-entry cap) so retransmits do not re-race the kernel.
+  - **SOCK_DIAG primary:** `sock_diag::query_socket_inode` sends `InetRequest` via `NETLINK_SOCK_DIAG`, returning `(inode, uid)` from the kernel's internal socket structures without reading `/proc/net`. No TOCTOU race.
+  - **Dual-file /proc fallback:** both the IPv4 and IPv6 `/proc/net` files are checked for any src_ip. Modern apps using `AF_INET6` sockets with `IPV6_V6ONLY=0` appear only in `/proc/net/tcp6` even for IPv4 destinations (as `::ffff:a.b.c.d`). `parse_hex_addr()` normalises 8-char and 32-char hex, collapsing IPv4-mapped addresses to `IpAddr::V4`. `parse_proc_net` performs cross-family comparison (V4↔V4, V6↔V6, V4↔V6 via `to_ipv4_mapped()`).
+  - **Retry policy:** 4 attempts at `[0, 5, 15, 40]ms` (60 ms worst case) for the `/proc/net` fallback path. SOCK_DIAG needs no retry — it is synchronous. Only the first SYN of each connection reaches NFQUEUE, so this latency is paid at most once per connection.
   - See [`docs/process-resolver.md`](process-resolver.md) and [`docs/process-attribution-races.md`](process-attribution-races.md).
 - TLS SNI extraction is in `enforcer::nfqueue::extract_tls_sni`; domains discovered from SNI populate the shared `SniDnsCache` consumed by `FlowClassifier`. QUIC SNI is not yet parsed.
 

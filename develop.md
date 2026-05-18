@@ -687,3 +687,13 @@ User reported that process name and domain detection randomly fail — the same 
 - [x] **Tests:** 1 test replaced with 2 (old `dns_sni_conflict_yields_ip_only` split into `sni_overrides_stale_dns_cache_on_cdn_ip` + `dns_cache_used_when_no_sni`). Workspace total **164 → 165** tests, all pass.
 
 - [x] **Documentation:** Updated `docs/nfqueue-domain-inference.md` (Domain Resolution Priority table rewritten). Updated `docs/architecture.md` design decision #3 (from "DNS/SNI conflict → IP-only" to "SNI is authoritative over DNS cache").
+
+### 2026-05-18 (session 33 — SOCK_DIAG netlink: eliminate /proc TOCTOU race for process detection)
+
+Process name detection randomly failed because `retry_find_socket` races with the kernel's asynchronous publication of socket entries to `/proc/net/tcp`. The retry delays ([0, 5, 15, 40]ms) closed most of the gap but not all of it, especially under heavy system load or during desktop startup when many applications launch simultaneously. The `ss` subprocess fallback used the kernel's SOCK_DIAG netlink interface (which has no race) but only fired after 60ms of wasted `/proc` retries.
+
+- [x] **Fix.** Added `crates/flow-classifier/src/sock_diag.rs` — `query_socket_inode()` via `NETLINK_SOCK_DIAG` / `InetRequest` with `(src_ip, src_port)` in `SocketId`. Returns `(inode, uid)` from kernel socket structures without reading `/proc/net`. Dependencies: `netlink-packet-core`, `netlink-packet-sock-diag`, `netlink-sys`. `ProcProcessResolver::find_pid` tries SOCK_DIAG first, then `retry_find_socket`, then `ss`.
+
+- [x] **Tests:** 167 tests passing (`cargo test --workspace`). Unit tests: `query_socket_inode_does_not_panic`, `sock_addr_matches_ipv4_mapped`.
+
+- [x] **Documentation:** `docs/process-resolver.md` lookup chain + race section updated for SOCK_DIAG primary path.

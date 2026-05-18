@@ -1,6 +1,6 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 165 tests passing (`cargo test --workspace`)
+**Test Status:** 167 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
 **Last Updated:** 2026-05-17
 
@@ -289,6 +289,8 @@
 - **Files:** `crates/flow-classifier/src/lib.rs`.
 - **Tests:** +1 (old conflict test split into 2). 164 → 165.
 - **Docs:** `docs/nfqueue-domain-inference.md` Domain Resolution Priority rewritten; `docs/architecture.md` design decision #3 rewritten.
+
+**Process resolver (2026-05-19):** SOCK_DIAG netlink is now the primary inode lookup (`crates/flow-classifier/src/sock_diag.rs`), before `/proc/net` retries and `ss` fallback. Mitigates kernel-publishing TOCTOU on first packets of new connections. See `docs/process-resolver.md`.
 
 ## Settings UI Polish (2026-05-16)
 

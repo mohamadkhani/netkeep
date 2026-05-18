@@ -6,18 +6,20 @@ use std::time::{Duration, Instant};
 
 use core_types::TransportProtocol;
 
+use crate::sock_diag;
 use crate::{ProcessInfo, ProcessResolver};
 
 /// Real ProcessResolver: (src_ip, src_port, protocol) → ProcessInfo.
 ///
 /// Lookup pipeline:
 ///   1. Per-socket cache hit — successful resolutions are cached for 60 s.
-///   2. /proc/net/{tcp,tcp6,udp,udp6} → inode + uid (with retry delays).
-///   3. /proc/*/fd/ scan → pid (UID-filtered first pass, full fallback).
-///   4. `ss` fallback (SOCK_DIAG) if either /proc/net or /proc/*/fd fails.
-///   5. /proc/<pid>/exe → full path + basename name.
-///   6. Name fixup: shell wrappers → parent, electron/AppRun → cmdline/env.
-///   7. `pacman -Qo <exe>` → app_name (Arch Linux, cached per exe path).
+///   2. SOCK_DIAG netlink → inode + uid (kernel socket table, no /proc race).
+///   3. /proc/net/{tcp,tcp6,udp,udp6} → inode + uid (with retry delays).
+///   4. /proc/*/fd/ scan → pid (UID-filtered first pass, full fallback).
+///   5. `ss` fallback if inode lookup or fd scan fails.
+///   6. /proc/<pid>/exe → full path + basename name.
+///   7. Name fixup: shell wrappers → parent, electron/AppRun → cmdline/env.
+///   8. `pacman -Qo <exe>` → app_name (Arch Linux, cached per exe path).
 pub struct ProcProcessResolver {
     /// Per-socket ProcessInfo cache keyed by (src_ip, src_port, protocol).
     cache: Mutex<HashMap<SocketKey, CachedEntry>>,
@@ -57,15 +59,17 @@ impl ProcProcessResolver {
     }
 
     /// Find the PID that owns the socket:
-    ///   1. /proc/net + /proc/*/fd scan (primary).
-    ///   2. `ss` command fallback if the primary path returns None.
+    ///   1. SOCK_DIAG netlink (kernel socket table, no /proc race).
+    ///   2. /proc/net + /proc/*/fd scan with retries.
+    ///   3. `ss` command fallback if both paths miss the inode or fd scan.
     fn find_pid(&self, ip: IpAddr, port: u16, protocol: TransportProtocol) -> Option<u32> {
-        if let Some((inode, uid)) = retry_find_socket(ip, port, protocol) {
+        let inode_uid = sock_diag::query_socket_inode(ip, port, protocol)
+            .or_else(|| retry_find_socket(ip, port, protocol));
+        if let Some((inode, uid)) = inode_uid {
             if let Some(pid) = find_pid_for_inode(inode, uid) {
                 return Some(pid);
             }
-            // /proc/net found the inode but /proc/*/fd scan came up empty
-            // (fork/exec visibility gap). Try ss before giving up.
+            // Inode found but /proc/*/fd scan came up empty (fork/exec gap).
         }
         try_ss_fallback(ip, port, protocol)
     }
@@ -240,7 +244,7 @@ fn ss_local_matches(addr: &str, ip: IpAddr, port: u16) -> bool {
         return false;
     };
     let port_str = port.to_string();
-    if &addr[colon + 1..] != port_str {
+    if addr[colon + 1..] != port_str {
         return false;
     }
     let addr_part = addr[..colon].trim_matches('[').trim_matches(']');
@@ -387,7 +391,7 @@ pub fn parse_proc_net(content: &str, src_ip: IpAddr, src_port: u16) -> Option<(u
         let Some(colon) = local.rfind(':') else {
             continue;
         };
-        if &local[colon + 1..] != port_hex {
+        if local[colon + 1..] != port_hex {
             continue;
         }
         let addr_hex = &local[..colon];
@@ -433,7 +437,7 @@ fn parse_proc_net_port_only(content: &str, src_port: u16) -> Option<(u64, u32)> 
         let Some(colon) = local.rfind(':') else {
             continue;
         };
-        if &local[colon + 1..] != port_hex {
+        if local[colon + 1..] != port_hex {
             continue;
         }
         let inode: u64 = cols[9].parse().ok()?;
@@ -590,7 +594,7 @@ pub(crate) fn parse_environ_for_app_name(environ: &str) -> Option<String> {
                 .take_while(|part| !part.starts_with(|c: char| c.is_ascii_digit()))
                 .collect::<Vec<_>>()
                 .join("-");
-            let name = if name.is_empty() { stem } else { name.into() };
+            let name = if name.is_empty() { stem } else { name };
             if name.len() > 2 {
                 return Some(name.to_string());
             }

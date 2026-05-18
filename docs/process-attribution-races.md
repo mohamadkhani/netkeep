@@ -8,9 +8,9 @@ This document is the post-mortem of the duplicate-dialog bug fixed in session 19
 
 ## The race
 
-`ProcProcessResolver` answers the question *"what local process owns this packet?"* by reading `/proc/net/{tcp,tcp6,udp,udp6}` for the matching `(src_ip, src_port)` row, then scanning `/proc/*/fd/` for the matching `socket:[inode]` symlink. Two things make this inherently racy with NFQUEUE packet delivery:
+`ProcProcessResolver` answers the question *"what local process owns this packet?"* by querying the kernel's `SOCK_DIAG` netlink interface for `(src_ip, src_port)`, falling back to reading `/proc/net/{tcp,tcp6,udp,udp6}` for the matching row, then scanning `/proc/*/fd/` for the matching `socket:[inode]` symlink. Two things make this inherently racy with NFQUEUE packet delivery:
 
-1. **The kernel publishes the socket entry to `/proc/net` *asynchronously*.** A packet can be handed to userspace by NFQUEUE while the corresponding `/proc/net/tcp` row has not been written yet (or has just been overwritten/reordered by another CPU). The retry loop in `retry_find_socket` (delays `[0, 3, 8]` ms) closes most of this window but not all of it.
+1. **The `/proc/net` fallback is asynchronous.** SOCK_DIAG returns inode + uid synchronously from the kernel's socket hash table and avoids this race entirely. When SOCK_DIAG misses (netlink unavailable, permission denied), the `/proc/net` fallback can race: a packet may be handed to userspace by NFQUEUE while the corresponding `/proc/net/tcp` row has not been written yet. The retry loop in `retry_find_socket` (delays `[0, 5, 15, 40]` ms) closes most of this window but not all of it.
 2. **The same packet may be re-classified more than once.** A pending decision means NFQUEUE drops the packet; the kernel retransmits. Each retransmit re-enters NFQUEUE and is re-classified by `FlowClassifier`. A flow whose first attempt yielded `process_name = None` can yield `Some("curl")` on the second — or vice versa.
 
 The observable symptom is always the same: **two dialogs for the same logical connection**, one with the process name, one without.
@@ -75,11 +75,11 @@ Each layer protects against a different time-slice of the problem.
 **TTL:** 60 s
 **Cap:** 4096 entries, evicted on next insert when full
 
-**Why this is enough.** A successful `/proc/net/tcp` resolution for `(192.168.1.5, 54321, TCP)` is stable for the lifetime of that socket. The kernel does not rebind those exact `(ip, port)` tuples to a different process while the first socket is alive. A retransmit of the same connection will therefore hit the cache and return the same name we already learned, even if `/proc/net/tcp` briefly fails the next read.
+**Why this is enough.** A successful SOCK_DIAG or `/proc/net/tcp` resolution for `(192.168.1.5, 54321, TCP)` is stable for the lifetime of that socket. The kernel does not rebind those exact `(ip, port)` tuples to a different process while the first socket is alive. A retransmit of the same connection will therefore hit the cache and return the same name we already learned, even if the live lookup would briefly fail.
 
 **Why 60 s is the right TTL.** Long enough to cover idle HTTP keep-alive periods and typical TCP `TIME_WAIT`, short enough that an eventual port reuse by a different process gets a fresh lookup.
 
-**Why this is *not* enough on its own.** The first packet of a *new* connection (different `src_port`) bypasses the cache entirely — it has to lose or win the `/proc` race on its own. That is what Layers 2 and 3 are for.
+**Why this is *not* enough on its own.** The first packet of a *new* connection (different `src_port`) bypasses the cache entirely — it has to lose or win the live lookup on its own. SOCK_DIAG makes the inode lookup synchronous, but the fork/exec fd-visibility gap and process-exit races can still produce `None`. That is what Layers 2 and 3 are for.
 
 ### Layer 2 — Symmetric dedup in the decision engine
 
@@ -134,7 +134,7 @@ The current rule is:
 
 ## How the layers interact
 
-A normal connection only ever exercises Layer 1: the first packet's `/proc` lookup wins, the cache fills, every later packet of the connection hits the cache, the decision engine pending (if any) is a single entry, and the policy engine matches cleanly.
+A normal connection only ever exercises Layer 1: the first packet's SOCK_DIAG (or `/proc` fallback) lookup wins, the cache fills, every later packet of the connection hits the cache, the decision engine pending (if any) is a single entry, and the policy engine matches cleanly.
 
 The other layers only fire when something has already gone wrong:
 
@@ -160,7 +160,7 @@ If you remove any layer, an above row reappears as a duplicate dialog.
 
 ## What this is *not*
 
-- It is **not** a substitute for proper process attribution. If you ever switch to `SOCK_DIAG` / `inet_diag_msg` or to an eBPF resolver that does not race, Layers 2 and 3 stay but become rarely-exercised safety nets.
+- It is **not** a substitute for perfect process attribution. SOCK_DIAG eliminates the `/proc/net` TOCTOU race for inode lookup, but the fork/exec fd-visibility gap and process-exit races remain. Layers 2 and 3 are safety nets for those residual misses.
 - It is **not** a way to relax security for wildcard rules. Layer 3 specifically refuses to apply broad rules to unattributed flows.
 - It is **not** a way to merge unrelated processes' decisions. Layer 2 only deduplicates when at least one side is `None`; two distinct known names always stay separate.
 

@@ -29,6 +29,12 @@ You do **not** have the process name. The kernel knows which process opened the 
 └──────────────────────┬─────────────────────────┘
                        │ miss
                        ▼
+SOCK_DIAG netlink (sock_diag.rs)
+  inet_diag by (src_ip, src_port) — kernel socket table
+  returns inode + uid in one round-trip (no /proc race)
+        │
+        │ miss → fallback
+        ▼
 /proc/net/{tcp,tcp6,udp,udp6}
   find row where local_address matches
   retry [0, 5, 15, 40] ms — TOCTOU with kernel publishing
@@ -76,7 +82,15 @@ You do **not** have the process name. The kernel knows which process opened the 
 
 ## Step 1: Find the Socket Inode
 
-The kernel exposes all open sockets in `/proc/net/`:
+### SOCK_DIAG netlink (primary)
+
+`sock_diag::query_socket_inode` opens a `NETLINK_SOCK_DIAG` socket and sends an `InetRequest` with `SocketId` set to the flow's `(src_ip, src_port)` (destination fields wildcarded). The kernel returns `InetResponse` with `inode` and `uid` from its internal socket structures — the same data `ss` uses, but without a subprocess and without waiting for `/proc/net/tcp` to be updated.
+
+On failure (permission denied, parse error, no matching socket), lookup falls through to `/proc/net` and then `ss`.
+
+### `/proc/net` (fallback)
+
+The kernel also exposes open sockets in `/proc/net/`:
 
 | File | Covers |
 |---|---|
@@ -213,7 +227,7 @@ When the full `/proc/net` + inode scan returns `None` (all retries exhausted), `
 3. Extract `pid=N` from the `users:(("name",pid=N,...))` field via `extract_pid_from_ss_line`.
 4. If a pid is found, re-enter the `/proc/<pid>/exe` → name → app_name path.
 
-`ss` is a last resort — it spawns a subprocess and is slower than the `/proc` path. It fires only when `/proc/net` lookup has already failed all four retry attempts.
+`ss` is a last resort — it spawns a subprocess. It fires when both SOCK_DIAG and the `/proc/net` retry loop fail to yield an inode, or when the inode is found but `/proc/*/fd` cannot map it to a pid.
 
 ---
 
@@ -221,7 +235,7 @@ When the full `/proc/net` + inode scan returns `None` (all retries exhausted), `
 
 There are **three** TOCTOU windows that produce `process_name = None`:
 
-1. **Kernel-publishing race.** The kernel writes the socket entry to `/proc/net/{tcp,udp}*` asynchronously. NFQUEUE can hand a packet to userspace before the row is visible. The retry loop in `retry_find_socket` (`[0, 5, 15, 40]` ms, 4 attempts, 60 ms worst case) closes most of this window; under load or for very fast resolvers some packets still miss.
+1. **Kernel-publishing race (`/proc/net` only).** The kernel writes socket rows to `/proc/net/{tcp,udp}*` asynchronously. NFQUEUE can deliver a packet before the row exists. SOCK_DIAG avoids this for inode lookup; the `/proc/net` retry loop (`[0, 5, 15, 40]` ms) remains as fallback when netlink is unavailable.
 2. **Fork/exec fd-visibility gap.** Multi-process apps (e.g. Electron, Chromium) spawn a dedicated network-service subprocess. During the brief `fork`→`exec` transition, the new process's file descriptors are not yet visible in `/proc/<pid>/fd/`, so `find_pid_for_inode` returns `None`. The retry loop in `find_pid_for_inode` (`[0, 3, 8]` ms) covers this window for most apps; very slow forks may still miss.
 3. **Process-exit race.** Between packet delivery and `/proc` lookup the process exits: the inode disappears from `/proc/net/tcp*`, the fd symlink under `/proc/<pid>/fd/` is gone, and the lookup returns `None`.
 
@@ -233,7 +247,7 @@ To stop the kernel-publishing race from producing inconsistent results *across r
 
 `CachedEntry` stores `{ name, exe, app_name, inserted_at }` — the full `ProcessInfo` including the exe path and package name, so repeated lookups for the same socket do not re-query `pacman` or re-read `/proc/<pid>/exe`.
 
-Even with this cache, the **first** packet of a *new* connection still has to win or lose the `/proc` race on its own. The fallback paths in `decision-engine` and `policy-engine` absorb that residual loss; see [`docs/process-attribution-races.md`](process-attribution-races.md) for the full picture.
+Even with this cache, the **first** packet of a *new* connection still runs a live lookup (SOCK_DIAG → `/proc/net` → fd scan). Residual misses (fork/exec gap, process exit) are absorbed by `decision-engine` and `policy-engine` fallbacks; see [`docs/process-attribution-races.md`](process-attribution-races.md).
 
 ### What happens when attribution fails outright
 
