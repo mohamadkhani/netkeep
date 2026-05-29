@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use core_types::{FlowContext, FlowDirection, TransportProtocol};
+use metrics::{counter, histogram};
+use std::time::Instant;
 
 // ── SNI DNS cache ──────────────────────────────────────────────────────────────
 
@@ -133,9 +135,25 @@ where
     }
 
     pub fn classify(&self, packet: &RawPacket) -> FlowContext {
+        let start = Instant::now();
+        let proto_str = match packet.protocol {
+            TransportProtocol::Tcp => "tcp",
+            TransportProtocol::Udp => "udp",
+            TransportProtocol::Quic => "quic",
+            TransportProtocol::Other => "other",
+        };
+
         let proc_info =
             self.process_resolver
                 .resolve(&packet.src_ip, packet.src_port, packet.protocol);
+
+        if proc_info.is_some() {
+            counter!("logiguard.process.resolved", "result" => "hit").increment(1);
+        } else {
+            counter!("logiguard.process.resolved", "result" => "miss").increment(1);
+        }
+
+        counter!("logiguard.flows.classified", "protocol" => proto_str).increment(1);
 
         let process_name = proc_info.as_ref().map(|p| p.name.clone());
         let process_exe = proc_info.as_ref().and_then(|p| p.exe.clone());
@@ -151,6 +169,8 @@ where
         } else {
             None
         };
+
+        histogram!("logiguard.flow.classification.duration").record(start.elapsed().as_secs_f64());
 
         FlowContext {
             process_name,
@@ -169,7 +189,7 @@ where
         let dns_domain = self.dns_resolver.resolve_dns(&packet.dst_ip);
         let sni_domain = packet.sni_hint.clone();
 
-        match (sni_domain, dns_domain) {
+        let resolved = match (sni_domain, dns_domain) {
             // QUIC: SNI is encrypted in QUIC v1; use DNS cache only.
             (_, dns) if packet.protocol == TransportProtocol::Quic => dns,
             // SNI/Host is authoritative — extracted directly from the packet
@@ -181,7 +201,20 @@ where
             // No per-packet hint → fall back to DNS cache.
             (None, Some(dns)) => Some(dns),
             (None, None) => None,
-        }
+        };
+
+        let source = if resolved.is_none() {
+            "none"
+        } else if packet.protocol == TransportProtocol::Quic {
+            "dns_cache"
+        } else if packet.sni_hint.is_some() {
+            "sni"
+        } else {
+            "dns_cache"
+        };
+        counter!("logiguard.domain.resolved", "source" => source).increment(1);
+
+        resolved
     }
 }
 

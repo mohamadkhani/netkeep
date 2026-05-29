@@ -7,9 +7,7 @@
 
 use std::net::IpAddr;
 
-use netlink_packet_core::{
-    NetlinkHeader, NetlinkMessage, NetlinkPayload, NLM_F_REQUEST,
-};
+use netlink_packet_core::{NetlinkHeader, NetlinkMessage, NetlinkPayload, NLM_F_REQUEST};
 use netlink_packet_sock_diag::constants::{AF_INET, AF_INET6};
 use netlink_packet_sock_diag::inet::{ExtensionFlags, InetRequest, SocketId, StateFlags};
 use netlink_packet_sock_diag::message::SockDiagMessage;
@@ -133,11 +131,7 @@ mod tests {
 
     #[test]
     fn query_socket_inode_does_not_panic() {
-        let _ = query_socket_inode(
-            IpAddr::from([192, 0, 2, 1]),
-            62934,
-            TransportProtocol::Tcp,
-        );
+        let _ = query_socket_inode(IpAddr::from([192, 0, 2, 1]), 62934, TransportProtocol::Tcp);
     }
 
     #[test]

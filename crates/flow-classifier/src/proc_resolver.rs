@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use core_types::TransportProtocol;
+use metrics::{counter, histogram};
 
 use crate::sock_diag;
 use crate::{ProcessInfo, ProcessResolver};
@@ -106,6 +107,7 @@ impl ProcessResolver for ProcProcessResolver {
         src_port: u16,
         protocol: TransportProtocol,
     ) -> Option<ProcessInfo> {
+        let resolve_start = Instant::now();
         let ip: IpAddr = src_ip.parse().ok()?;
         let key = SocketKey {
             ip,
@@ -118,6 +120,9 @@ impl ProcessResolver for ProcProcessResolver {
         if let Ok(cache) = self.cache.lock() {
             if let Some(entry) = cache.get(&key) {
                 if now.duration_since(entry.inserted_at) < CACHE_TTL {
+                    counter!("logiguard.proc.resolver.cache.hits").increment(1);
+                    histogram!("logiguard.proc.resolver.resolve.duration")
+                        .record(resolve_start.elapsed().as_secs_f64());
                     return Some(ProcessInfo {
                         name: entry.name.clone(),
                         exe: entry.exe.clone(),
@@ -126,6 +131,8 @@ impl ProcessResolver for ProcProcessResolver {
                 }
             }
         }
+
+        counter!("logiguard.proc.resolver.cache.misses").increment(1);
 
         let pid = self.find_pid(ip, src_port, protocol)?;
 
@@ -192,6 +199,8 @@ impl ProcessResolver for ProcProcessResolver {
             );
         }
 
+        histogram!("logiguard.proc.resolver.resolve.duration")
+            .record(resolve_start.elapsed().as_secs_f64());
         Some(info)
     }
 }

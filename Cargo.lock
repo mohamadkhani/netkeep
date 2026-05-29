@@ -509,6 +509,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-lc-rs"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00"
+dependencies = [
+ "aws-lc-sys",
+ "zeroize",
+]
+
+[[package]]
+name = "aws-lc-sys"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a2f9779ce85b93ab6170dd940ad0169b5766ff848247aff13bb788b832fe3f4"
+dependencies = [
+ "cc",
+ "cmake",
+ "dunce",
+ "fs_extra",
+]
+
+[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -891,6 +913,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "cocoa"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1061,6 +1092,7 @@ dependencies = [
  "core-types",
  "decision-engine",
  "enforcer",
+ "metrics",
  "policy-engine",
  "state-store",
  "tokio",
@@ -1351,6 +1383,7 @@ name = "decision-engine"
 version = "0.1.0"
 dependencies = [
  "core-types",
+ "metrics",
 ]
 
 [[package]]
@@ -1564,6 +1597,7 @@ dependencies = [
  "core-types",
  "etherparse",
  "flow-classifier",
+ "metrics",
  "nfq",
 ]
 
@@ -1723,6 +1757,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "evmap"
+version = "11.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b8874945f036109c72242964c1174cf99434e30cfa45bf45fedc983f50046f8"
+dependencies = [
+ "hashbag",
+ "left-right",
+ "smallvec",
+]
+
+[[package]]
 name = "exr"
 version = "1.74.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1856,6 +1901,7 @@ name = "flow-classifier"
 version = "0.1.0"
 dependencies = [
  "core-types",
+ "metrics",
  "netlink-packet-core",
  "netlink-packet-sock-diag",
  "netlink-sys",
@@ -1978,6 +2024,12 @@ dependencies = [
  "libc",
  "pkg-config",
 ]
+
+[[package]]
+name = "fs_extra"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "fsevent-sys"
@@ -2183,6 +2235,21 @@ dependencies = [
  "pango-sys",
  "pkg-config",
  "system-deps",
+]
+
+[[package]]
+name = "generator"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52f04ae4152da20c76fe800fa48659201d5cf627c5149ca0b707b69d7eef6cf9"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "log",
+ "rustversion",
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
 ]
 
 [[package]]
@@ -2940,6 +3007,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashbag"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7040a10f52cba493ddb09926e15d10a9d8a28043708a405931fe4c6f19fac064"
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3174,6 +3247,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hyper"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3187,6 +3266,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -3734,6 +3814,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
+name = "left-right"
+version = "0.11.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f0c21e4c8ff95f487fb34e6f9182875f42c84cef966d29216bf115d9bba835a"
+dependencies = [
+ "crossbeam-utils",
+ "loom",
+ "slab",
+]
+
+[[package]]
 name = "libappindicator"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3922,6 +4013,8 @@ dependencies = [
  "flow-classifier",
  "hickory-resolver",
  "libc",
+ "metrics",
+ "metrics-exporter-prometheus",
  "rusqlite",
  "serde_json",
  "socket2",
@@ -3955,6 +4048,19 @@ dependencies = [
  "gtk",
  "serde_json",
  "tray-icon",
+]
+
+[[package]]
+name = "loom"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
+dependencies = [
+ "cfg-if",
+ "generator",
+ "scoped-tls",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4107,6 +4213,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
+]
+
+[[package]]
 name = "maybe-rayon"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4178,6 +4293,56 @@ dependencies = [
  "log",
  "objc",
  "paste",
+]
+
+[[package]]
+name = "metrics"
+version = "0.24.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89550ee9f79e88fef3119de263694973a8adb26c21d75322164fb8c493039fe2"
+dependencies = [
+ "portable-atomic",
+ "rapidhash",
+]
+
+[[package]]
+name = "metrics-exporter-prometheus"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1db0d8f1fc9e62caebd0319e11eaec5822b0186c171568f0480b46a0137f9108"
+dependencies = [
+ "base64",
+ "evmap",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "indexmap",
+ "ipnet",
+ "metrics",
+ "metrics-util",
+ "quanta",
+ "rustls",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "metrics-util"
+version = "0.20.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96f8722f8562635f92f8ed992f26df0532266eb03d5202607c20c0d7e9745e13"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "hashbrown 0.16.1",
+ "metrics",
+ "quanta",
+ "rand 0.9.4",
+ "rand_xoshiro",
+ "rapidhash",
+ "sketches-ddsketch",
 ]
 
 [[package]]
@@ -5050,6 +5215,7 @@ name = "policy-engine"
 version = "0.1.0"
 dependencies = [
  "core-types",
+ "metrics",
 ]
 
 [[package]]
@@ -5278,6 +5444,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "quanta"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3ab5a9d756f0d97bdc89019bd2e4ea098cf9cde50ee7564dde6b81ccc8f06c7"
+dependencies = [
+ "crossbeam-utils",
+ "libc",
+ "once_cell",
+ "raw-cpuid",
+ "wasi",
+ "web-sys",
+ "winapi",
+]
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5437,6 +5618,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_xoshiro"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
+dependencies = [
+ "rand_core 0.9.5",
+]
+
+[[package]]
 name = "range-alloc"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5447,6 +5637,15 @@ name = "rangemap"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "973443cf09a9c8656b574a866ab68dfa19f0867d0340648c7d2f6a71b8a8ea68"
+
+[[package]]
+name = "rapidhash"
+version = "4.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5e48930979c155e2f33aa36ab3119b5ee81332beb6482199a8ecd6029b80b59"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "rav1e"
@@ -5496,6 +5695,15 @@ dependencies = [
  "rav1e",
  "rayon",
  "rgb",
+]
+
+[[package]]
+name = "raw-cpuid"
+version = "11.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
+dependencies = [
+ "bitflags 2.11.1",
 ]
 
 [[package]]
@@ -5869,6 +6077,7 @@ version = "0.23.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
+ "aws-lc-rs",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -5914,6 +6123,7 @@ version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
+ "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted",
@@ -6309,6 +6519,12 @@ name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+
+[[package]]
+name = "sketches-ddsketch"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c6f73aeb92d671e0cc4dca167e59b2deb6387c375391bc99ee743f326994a2b"
 
 [[package]]
 name = "skrifa"
@@ -7181,10 +7397,14 @@ version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
+ "matchers",
  "nu-ansi-term",
+ "once_cell",
+ "regex-automata",
  "sharded-slab",
  "smallvec",
  "thread_local",
+ "tracing",
  "tracing-core",
  "tracing-log",
 ]

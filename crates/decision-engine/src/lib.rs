@@ -3,6 +3,7 @@ use std::collections::HashMap;
 #[cfg(test)]
 use core_types::FlowDirection;
 use core_types::{FlowContext, PendingDecision, RuleAction, TransportProtocol};
+use metrics::{counter, gauge};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverflowPolicy {
@@ -102,6 +103,7 @@ impl DecisionEngine {
         let key = FlowKey::from(&flow);
         if let Some(existing_id) = self.pending_by_flow.get(&key) {
             if let Some(existing) = self.pending.get(existing_id) {
+                counter!("logiguard.pending.deduplicated", "type" => "exact").increment(1);
                 return DecisionOutcome::Pending(existing.clone());
             }
         }
@@ -147,15 +149,23 @@ impl DecisionEngine {
                     }
                     let new_key = FlowKey::from(&existing.flow);
                     self.pending_by_flow.insert(new_key, existing_id.clone());
+                    counter!("logiguard.pending.deduplicated", "type" => "name_upgrade")
+                        .increment(1);
                     return DecisionOutcome::Pending(existing.clone());
                 }
             }
             if let Some(existing) = self.pending.get(&existing_id) {
+                counter!("logiguard.pending.deduplicated", "type" => "symmetric").increment(1);
                 return DecisionOutcome::Pending(existing.clone());
             }
         }
 
         if self.pending.len() >= self.pending_limit {
+            let policy_str = match self.overflow_policy {
+                OverflowPolicy::DenyNew => "deny_new",
+                OverflowPolicy::AllowNew => "allow_new",
+            };
+            counter!("logiguard.pending.overflow", "policy" => policy_str).increment(1);
             return match self.overflow_policy {
                 OverflowPolicy::DenyNew => DecisionOutcome::Immediate(RuleAction::Deny),
                 OverflowPolicy::AllowNew => DecisionOutcome::Immediate(RuleAction::Allow),
@@ -164,6 +174,12 @@ impl DecisionEngine {
 
         let id = format!("pending-{}", self.next_id);
         self.next_id += 1;
+        let proto_str = match flow.protocol {
+            TransportProtocol::Tcp => "tcp",
+            TransportProtocol::Udp => "udp",
+            TransportProtocol::Quic => "quic",
+            TransportProtocol::Other => "other",
+        };
         let decision = PendingDecision {
             id: id.clone(),
             deadline_at_secs: now_secs + self.timeout_for_protocol(flow.protocol),
@@ -172,6 +188,8 @@ impl DecisionEngine {
         };
         self.pending_by_flow.insert(key, id.clone());
         self.pending.insert(id, decision.clone());
+        counter!("logiguard.pending.created", "protocol" => proto_str).increment(1);
+        gauge!("logiguard.pending.decisions").set(self.pending.len() as f64);
         DecisionOutcome::Pending(decision)
     }
 
@@ -186,6 +204,14 @@ impl DecisionEngine {
             self.pending_by_flow.remove(&key);
             self.resolved
                 .insert(pending_id.to_string(), (action.clone(), egress_id));
+            let action_str = match &action {
+                RuleAction::Allow => "allow",
+                RuleAction::Deny => "deny",
+                RuleAction::Ask => "ask",
+                RuleAction::Route => "route",
+            };
+            counter!("logiguard.pending.resolved", "action" => action_str).increment(1);
+            gauge!("logiguard.pending.decisions").set(self.pending.len() as f64);
             Some(action)
         } else {
             None
@@ -207,10 +233,15 @@ impl DecisionEngine {
             .iter()
             .filter_map(|(k, v)| (v.deadline_at_secs <= now_secs).then(|| k.clone()))
             .collect();
+        let count = expired.len() as u64;
         for id in &expired {
             if let Some(decision) = self.pending.remove(id) {
                 self.pending_by_flow.remove(&FlowKey::from(&decision.flow));
             }
+        }
+        if count > 0 {
+            counter!("logiguard.pending.expired").increment(count);
+            gauge!("logiguard.pending.decisions").set(self.pending.len() as f64);
         }
         expired
     }

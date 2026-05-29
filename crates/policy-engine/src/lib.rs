@@ -1,4 +1,5 @@
 use core_types::{DestinationMatcher, FlowContext, Rule, RuleAction};
+use metrics::{counter, histogram};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRule {
@@ -90,7 +91,10 @@ fn action_rank(action: &RuleAction) -> u8 {
 }
 
 pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule> {
-    rules
+    let start = std::time::Instant::now();
+    counter!("logiguard.policy.evaluations").increment(1);
+
+    let result = rules
         .iter()
         .filter(|r| r.enabled)
         .filter(|r| process_matches(r, flow) && destination_matches(r, flow))
@@ -105,7 +109,26 @@ pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule
             rule_id: r.id.clone(),
             action: r.action.clone(),
             egress_id: r.egress_id.clone(),
-        })
+        });
+
+    histogram!("logiguard.policy.evaluation.duration").record(start.elapsed().as_secs_f64());
+
+    match &result {
+        Some(r) => {
+            let action_str = match r.action {
+                RuleAction::Allow => "allow",
+                RuleAction::Deny => "deny",
+                RuleAction::Ask => "ask",
+                RuleAction::Route => "route",
+            };
+            counter!("logiguard.policy.resolved", "action" => action_str).increment(1);
+        }
+        None => {
+            counter!("logiguard.policy.no_match").increment(1);
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

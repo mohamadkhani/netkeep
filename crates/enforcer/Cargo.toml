@@ -9,3 +9,4 @@ core-types = { path = "../core-types" }
 flow-classifier = { path = "../flow-classifier" }
 nfq = "0.2"
 etherparse = "0.15"
+metrics = "0.24"

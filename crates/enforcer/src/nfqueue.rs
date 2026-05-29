@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use core_types::{RuleAction, TransportProtocol};
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
 use flow_classifier::{Classifier, RawPacket, SniDnsCache};
+use metrics::{counter, gauge, histogram};
 use nfq::{Queue, Verdict};
 
 use crate::{FlowDecision, FlowRegistrar};
@@ -113,6 +114,9 @@ where
     pub fn run_loop(&mut self) -> std::io::Result<()> {
         loop {
             let mut msg = self.queue.recv()?;
+            counter!("logiguard.packets.received").increment(1);
+
+            let start = Instant::now();
 
             let now_secs = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -120,9 +124,15 @@ where
                 .as_secs();
 
             let (verdict, fwmark) = match parse_raw_packet(msg.get_payload()) {
-                None => (Verdict::Drop, None),
+                None => {
+                    counter!("logiguard.packets.parse_failed").increment(1);
+                    (Verdict::Drop, None)
+                }
                 Some(raw) => self.decide(&raw, now_secs),
             };
+
+            histogram!("logiguard.packet.processing_duration")
+                .record(start.elapsed().as_secs_f64());
 
             if let Some(mark) = fwmark {
                 msg.set_nfmark(mark);
@@ -135,6 +145,7 @@ where
     fn decide(&mut self, raw: &RawPacket, now_secs: u64) -> (Verdict, Option<u32>) {
         // Always pass loopback and DNS through without touching the cache.
         if is_loopback(&raw.dst_ip) || raw.dst_port == 53 {
+            counter!("logiguard.packets.accepted", "reason" => "loopback").increment(1);
             return (Verdict::Accept, None);
         }
 
@@ -143,6 +154,7 @@ where
         // process resolver cannot match port-less packets and NDP in particular
         // must never be blocked.
         if matches!(raw.protocol, TransportProtocol::Other) {
+            counter!("logiguard.packets.accepted", "reason" => "icmp").increment(1);
             return (Verdict::Accept, None);
         }
 
@@ -157,7 +169,9 @@ where
         // FIN/RST — connection is closing/resetting. Evict the cached verdict so
         // that a future connection reusing the same 5-tuple gets a fresh decision.
         if raw.tcp_fin || raw.tcp_rst {
-            self.decided.remove(&key);
+            if self.decided.remove(&key).is_some() {
+                counter!("logiguard.verdict.cache.evictions", "reason" => "fin_rst").increment(1);
+            }
             return (Verdict::Accept, None);
         }
 
@@ -180,6 +194,7 @@ where
         if raw.tcp_payload_empty && !raw.tcp_syn {
             if let Some(cached) = self.decided.get(&key) {
                 if cached.expires_at > now_secs {
+                    counter!("logiguard.packets.accepted", "reason" => "pure_ack").increment(1);
                     let v = if cached.accept {
                         Verdict::Accept
                     } else {
@@ -195,6 +210,7 @@ where
         // Fast path: return cached verdict if still valid.
         if let Some(cached) = self.decided.get(&key) {
             if cached.expires_at > now_secs {
+                counter!("logiguard.packets.accepted", "reason" => "cache_hit").increment(1);
                 let v = if cached.accept {
                     Verdict::Accept
                 } else {
@@ -206,6 +222,7 @@ where
         }
 
         // Slow path: classify the connection for the first time.
+        let slow_start = Instant::now();
         if let Some(sni) = &raw.sni_hint {
             self.dns_cache.insert(&raw.dst_ip, sni);
         }
@@ -275,7 +292,12 @@ where
             }
         }
 
+        let register_start = Instant::now();
         let decision = self.registrar.register(flow, now_secs);
+        histogram!("logiguard.registration.duration")
+            .record(register_start.elapsed().as_secs_f64());
+        histogram!("logiguard.decision.slow_path.duration")
+            .record(slow_start.elapsed().as_secs_f64());
 
         // Only cache definitive decisions. Pending/Ask flows must NOT be cached:
         // sweep_pending will resolve them shortly and the next retransmit must
@@ -302,7 +324,13 @@ where
 
         if should_cache {
             if self.decided.len() >= CACHE_MAX {
+                let before = self.decided.len();
                 self.decided.retain(|_, v| v.expires_at > now_secs);
+                let evicted = before - self.decided.len();
+                if evicted > 0 {
+                    counter!("logiguard.verdict.cache.evictions", "reason" => "expiry_sweep")
+                        .increment(evicted as u64);
+                }
             }
             self.decided.insert(
                 key,
@@ -312,6 +340,33 @@ where
                     expires_at: now_secs + CACHE_TTL_SECS,
                 },
             );
+        }
+
+        gauge!("logiguard.verdict.cache.entries").set(self.decided.len() as f64);
+        gauge!("logiguard.proc.attr.cache.entries", "cache" => "ip")
+            .set(self.proc_attr.len() as f64);
+        gauge!("logiguard.proc.attr.cache.entries", "cache" => "domain")
+            .set(self.domain_proc_attr.len() as f64);
+
+        match &decision {
+            FlowDecision::Immediate(RuleAction::Allow, _) => {
+                counter!("logiguard.packets.accepted", "reason" => "rule_allow").increment(1);
+            }
+            FlowDecision::Immediate(RuleAction::Route, Some(_)) => {
+                counter!("logiguard.packets.accepted", "reason" => "rule_route").increment(1);
+            }
+            FlowDecision::Immediate(RuleAction::Deny, _) => {
+                counter!("logiguard.packets.dropped", "reason" => "rule_deny").increment(1);
+            }
+            FlowDecision::Pending { .. } => {
+                counter!("logiguard.packets.dropped", "reason" => "pending").increment(1);
+            }
+            FlowDecision::Immediate(RuleAction::Route, None) => {
+                counter!("logiguard.packets.dropped", "reason" => "no_target").increment(1);
+            }
+            FlowDecision::Immediate(RuleAction::Ask, _) => {
+                counter!("logiguard.packets.dropped", "reason" => "ask").increment(1);
+            }
         }
 
         (verdict, fwmark)
@@ -363,13 +418,41 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         match sliced.transport.as_ref() {
             Some(TransportSlice::Tcp(t)) => {
                 let payload = t.payload();
-                // TLS SNI is the authoritative source when present (TLS is the
-                // common case). For plaintext HTTP — still common for `curl host`,
-                // captive-portal pages, package mirrors, and old internal apps
-                // — fall back to the HTTP `Host:` header so the user actually
-                // sees a domain in the decision dialog. Without this fallback,
-                // any HTTP-only flow shows IP-only and looks like a daemon bug.
-                let domain_hint = extract_tls_sni(payload).or_else(|| extract_http_host(payload));
+                let domain_hint = if payload.is_empty() {
+                    None
+                } else if is_tls_clienthello_packet(payload) {
+                    let extract_start = Instant::now();
+                    counter!("logiguard.sni.extraction.attempts", "kind" => "tls").increment(1);
+                    let hint = if let Some(sni) = extract_tls_sni(payload) {
+                        counter!("logiguard.sni.extraction.success", "source" => "tls")
+                            .increment(1);
+                        Some(sni)
+                    } else {
+                        counter!("logiguard.sni.extraction.missed", "kind" => "tls").increment(1);
+                        None
+                    };
+                    histogram!("logiguard.sni.extraction.duration")
+                        .record(extract_start.elapsed().as_secs_f64());
+                    hint
+                } else if starts_with_http_method(payload) {
+                    let extract_start = Instant::now();
+                    counter!("logiguard.sni.extraction.attempts", "kind" => "http").increment(1);
+                    let hint = if let Some(host) = extract_http_host(payload) {
+                        counter!("logiguard.sni.extraction.success", "source" => "http_host")
+                            .increment(1);
+                        Some(host)
+                    } else {
+                        counter!("logiguard.sni.extraction.missed", "kind" => "http").increment(1);
+                        None
+                    };
+                    histogram!("logiguard.sni.extraction.duration")
+                        .record(extract_start.elapsed().as_secs_f64());
+                    hint
+                } else {
+                    // Encrypted TLS app data, ServerHello, SSH, etc. — not extractable.
+                    counter!("logiguard.sni.extraction.skipped").increment(1);
+                    None
+                };
                 (
                     t.source_port(),
                     t.destination_port(),
@@ -604,6 +687,13 @@ fn extract_http_host(payload: &[u8]) -> Option<String> {
         return None;
     }
     Some(host.to_ascii_lowercase())
+}
+
+/// True when the TCP payload begins with a TLS ClientHello handshake record.
+/// Used to gate SNI extraction metrics — post-handshake ciphertext and other
+/// TLS record types are not SNI candidates and must not count as failed attempts.
+fn is_tls_clienthello_packet(payload: &[u8]) -> bool {
+    payload.len() >= 43 && payload[0] == 0x16 && payload[1] == 0x03 && payload[5] == 0x01
 }
 
 /// HTTP/1.x request methods we care about. We only need a quick early-reject

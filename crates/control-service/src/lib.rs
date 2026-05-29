@@ -2,9 +2,11 @@ use control_api::{validate_request, ControlRequest, ControlResponse, PushNotific
 use core_types::{Egress, FlowContext, FlowEvent, FlowState, RouteTarget, RuleAction};
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
+use metrics::{counter, histogram};
 use policy_engine::resolve_action;
 use state_store::Repository;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 pub struct ControlService<R: Repository> {
     repo: R,
@@ -202,7 +204,32 @@ impl<R: Repository> ControlService<R> {
             return ControlResponse::Error(err);
         }
 
-        match request {
+        let request_type = match &request {
+            ControlRequest::AddRule(_) => "add_rule",
+            ControlRequest::ListRules => "list_rules",
+            ControlRequest::DeleteRule { .. } => "delete_rule",
+            ControlRequest::ListPending => "list_pending",
+            ControlRequest::ListFlows { .. } => "list_flows",
+            ControlRequest::RegisterUnknownFlow { .. } => "register_unknown_flow",
+            ControlRequest::AwaitPendingDecision { .. } => "await_pending_decision",
+            ControlRequest::ResolvePending { .. } => "resolve_pending",
+            ControlRequest::ResolvePendingWithRule { .. } => "resolve_pending_with_rule",
+            ControlRequest::SetNfqueueEnabled { .. } => "set_nfqueue_enabled",
+            ControlRequest::Health => "health",
+            ControlRequest::Unlock => "unlock",
+            ControlRequest::SubscribeToPending => "subscribe_to_pending",
+            ControlRequest::OpenRoutedTcp { .. } => "open_routed_tcp",
+            ControlRequest::ListEgresses => "list_egresses",
+            ControlRequest::UpsertEgress(_) => "upsert_egress",
+            ControlRequest::DeleteEgress { .. } => "delete_egress",
+            ControlRequest::UpsertProxy(_) => "upsert_proxy",
+            ControlRequest::DeleteProxy { .. } => "delete_proxy",
+            ControlRequest::ListProxies => "list_proxies",
+        };
+        counter!("logiguard.control.requests", "type" => request_type).increment(1);
+        let handle_start = Instant::now();
+
+        let response = match request {
             ControlRequest::AddRule(rule) => {
                 self.repo.upsert_rule(rule);
                 self.sweep_pending();
@@ -253,10 +280,13 @@ impl<R: Repository> ControlService<R> {
                                 RuleAction::Ask => unreachable!(),
                             };
                             self.record_event(&flow, state, now_secs);
-                            return ControlResponse::ImmediateVerdict {
+                            let response = ControlResponse::ImmediateVerdict {
                                 action: resolved.action,
                                 route_target,
                             };
+                            histogram!("logiguard.control.request.duration", "type" => request_type)
+                                .record(handle_start.elapsed().as_secs_f64());
+                            return response;
                         }
                         RuleAction::Ask => {}
                     }
@@ -407,9 +437,12 @@ impl<R: Repository> ControlService<R> {
             ControlRequest::DeleteEgress { id } => {
                 if let Some(eg) = self.repo.get_egress(&id) {
                     if eg.is_system_default {
-                        return ControlResponse::Error(
+                        let response = ControlResponse::Error(
                             "cannot delete the system default egress".to_string(),
                         );
+                        histogram!("logiguard.control.request.duration", "type" => request_type)
+                            .record(handle_start.elapsed().as_secs_f64());
+                        return response;
                     }
                 }
                 if self.repo.delete_egress(&id) {
@@ -434,7 +467,10 @@ impl<R: Repository> ControlService<R> {
                 proxies.sort_by(|a, b| a.id.cmp(&b.id));
                 ControlResponse::ProxyList(proxies)
             }
-        }
+        };
+        histogram!("logiguard.control.request.duration", "type" => request_type)
+            .record(handle_start.elapsed().as_secs_f64());
+        response
     }
 
     /// Re-evaluate all pending decisions against the current rule set.
@@ -534,6 +570,14 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
             );
             match resolved.action {
                 RuleAction::Allow | RuleAction::Deny | RuleAction::Route => {
+                    let action_str = match resolved.action {
+                        RuleAction::Allow => "allow",
+                        RuleAction::Deny => "deny",
+                        RuleAction::Route => "route",
+                        RuleAction::Ask => unreachable!(),
+                    };
+                    counter!("logiguard.control.immediate_verdicts", "action" => action_str)
+                        .increment(1);
                     let route_target = if resolved.action == RuleAction::Route {
                         self.resolve_route_target(&resolved.egress_id)
                     } else {
@@ -563,6 +607,7 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                 FlowDecision::Immediate(action, None)
             }
             DecisionOutcome::Pending(p) => {
+                counter!("logiguard.control.pending_created").increment(1);
                 self.record_event(&flow, FlowState::Pending, now_secs);
                 self.repo.upsert_pending(&p);
                 FlowDecision::Pending {

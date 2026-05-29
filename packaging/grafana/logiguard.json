@@ -1,0 +1,714 @@
+{
+  "description": "LogiGuard firewall daemon metrics",
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "Packet Pipeline",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "title": "Packets / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_packets_received_total[1m])", "legendFormat": "received", "refId": "A" },
+        { "expr": "rate(logiguard_packets_accepted_total[1m])", "legendFormat": "accepted ({{reason}})", "refId": "B" },
+        { "expr": "rate(logiguard_packets_dropped_total[1m])", "legendFormat": "dropped ({{reason}})", "refId": "C" },
+        { "expr": "rate(logiguard_packets_parse_failed_total[1m])", "legendFormat": "parse failed", "refId": "D" }
+      ]
+    },
+    {
+      "title": "Packet Verdict Breakdown",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 4, "x": 8, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "targets": [
+        { "expr": "sum(increase(logiguard_packets_accepted_total[5m]))", "legendFormat": "Accepted", "refId": "A" },
+        { "expr": "sum(increase(logiguard_packets_dropped_total[5m]))", "legendFormat": "Dropped", "refId": "B" }
+      ]
+    },
+    {
+      "title": "Packet Processing Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_packet_processing_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "logiguard_packet_processing_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "logiguard_packet_processing_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Accept Reason Breakdown",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": { "drawStyle": "stacked_line", "fillOpacity": 30, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_packets_accepted_total[1m])", "legendFormat": "{{reason}}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Verdict Cache",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "collapsed": false
+    },
+    {
+      "title": "Cache Entries",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 9, "x": 0, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true } },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_verdict_cache_entries", "legendFormat": "verdict cache", "refId": "A" },
+        { "expr": "logiguard_proc_attr_cache_entries{cache=\"ip\"}", "legendFormat": "proc attr (IP)", "refId": "B" },
+        { "expr": "logiguard_proc_attr_cache_entries{cache=\"domain\"}", "legendFormat": "proc attr (domain)", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Cache Evictions / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 9, "x": 9, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_verdict_cache_evictions_total[1m])", "legendFormat": "{{reason}}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Cache Hit Rate",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.5 },
+              { "color": "green", "value": 0.8 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(logiguard_packets_accepted_total{reason=\"cache_hit\"}[5m]) / rate(logiguard_packets_received_total[5m])",
+          "legendFormat": "hit rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Process Resolver",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "collapsed": false
+    },
+    {
+      "title": "Process Resolution",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_process_resolved_total[1m])", "legendFormat": "{{result}}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Proc Resolver Cache",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_proc_resolver_cache_hits_total[1m])", "legendFormat": "hits", "refId": "A" },
+        { "expr": "rate(logiguard_proc_resolver_cache_misses_total[1m])", "legendFormat": "misses", "refId": "B" }
+      ]
+    },
+    {
+      "title": "Proc Resolve Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_proc_resolver_resolve_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "logiguard_proc_resolver_resolve_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "logiguard_proc_resolver_resolve_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Pending Decisions",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "collapsed": false
+    },
+    {
+      "title": "Active Pending Decisions",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 80 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_pending_decisions", "legendFormat": "pending", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Pending Lifecycle / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 10, "x": 4, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_pending_created_total[1m])", "legendFormat": "created ({{protocol}})", "refId": "A" },
+        { "expr": "rate(logiguard_pending_resolved_total[1m])", "legendFormat": "resolved ({{action}})", "refId": "B" },
+        { "expr": "rate(logiguard_pending_expired_total[1m])", "legendFormat": "expired", "refId": "C" },
+        { "expr": "rate(logiguard_pending_deduplicated_total[1m])", "legendFormat": "deduped ({{type}})", "refId": "D" },
+        { "expr": "rate(logiguard_pending_overflow_total[1m])", "legendFormat": "overflow ({{policy}})", "refId": "E" }
+      ]
+    },
+    {
+      "title": "Pending Decisions Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 20, "spanNulls": true } },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_pending_decisions", "legendFormat": "active pending", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Policy Engine",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 },
+      "collapsed": false
+    },
+    {
+      "title": "Policy Evaluations / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 10, "x": 0, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_policy_evaluations_total[1m])", "legendFormat": "evaluations", "refId": "A" },
+        { "expr": "rate(logiguard_policy_resolved_total[1m])", "legendFormat": "resolved ({{action}})", "refId": "B" },
+        { "expr": "rate(logiguard_policy_no_match_total[1m])", "legendFormat": "no match", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Policy Evaluation Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 10, "x": 10, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_policy_evaluation_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "logiguard_policy_evaluation_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "logiguard_policy_evaluation_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Policy Match Rate",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "green", "value": 0.6 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(logiguard_policy_resolved_total[5m])) / sum(rate(logiguard_policy_evaluations_total[5m]))",
+          "legendFormat": "match rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Control Service",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 45 },
+      "collapsed": false
+    },
+    {
+      "title": "Control Requests / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_control_requests_total[1m])", "legendFormat": "{{type}}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Immediate Verdicts vs Pending",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_control_immediate_verdicts_total[1m])", "legendFormat": "immediate ({{action}})", "refId": "A" },
+        { "expr": "rate(logiguard_control_pending_created_total[1m])", "legendFormat": "pending created", "refId": "B" }
+      ]
+    },
+    {
+      "title": "DNS Snooping",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 54 },
+      "collapsed": false
+    },
+    {
+      "title": "DNS Snoop Activity",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 55 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_dns_snoop_packets_total[1m])", "legendFormat": "packets", "refId": "A" },
+        { "expr": "rate(logiguard_dns_snoop_entries_learned_total[1m])", "legendFormat": "entries learned", "refId": "B" }
+      ]
+    },
+    {
+      "title": "DNS Parse Outcome / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 55 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "stacked_line", "fillOpacity": 30, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_dns_snoop_parse_success_total[1m])", "legendFormat": "success", "refId": "A" },
+        { "expr": "rate(logiguard_dns_snoop_parse_failed_total[1m])", "legendFormat": "failed", "refId": "B" },
+        { "expr": "rate(logiguard_dns_snoop_parse_empty_total[1m])", "legendFormat": "empty", "refId": "C" }
+      ]
+    },
+    {
+      "title": "DNS Parse Success Rate",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 4, "x": 16, "y": 55 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "green", "value": 0.6 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(logiguard_dns_snoop_parse_success_total[5m])) / sum(rate(logiguard_dns_snoop_packets_total[5m]))",
+          "legendFormat": "success rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "DNS Parse Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 55 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_dns_snoop_parse_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "logiguard_dns_snoop_parse_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "logiguard_dns_snoop_parse_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Domain Inference",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 63 },
+      "collapsed": false
+    },
+    {
+      "title": "SNI / Host Extraction",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 64 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_sni_extraction_attempts_total[1m])", "legendFormat": "attempts ({{kind}})", "refId": "A" },
+        { "expr": "rate(logiguard_sni_extraction_success_total[1m])", "legendFormat": "success ({{source}})", "refId": "B" },
+        { "expr": "rate(logiguard_sni_extraction_missed_total[1m])", "legendFormat": "missed ({{kind}})", "refId": "C" },
+        { "expr": "rate(logiguard_sni_extraction_skipped_total[1m])", "legendFormat": "skipped (not eligible)", "refId": "D" }
+      ]
+    },
+    {
+      "title": "Domain Resolution Source",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 64 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "stacked_line", "fillOpacity": 30, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_domain_resolved_total[1m])", "legendFormat": "{{source}}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "SNI Extraction Success Rate (eligible only)",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 4, "x": 16, "y": 64 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.2 },
+              { "color": "green", "value": 0.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(logiguard_sni_extraction_success_total[5m])) / sum(rate(logiguard_sni_extraction_attempts_total[5m]))",
+          "legendFormat": "success rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "SNI Extraction Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 64 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_sni_extraction_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "logiguard_sni_extraction_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "logiguard_sni_extraction_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+      ]
+    },
+    {
+      "title": "SNI Extraction Rate vs DNS Parse",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 72 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/success rate/" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 1 },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "custom.drawStyle", "value": "line" },
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        { "expr": "sum(rate(logiguard_sni_extraction_success_total[1m]))", "legendFormat": "SNI success/sec", "refId": "A" },
+        { "expr": "sum(rate(logiguard_dns_snoop_parse_success_total[1m]))", "legendFormat": "DNS parse success/sec", "refId": "B" },
+        { "expr": "sum(rate(logiguard_dns_snoop_entries_learned_total[1m]))", "legendFormat": "DNS entries learned/sec", "refId": "C" },
+        { "expr": "sum(rate(logiguard_sni_extraction_success_total[5m])) / sum(rate(logiguard_sni_extraction_attempts_total[5m]))", "legendFormat": "SNI success rate", "refId": "D" },
+        { "expr": "sum(rate(logiguard_dns_snoop_parse_success_total[5m])) / sum(rate(logiguard_dns_snoop_packets_total[5m]))", "legendFormat": "DNS parse success rate", "refId": "E" }
+      ]
+    },
+    {
+      "title": "Pipeline Latencies",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 80 },
+      "collapsed": false
+    },
+    {
+      "title": "Latency p50",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 81 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_packet_processing_duration{quantile=\"0.5\"}", "legendFormat": "packet", "refId": "A" },
+        { "expr": "logiguard_flow_classification_duration{quantile=\"0.5\"}", "legendFormat": "classification", "refId": "B" },
+        { "expr": "logiguard_registration_duration{quantile=\"0.5\"}", "legendFormat": "registration", "refId": "C" },
+        { "expr": "logiguard_decision_slow_path_duration{quantile=\"0.5\"}", "legendFormat": "slow path", "refId": "D" },
+        { "expr": "logiguard_policy_evaluation_duration{quantile=\"0.5\"}", "legendFormat": "policy", "refId": "E" },
+        { "expr": "logiguard_proc_resolver_resolve_duration{quantile=\"0.5\"}", "legendFormat": "proc resolve", "refId": "F" },
+        { "expr": "logiguard_sni_extraction_duration{quantile=\"0.5\"}", "legendFormat": "SNI extract", "refId": "G" },
+        { "expr": "logiguard_dns_snoop_parse_duration{quantile=\"0.5\"}", "legendFormat": "DNS parse", "refId": "H" }
+      ]
+    },
+    {
+      "title": "Latency p95 / p99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 81 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_packet_processing_duration{quantile=\"0.95\"}", "legendFormat": "packet p95", "refId": "A" },
+        { "expr": "logiguard_packet_processing_duration{quantile=\"0.99\"}", "legendFormat": "packet p99", "refId": "B" },
+        { "expr": "logiguard_decision_slow_path_duration{quantile=\"0.95\"}", "legendFormat": "slow path p95", "refId": "C" },
+        { "expr": "logiguard_decision_slow_path_duration{quantile=\"0.99\"}", "legendFormat": "slow path p99", "refId": "D" },
+        { "expr": "logiguard_flow_classification_duration{quantile=\"0.95\"}", "legendFormat": "classification p95", "refId": "E" },
+        { "expr": "logiguard_registration_duration{quantile=\"0.95\"}", "legendFormat": "registration p95", "refId": "F" }
+      ]
+    },
+    {
+      "title": "Flow Classification",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 89 },
+      "collapsed": false
+    },
+    {
+      "title": "Flows Classified / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 90 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(logiguard_flows_classified_total[1m])", "legendFormat": "{{protocol}}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Classification Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 90 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_flow_classification_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "logiguard_flow_classification_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "logiguard_flow_classification_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Control Request Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 90 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "logiguard_control_request_duration{quantile=\"0.5\"}", "legendFormat": "p50 {{type}}", "refId": "A" },
+        { "expr": "logiguard_control_request_duration{quantile=\"0.95\"}", "legendFormat": "p95 {{type}}", "refId": "B" }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["logiguard", "firewall"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "LogiGuard",
+  "uid": "logiguard",
+  "version": 1
+}

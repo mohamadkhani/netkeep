@@ -1,7 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::time::Instant;
 
 use etherparse::{SlicedPacket, TransportSlice};
 use flow_classifier::SniDnsCache;
+use metrics::{counter, histogram};
 use nfq::{Queue, Verdict};
 
 /// Passive DNS response snooper.
@@ -29,11 +31,26 @@ impl DnsSnoopWorker {
     pub fn run_loop(&mut self) -> std::io::Result<()> {
         loop {
             let mut msg = self.queue.recv()?;
-            if let Some(entries) = parse_dns_from_ip_packet(msg.get_payload()) {
-                for (ip, domain) in entries {
-                    self.dns_cache.insert(&ip.to_string(), &domain);
+            let parse_start = Instant::now();
+            counter!("logiguard.dns.snoop.packets").increment(1);
+            match parse_dns_from_ip_packet(msg.get_payload()) {
+                Some(entries) if !entries.is_empty() => {
+                    counter!("logiguard.dns.snoop.parse_success").increment(1);
+                    let count = entries.len() as u64;
+                    for (ip, domain) in entries {
+                        self.dns_cache.insert(&ip.to_string(), &domain);
+                    }
+                    counter!("logiguard.dns.snoop.entries_learned").increment(count);
+                }
+                Some(_) => {
+                    counter!("logiguard.dns.snoop.parse_empty").increment(1);
+                }
+                None => {
+                    counter!("logiguard.dns.snoop.parse_failed").increment(1);
                 }
             }
+            histogram!("logiguard.dns.snoop.parse.duration")
+                .record(parse_start.elapsed().as_secs_f64());
             msg.set_verdict(Verdict::Accept);
             self.queue.verdict(msg)?;
         }

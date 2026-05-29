@@ -8,6 +8,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod metrics;
+
 use control_api::{ControlRequest, ControlResponse, PushNotification};
 use control_service::{ControlService, HealthConfig, SharedService};
 use core_types::{Egress, RouteTarget};
@@ -789,6 +791,8 @@ fn handle_client(
 }
 
 fn main() {
+    metrics::start_metrics_server();
+
     let socket_path =
         std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
     let db_path = std::env::var("LOGIGUARD_DB_PATH").unwrap_or_else(|_| {
