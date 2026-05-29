@@ -977,8 +977,14 @@ fn main() {
                 }
                 Ok(mut processor) => {
                     println!("nfqueue processor running on queue {queue_num}");
+                    let bs_for_nfqueue = Arc::clone(&bs);
+                    let route_mark_base_for_nfqueue = route_mark_base;
                     std::thread::spawn(move || {
-                        if let Err(e) = processor.run_loop() {
+                        let recover = |q: u16| -> Result<(), String> {
+                            eprintln!("nfqueue recovery: re-applying nftables for queue {q}");
+                            bs_for_nfqueue.setup(Some(q), route_mark_base_for_nfqueue)
+                        };
+                        if let Err(e) = processor.run_loop(queue_num, recover) {
                             eprintln!("nfqueue processor stopped: {e}");
                         }
                     });
@@ -991,8 +997,14 @@ fn main() {
                         match DnsSnoopWorker::open(dns_q, dns_cache) {
                             Ok(mut worker) => {
                                 println!("dns snoop running on queue {dns_q}");
+                                let bs_for_dns = Arc::clone(&bs);
+                                let rmb_for_dns = route_mark_base;
                                 std::thread::spawn(move || {
-                                    if let Err(e) = worker.run_loop() {
+                                    let recover = |q: u16| -> Result<(), String> {
+                                        eprintln!("dns snoop recovery: re-applying nftables for queue {q}");
+                                        bs_for_dns.setup(Some(q), rmb_for_dns)
+                                    };
+                                    if let Err(e) = worker.run_loop(dns_q, recover) {
                                         eprintln!("dns snoop stopped: {e}");
                                     }
                                 });

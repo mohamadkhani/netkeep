@@ -1,8 +1,8 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 167 tests passing (`cargo test --workspace`)
+**Test Status:** 168 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
-**Last Updated:** 2026-05-17
+**Last Updated:** 2026-05-29
 
 ## Completed Work
 
@@ -292,6 +292,21 @@
 
 **Process resolver (2026-05-19):** SOCK_DIAG netlink is now the primary inode lookup (`crates/flow-classifier/src/sock_diag.rs`), before `/proc/net` retries and `ss` fallback. Mitigates kernel-publishing TOCTOU on first packets of new connections. See `docs/process-resolver.md`.
 
+**Bug 26 (2026-05-29): Daemon crashes when NFQUEUE binding invalidated (ENOENT).**
+
+- **Root cause (compound):**
+  1. `NfqueueProcessor::run_loop()` and `DnsSnoopWorker::run_loop()` propagated all `recv()` errors upward, terminating the thread. When the kernel invalidated the NFQUEUE binding (nftables table flushed, TUN interface removed, kernel module reloaded), `recv()` returned `ENOENT` and the processor thread died. The daemon kept running but without packet interception — a silent failure.
+  2. Initial recovery attempt failed with `EPERM` because `reopen()` created a new `Queue::open()` + `bind()` while the old socket still held the kernel binding. The kernel only allows one binding per queue number.
+
+- **Fix:** `run_loop()` now accepts a `recover(queue_num)` callback and handles errors in three tiers:
+  - `ENOENT` (queue invalidated): calls `recover()` to re-apply nftables, then `unbind()` + `Queue::open()` + `bind()`. Retries with exponential backoff (100ms → 30s cap) on failure.
+  - `EINTR` / `ENOBUFS` / `EWOULDBLOCK`: simple retry with backoff (transient, self-correcting).
+  - Fatal errors (`EBADF`, etc.): terminate the loop.
+  The daemon passes `|q| bootstrap.setup(Some(q), route_mark_base)` as the recover callback, which re-creates the full `inet logiguard` nftables table (idempotent).
+- **Files:** `crates/enforcer/src/nfqueue.rs`, `crates/enforcer/src/dns_snoop.rs`, `apps/daemon/src/main.rs`.
+- **Tests:** +1 (`transient_error_detection`). 167 → 168.
+- **Docs:** `docs/nfqueue-packet-interception.md` — new "NFQUEUE Error Recovery" section.
+
 ## Settings UI Polish (2026-05-16)
 
 Four improvements to the settings window applied to both `design/settings_window.html` and the Rust implementation.
@@ -443,13 +458,13 @@ CREATE TABLE pending_decisions (
 | policy-engine | 10 | Matching, precedence, disabled rules, **unknown-process fallback** + safety negatives |
 | decision-engine | 13 | Pending lifecycle, timeout, overflow, **symmetric `(dst_ip, port, proto)` dedup** with name-upgrade |
 | flow-classifier | 19 | Process/domain attribution, `/proc/net` parsing, **per-socket resolver cache** |
-| enforcer | 21 | Packet parsing, verdict paths, SNI, loopback (IPv4-mapped) |
+| enforcer | 22 | Packet parsing, verdict paths, SNI, loopback (IPv4-mapped), **NFQUEUE error recovery** |
 | state-store | 17 | CRUD, persistence |
 | control-api | 11 | Request validation |
 | control-service | 12 | RPC handlers, pending lifecycle, push notifications |
 | cli | 17 | Command parsing, output formatting |
 | daemon + emulator integration | 3 | route target switch e2e (2), SOCKS5 allow relay (1) |
-| **Total** | **143** | |
+| **Total** | **168** | |
 
 ## CLI Commands
 
@@ -591,7 +606,7 @@ LOGIGUARD_NFQUEUE=0 \
 ### Current
 
 - Workspace compiles cleanly
-- 165 tests passing (`cargo test --workspace`)
+- 168 tests passing (`cargo test --workspace`)
 - No CI pipeline set up yet
 
 ### Planned
@@ -605,7 +620,7 @@ LOGIGUARD_NFQUEUE=0 \
 
 - **Lines of code (Rust):** ~6,000 (crates + apps)
 - **Test code:** ~2,500 (unit + integration)
-- **Test count:** 165 passing
+- **Test count:** 168 passing
 - **Crates:** 7 (core, policy, decision, flow, enforcer, state, control)
 - **Apps:** 3 (daemon, CLI, GPUI)
 - **Database tables:** 6 (rules, flow_events, pending_decisions, egresses, egress_targets, egress_dns_servers, proxies)

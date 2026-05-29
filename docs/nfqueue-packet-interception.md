@@ -396,3 +396,55 @@ A cross-platform firewall daemon would need:
 - **Windows:** WinDivert for raw packets; or WFP callout driver for deep kernel integration
 
 LogiGuard currently targets Linux only. Platform abstractions would live behind the `NftablesBootstrap`, `PacketSource`, and `VerdictSink` traits in the `enforcer` crate — the decision engine and policy layer are already platform-agnostic.
+
+---
+
+## NFQUEUE Error Recovery
+
+The netlink socket between the kernel and `NfqueueProcessor` / `DnsSnoopWorker` can return errors from `recv()`. These fall into three categories with different recovery strategies:
+
+### Error classification
+
+| Error | errno | Meaning | Strategy |
+|---|---|---|---|
+| `ENOENT` | 2 | Queue binding invalidated (nftables table flushed, interface removed) | Re-apply nftables + reopen socket |
+| `EINTR` | 4 | Interrupted by signal | Retry on same socket |
+| `ENOBUFS` | 105 | Kernel queue overflow | Retry on same socket |
+| `EWOULDBLOCK` | 11 | No data (non-blocking) | Retry on same socket |
+| `EBADF` etc. | 9+ | Socket is dead | Terminate loop |
+
+### ENOENT recovery flow
+
+`ENOENT` means the kernel no longer has a queue configuration matching our binding — typically because someone (systemd, network manager, or the user) flushed the `inet logiguard` nftables table, or the TUN interface that the INPUT chain referenced was removed.
+
+Retrying `recv()` on the same socket is useless — the kernel won't deliver packets to a dead binding. The `run_loop()` method takes a `recover(queue_num)` callback that:
+
+1. Re-applies nftables via `NftablesBootstrap::setup()` (idempotent — tears down then re-creates the full chain set including `queue num N` rules)
+2. Reopens the netlink socket: `queue.unbind()` → `Queue::open()` → `queue.bind(queue_num)`
+
+The unbind-before-open ordering is critical: the kernel only allows one binding per queue number. Opening a new socket while the old one still holds the binding returns `EPERM`.
+
+If recovery fails (e.g. nftables temporarily broken), it retries with exponential backoff (100ms → 200ms → ... → 30s cap) instead of terminating.
+
+```text
+ENOENT on recv()
+  │
+  ├─ log: "queue binding lost, re-applying nftables in 100ms"
+  ├─ sleep(backoff)
+  ├─ recover(queue_num)  ──▶  nftables setup()
+  │   │
+  │   ├─ Ok ──▶ unbind old socket
+  │   │          Queue::open() + bind(queue_num)
+  │   │          log: "queue recovered successfully"
+  │   │          reset backoff to 100ms
+  │   │
+  │   └─ Err ──▶ log: "recovery failed, retrying"
+  │              double backoff (cap 30s)
+  │              retry from top
+```
+
+### Where recovery is wired
+
+- **`NfqueueProcessor::run_loop(queue_num, recover)`** — `crates/enforcer/src/nfqueue.rs`
+- **`DnsSnoopWorker::run_loop(queue_num, recover)`** — `crates/enforcer/src/dns_snoop.rs`
+- **Daemon** — `apps/daemon/src/main.rs` passes `|q| bootstrap.setup(Some(q), route_mark_base)` as the recover callback for both processors

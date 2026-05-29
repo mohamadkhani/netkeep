@@ -27,33 +27,101 @@ impl DnsSnoopWorker {
         Ok(Self { queue, dns_cache })
     }
 
-    /// Blocks indefinitely. Returns only on unrecoverable socket error.
-    pub fn run_loop(&mut self) -> std::io::Result<()> {
+    /// Blocks indefinitely.
+    ///
+    /// **Error handling:**
+    /// - Transient errors (EINTR, ENOBUFS, EWOULDBLOCK): retry with
+    ///   exponential backoff, no recovery needed.
+    /// - `ENOENT` (queue binding invalidated): calls `recover()`, then
+    ///   re-opens and re-binds the queue. Retries until recovery succeeds.
+    /// - Fatal errors: returns the error, terminating the loop.
+    ///
+    /// The `recover` callback should re-apply nftables rules so the kernel
+    /// starts delivering DNS packets to the queue again.
+    pub fn run_loop(
+        &mut self,
+        queue_num: u16,
+        recover: impl Fn(u16) -> Result<(), String>,
+    ) -> std::io::Result<()> {
+        let mut backoff_ms: u64 = 100;
+        const MAX_BACKOFF_MS: u64 = 30_000;
         loop {
-            let mut msg = self.queue.recv()?;
-            let parse_start = Instant::now();
-            counter!("logiguard.dns.snoop.packets").increment(1);
-            match parse_dns_from_ip_packet(msg.get_payload()) {
-                Some(entries) if !entries.is_empty() => {
-                    counter!("logiguard.dns.snoop.parse_success").increment(1);
-                    let count = entries.len() as u64;
-                    for (ip, domain) in entries {
-                        self.dns_cache.insert(&ip.to_string(), &domain);
+            match self.queue.recv() {
+                Ok(mut msg) => {
+                    backoff_ms = 100;
+                    let parse_start = Instant::now();
+                    counter!("logiguard.dns.snoop.packets").increment(1);
+                    match parse_dns_from_ip_packet(msg.get_payload()) {
+                        Some(entries) if !entries.is_empty() => {
+                            counter!("logiguard.dns.snoop.parse_success").increment(1);
+                            let count = entries.len() as u64;
+                            for (ip, domain) in entries {
+                                self.dns_cache.insert(&ip.to_string(), &domain);
+                            }
+                            counter!("logiguard.dns.snoop.entries_learned").increment(count);
+                        }
+                        Some(_) => {
+                            counter!("logiguard.dns.snoop.parse_empty").increment(1);
+                        }
+                        None => {
+                            counter!("logiguard.dns.snoop.parse_failed").increment(1);
+                        }
                     }
-                    counter!("logiguard.dns.snoop.entries_learned").increment(count);
+                    histogram!("logiguard.dns.snoop.parse.duration")
+                        .record(parse_start.elapsed().as_secs_f64());
+                    msg.set_verdict(Verdict::Accept);
+                    self.queue.verdict(msg)?;
                 }
-                Some(_) => {
-                    counter!("logiguard.dns.snoop.parse_empty").increment(1);
+                Err(e) if crate::nfqueue::is_queue_invalidated_error(&e) => {
+                    eprintln!(
+                        "dns snoop: queue binding lost ({}), re-applying nftables in {}ms",
+                        e, backoff_ms
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                    match recover(queue_num) {
+                        Ok(()) => match self.reopen(queue_num) {
+                            Ok(()) => {
+                                eprintln!("dns snoop: queue recovered successfully");
+                                backoff_ms = 100;
+                            }
+                            Err(reopen_err) => {
+                                eprintln!(
+                                    "dns snoop: reopen failed after recovery ({}), retrying",
+                                    reopen_err
+                                );
+                                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                            }
+                        },
+                        Err(recover_err) => {
+                            eprintln!(
+                                "dns snoop: recovery failed ({}), retrying in {}ms",
+                                recover_err, backoff_ms
+                            );
+                            backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        }
+                    }
                 }
-                None => {
-                    counter!("logiguard.dns.snoop.parse_failed").increment(1);
+                Err(e) if crate::nfqueue::is_transient_netlink_error(&e) => {
+                    eprintln!(
+                        "dns snoop: transient recv error ({}), retrying in {}ms",
+                        e, backoff_ms
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                    backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
                 }
+                Err(e) => return Err(e),
             }
-            histogram!("logiguard.dns.snoop.parse.duration")
-                .record(parse_start.elapsed().as_secs_f64());
-            msg.set_verdict(Verdict::Accept);
-            self.queue.verdict(msg)?;
         }
+    }
+
+    /// Re-open the netlink socket and rebind to the given queue number.
+    /// Unbinds and drops the old socket first to avoid EPERM from the kernel
+    /// (only one binding per queue number is allowed at a time).
+    fn reopen(&mut self, queue_num: u16) -> std::io::Result<()> {
+        let _ = self.queue.unbind(queue_num);
+        self.queue = Queue::open()?;
+        self.queue.bind(queue_num)?;
+        Ok(())
     }
 }
 

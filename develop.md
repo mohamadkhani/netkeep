@@ -697,3 +697,28 @@ Process name detection randomly failed because `retry_find_socket` races with th
 - [x] **Tests:** 167 tests passing (`cargo test --workspace`). Unit tests: `query_socket_inode_does_not_panic`, `sock_addr_matches_ipv4_mapped`.
 
 - [x] **Documentation:** `docs/process-resolver.md` lookup chain + race section updated for SOCK_DIAG primary path.
+
+### 2026-05-29 (session 34 — NFQUEUE self-recovery on ENOENT)
+
+The daemon crashed when the kernel invalidated the NFQUEUE binding (nftables table flushed, TUN interface removed, etc.) — `recv()` returned `ENOENT` (os error 2) and both `NfqueueProcessor::run_loop()` and `DnsSnoopWorker::run_loop()` terminated. The daemon kept running but without packet interception, silently becoming a no-op. A second bug in the initial recovery attempt caused `EPERM` on socket reopen because the old binding was never released.
+
+- [x] **Root cause (two bugs):**
+  1. `run_loop()` propagated all `recv()` errors upward, terminating the thread. No restart mechanism existed.
+  2. `reopen()` created a new `Queue::open()` + `bind()` while the old `self.queue` still held the kernel binding. The kernel only allows one binding per queue number, so `bind()` returned `EPERM`.
+
+- [x] **Fix — three-tier error handling in `run_loop()`:**
+  - `ENOENT` (queue binding invalidated): calls `recover(queue_num)` to re-apply nftables, then `unbind()` + `Queue::open()` + `bind()` to get a fresh socket. Retries with exponential backoff (100ms → 30s cap) on any failure.
+  - `EINTR` / `ENOBUFS` / `EWOULDBLOCK`: simple retry with backoff on the same socket (self-correcting).
+  - Fatal errors (`EBADF`, etc.): terminate the loop as before.
+
+- [x] **`run_loop()` now accepts `queue_num` and `recover` callback.** The daemon passes `|q| bootstrap.setup(Some(q), route_mark_base)` for both the main NFQUEUE processor and the DNS snoop worker. This re-creates the full `inet logiguard` nftables table (idempotent) including `queue num N` rules.
+
+- [x] **`reopen()` unbinds before opening.** `queue.unbind(queue_num)` releases the kernel binding, then the old socket is dropped, then a fresh `Queue::open()` + `bind()` claims the now-free binding.
+
+- [x] **New helpers:** `is_queue_invalidated_error()` (ENOENT) and `is_transient_netlink_error()` (EINTR, ENOBUFS, EWOULDBLOCK) — `pub(crate)` in `nfqueue.rs`, shared with `dns_snoop.rs`.
+
+- [x] **Files:** `crates/enforcer/src/nfqueue.rs`, `crates/enforcer/src/dns_snoop.rs`, `apps/daemon/src/main.rs`.
+
+- [x] **Tests:** 168 passing (167 + 1 new: `transient_error_detection` covering ENOENT/EINTR/ENOBUFS/EWOULDBLOCK classification and safety negatives).
+
+- [x] **Documentation:** `docs/nfqueue-packet-interception.md` — new "NFQUEUE Error Recovery" section with error classification table, ENOENT recovery flow diagram, and wiring details.

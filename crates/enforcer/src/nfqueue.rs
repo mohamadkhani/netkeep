@@ -85,6 +85,33 @@ const PROC_ATTR_MAX: usize = 1024;
 const DOMAIN_ATTR_TTL_SECS: u64 = 3600; // 1 hour
 const DOMAIN_ATTR_MAX: usize = 512;
 
+/// Returns `true` for netlink/NFQUEUE errors that indicate the queue binding
+/// has been invalidated and the socket needs to be reopened. Specifically:
+///
+/// - `ENOENT` (2): queue binding invalidated (nftables table flushed,
+///   interface removed, kernel module reloaded).
+pub(crate) fn is_queue_invalidated_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(e.kind(), ErrorKind::NotFound)
+}
+
+/// Returns `true` for netlink/NFQUEUE errors that are expected to be
+/// transient and self-correcting without re-opening the socket:
+///
+/// - `EINTR` (4): interrupted by signal.
+/// - `ENOBUFS` (105 on Linux): kernel queue overflow; next recv usually
+///   succeeds.
+/// - `EAGAIN` / `EWOULDBLOCK` (11): no data available on a non-blocking
+///   socket (shouldn't happen with blocking mode, but harmless to retry).
+pub(crate) fn is_transient_netlink_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    const ENOBUFS: i32 = 105; // Linux/POSIX
+    matches!(
+        e.kind(),
+        ErrorKind::Interrupted | ErrorKind::WouldBlock
+    ) || e.raw_os_error() == Some(ENOBUFS)
+}
+
 impl<C, FR> NfqueueProcessor<C, FR>
 where
     C: Classifier,
@@ -110,36 +137,119 @@ where
     }
 
     /// Blocks indefinitely, processing one packet per iteration.
-    /// Returns only on unrecoverable socket error.
-    pub fn run_loop(&mut self) -> std::io::Result<()> {
+    ///
+    /// **Error handling:**
+    /// - Transient errors (EINTR, ENOBUFS, EWOULDBLOCK): retry with
+    ///   exponential backoff, no recovery needed.
+    /// - `ENOENT` (queue binding invalidated — nftables flushed, interface
+    ///   removed): calls `recover()`, then re-opens and re-binds the queue.
+    ///   Retries with backoff until recovery succeeds or the daemon exits.
+    /// - Fatal errors (EBADF, etc.): returns the error, terminating the loop.
+    ///
+    /// The `recover` callback should re-apply nftables rules so the kernel
+    /// starts delivering packets to the queue number again.  It receives the
+    /// queue number in case it needs it.
+    pub fn run_loop(
+        &mut self,
+        queue_num: u16,
+        recover: impl Fn(u16) -> Result<(), String>,
+    ) -> std::io::Result<()> {
+        let mut backoff_ms: u64 = 100;
+        const MAX_BACKOFF_MS: u64 = 30_000;
         loop {
-            let mut msg = self.queue.recv()?;
-            counter!("logiguard.packets.received").increment(1);
+            match self.queue.recv() {
+                Ok(mut msg) => {
+                    backoff_ms = 100;
+                    counter!("logiguard.packets.received").increment(1);
 
-            let start = Instant::now();
+                    let start = Instant::now();
 
-            let now_secs = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+                    let now_secs = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
 
-            let (verdict, fwmark) = match parse_raw_packet(msg.get_payload()) {
-                None => {
-                    counter!("logiguard.packets.parse_failed").increment(1);
-                    (Verdict::Drop, None)
+                    let (verdict, fwmark) = match parse_raw_packet(msg.get_payload()) {
+                        None => {
+                            counter!("logiguard.packets.parse_failed").increment(1);
+                            (Verdict::Drop, None)
+                        }
+                        Some(raw) => self.decide(&raw, now_secs),
+                    };
+
+                    histogram!("logiguard.packet.processing_duration")
+                        .record(start.elapsed().as_secs_f64());
+
+                    if let Some(mark) = fwmark {
+                        msg.set_nfmark(mark);
+                    }
+                    msg.set_verdict(verdict);
+                    self.queue.verdict(msg)?;
                 }
-                Some(raw) => self.decide(&raw, now_secs),
-            };
-
-            histogram!("logiguard.packet.processing_duration")
-                .record(start.elapsed().as_secs_f64());
-
-            if let Some(mark) = fwmark {
-                msg.set_nfmark(mark);
+                Err(e) if is_queue_invalidated_error(&e) => {
+                    eprintln!(
+                        "nfqueue: queue binding lost ({}), re-applying nftables in {}ms",
+                        e, backoff_ms
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                    match recover(queue_num) {
+                        Ok(()) => {
+                            // nftables reapplied — reopen the netlink socket
+                            // and rebind to the queue.
+                            match self.reopen(queue_num) {
+                                Ok(()) => {
+                                    eprintln!("nfqueue: queue recovered successfully");
+                                    backoff_ms = 100;
+                                }
+                                Err(reopen_err) => {
+                                    eprintln!(
+                                        "nfqueue: reopen failed after recovery ({}), retrying",
+                                        reopen_err
+                                    );
+                                    backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                                }
+                            }
+                        }
+                        Err(recover_err) => {
+                            eprintln!(
+                                "nfqueue: recovery failed ({}), retrying in {}ms",
+                                recover_err, backoff_ms
+                            );
+                            backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        }
+                    }
+                }
+                Err(e) if is_transient_netlink_error(&e) => {
+                    eprintln!(
+                        "nfqueue: transient recv error ({}), retrying in {}ms",
+                        e, backoff_ms
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                    backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                }
+                Err(e) => return Err(e),
             }
-            msg.set_verdict(verdict);
-            self.queue.verdict(msg)?;
         }
+    }
+
+    /// Close the current netlink socket, open a fresh one, and bind to the
+    /// given queue number. Called after the kernel invalidates the queue
+    /// binding (ENOENT).
+    ///
+    /// The old socket MUST be unbound and dropped before binding the new one
+    /// — the kernel only allows one process to bind to a given queue number
+    /// at a time. Without the explicit `unbind`, `Queue::open()` + `bind()`
+    /// returns `EPERM` because the old fd still holds the binding.
+    fn reopen(&mut self, queue_num: u16) -> std::io::Result<()> {
+        // Explicitly release the kernel queue binding before opening a new
+        // socket. If unbind fails (e.g. socket already dead) we still proceed
+        // — the Drop will close the fd anyway.
+        let _ = self.queue.unbind(queue_num);
+        // Drop the old queue (closes the netlink fd) before binding the new
+        // one. Without this the kernel rejects the bind with EPERM.
+        self.queue = Queue::open()?;
+        self.queue.bind(queue_num)?;
+        Ok(())
     }
 
     fn decide(&mut self, raw: &RawPacket, now_secs: u64) -> (Verdict, Option<u32>) {
@@ -986,5 +1096,37 @@ mod tests {
         assert!(!is_loopback("10.0.0.1"));
         assert!(!is_loopback("::ffff:8.8.8.8"));
         assert!(!is_loopback("2001:db8::1"));
+    }
+
+    #[test]
+    fn transient_error_detection() {
+        use std::io::ErrorKind;
+        // ENOENT is NOT transient — it's a queue-invalidated error that
+        // requires re-applying nftables and reopening the socket.
+        assert!(!is_transient_netlink_error(
+            &std::io::Error::from_raw_os_error(2)
+        ));
+        assert!(is_queue_invalidated_error(&std::io::Error::from_raw_os_error(2)));
+        // EINTR — signal interrupt (truly transient)
+        assert!(is_transient_netlink_error(
+            &std::io::Error::new(ErrorKind::Interrupted, "interrupted")
+        ));
+        // ENOBUFS — kernel queue overflow (truly transient)
+        assert!(is_transient_netlink_error(
+            &std::io::Error::from_raw_os_error(105)
+        ));
+        // EAGAIN / EWOULDBLOCK (truly transient)
+        assert!(is_transient_netlink_error(
+            &std::io::Error::new(ErrorKind::WouldBlock, "would block")
+        ));
+        // EBADF — fatal, should kill the loop
+        assert!(!is_transient_netlink_error(
+            &std::io::Error::from_raw_os_error(9)
+        ));
+        assert!(!is_queue_invalidated_error(&std::io::Error::from_raw_os_error(9)));
+        // ECONNREFUSED — fatal
+        assert!(!is_transient_netlink_error(
+            &std::io::Error::from_raw_os_error(111)
+        ));
     }
 }
