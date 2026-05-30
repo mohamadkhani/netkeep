@@ -171,6 +171,8 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                         process_name: Some(cmd_args[1].clone()),
                         process_exe: None,
                         app_name: None,
+                        source_ip: "0.0.0.0".to_string(),
+                        source_port: 0,
                         destination_ip: cmd_args[2].clone(),
                         destination_port: 443,
                         destination_domain: domain,

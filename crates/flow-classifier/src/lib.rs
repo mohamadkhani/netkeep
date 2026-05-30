@@ -176,6 +176,8 @@ where
             process_name,
             process_exe,
             app_name,
+            source_ip: packet.src_ip.clone(),
+            source_port: packet.src_port,
             destination_ip: packet.dst_ip.clone(),
             destination_port: packet.dst_port,
             destination_domain,

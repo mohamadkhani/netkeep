@@ -3,10 +3,30 @@ use core_types::{Egress, FlowContext, FlowEvent, FlowState, RouteTarget, RuleAct
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
 use metrics::{counter, histogram};
-use policy_engine::resolve_action;
+use policy_engine::{resolve_action, ResolvedRule};
 use state_store::Repository;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+
+const POLICY_LOG_DEDUP_SECS: u64 = 300;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PolicyLogKey {
+    process_name: Option<String>,
+    domain: Option<String>,
+    destination_ip: String,
+}
+
+impl PolicyLogKey {
+    fn from_flow(flow: &FlowContext) -> Self {
+        Self {
+            process_name: flow.process_name.clone(),
+            domain: flow.destination_domain.clone(),
+            destination_ip: flow.destination_ip.clone(),
+        }
+    }
+}
 
 pub struct ControlService<R: Repository> {
     repo: R,
@@ -23,6 +43,8 @@ pub struct ControlService<R: Repository> {
     /// Lazily install and return the fwmark for a RouteTarget.
     /// Set by the daemon to call `ensure_route_mark`; None in tests.
     route_mark_fn: Option<Box<dyn Fn(&RouteTarget) -> Option<u32> + Send>>,
+    /// Suppress repeated `policy:` stderr lines for the same flow identity.
+    policy_log_dedup: HashMap<PolicyLogKey, u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +104,7 @@ impl<R: Repository> ControlService<R> {
             nfqueue_enabled: AtomicBool::new(nfqueue_enabled),
             nfqueue_num,
             route_mark_fn: None,
+            policy_log_dedup: HashMap::new(),
         }
     }
 
@@ -143,6 +166,7 @@ impl<R: Repository> ControlService<R> {
             nfqueue_enabled: AtomicBool::new(false),
             nfqueue_num: None,
             route_mark_fn: None,
+            policy_log_dedup: HashMap::new(),
         }
     }
 
@@ -197,6 +221,41 @@ impl<R: Repository> ControlService<R> {
             state,
             timestamp_secs,
         });
+    }
+
+    fn should_log_policy_match(&mut self, flow: &FlowContext, now_secs: u64) -> bool {
+        let key = PolicyLogKey::from_flow(flow);
+        self.policy_log_dedup
+            .retain(|_, last| now_secs.saturating_sub(*last) < POLICY_LOG_DEDUP_SECS);
+        if self
+            .policy_log_dedup
+            .get(&key)
+            .is_some_and(|last| now_secs.saturating_sub(*last) < POLICY_LOG_DEDUP_SECS)
+        {
+            return false;
+        }
+        self.policy_log_dedup.insert(key, now_secs);
+        true
+    }
+
+    fn log_policy_match(&mut self, flow: &FlowContext, resolved: &ResolvedRule, now_secs: u64) {
+        if !self.should_log_policy_match(flow, now_secs) {
+            return;
+        }
+        eprintln!(
+            "policy: id={} action={:?} process={:?}{} domain={:?} dst={}:{} src=:{}",
+            resolved.rule_id,
+            resolved.action,
+            flow.process_name,
+            flow.app_name
+                .as_deref()
+                .map(|a| format!(" ({})", a))
+                .unwrap_or_default(),
+            flow.destination_domain,
+            flow.destination_ip,
+            flow.destination_port,
+            flow.source_port
+        );
     }
 
     pub fn handle(&mut self, request: ControlRequest) -> ControlResponse {
@@ -255,18 +314,7 @@ impl<R: Repository> ControlService<R> {
             }
             ControlRequest::RegisterUnknownFlow { flow, now_secs } => {
                 if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
-                    eprintln!(
-                        "policy matched rule: id={} action={:?} process={:?}{} domain={:?} ip={}",
-                        resolved.rule_id,
-                        resolved.action,
-                        flow.process_name,
-                        flow.app_name
-                            .as_deref()
-                            .map(|a| format!(" ({})", a))
-                            .unwrap_or_default(),
-                        flow.destination_domain,
-                        flow.destination_ip
-                    );
+                    self.log_policy_match(&flow, &resolved, now_secs);
                     match resolved.action {
                         RuleAction::Allow | RuleAction::Deny | RuleAction::Route => {
                             let route_target = if resolved.action == RuleAction::Route {
@@ -556,18 +604,7 @@ impl<R: Repository> FlowRegistrar for SharedService<R> {
 impl<R: Repository> FlowRegistrar for ControlService<R> {
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
         if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
-            eprintln!(
-                "policy matched rule: id={} action={:?} process={:?}{} domain={:?} ip={}",
-                resolved.rule_id,
-                resolved.action,
-                flow.process_name,
-                flow.app_name
-                    .as_deref()
-                    .map(|a| format!(" ({})", a))
-                    .unwrap_or_default(),
-                flow.destination_domain,
-                flow.destination_ip
-            );
+            self.log_policy_match(&flow, &resolved, now_secs);
             match resolved.action {
                 RuleAction::Allow | RuleAction::Deny | RuleAction::Route => {
                     let action_str = match resolved.action {
@@ -632,7 +669,7 @@ mod tests {
     };
     use state_store::InMemoryRuleRepository;
 
-    use super::{ControlService, HealthConfig};
+    use super::{ControlService, HealthConfig, POLICY_LOG_DEDUP_SECS};
     use decision_engine::{DecisionEngine, OverflowPolicy};
 
     fn mk_rule(id: &str) -> Rule {
@@ -653,6 +690,8 @@ mod tests {
             process_name: Some("curl".to_string()),
             process_exe: None,
             app_name: None,
+            source_ip: "10.0.0.1".to_string(),
+            source_port: 54321,
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),
@@ -660,6 +699,23 @@ mod tests {
             direction: FlowDirection::Outbound,
             device_label: None,
         }
+    }
+
+    #[test]
+    fn policy_log_dedup_by_process_domain_ip() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let flow = mk_flow();
+        assert!(service.should_log_policy_match(&flow, 100));
+
+        let mut same_conn = mk_flow();
+        same_conn.source_port = 60000;
+        assert!(!service.should_log_policy_match(&same_conn, 150));
+
+        let mut other_domain = mk_flow();
+        other_domain.destination_domain = Some("other.example.com".to_string());
+        assert!(service.should_log_policy_match(&other_domain, 150));
+
+        assert!(service.should_log_policy_match(&flow, 100 + POLICY_LOG_DEDUP_SECS + 1));
     }
 
     #[test]

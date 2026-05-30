@@ -66,6 +66,8 @@ pub struct FlowContext {
     /// (`pacman -Qo <exe>`). Displayed alongside `process_name` in the dialog.
     #[serde(default)]
     pub app_name: Option<String>,
+    pub source_ip: String,
+    pub source_port: u16,
     pub destination_ip: String,
     pub destination_port: u16,
     pub destination_domain: Option<String>,

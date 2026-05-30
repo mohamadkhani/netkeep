@@ -771,6 +771,8 @@ mod tests {
             process_name: Some("curl".to_string()),
             process_exe: None,
             app_name: None,
+            source_ip: "10.0.0.1".to_string(),
+            source_port: 54321,
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),

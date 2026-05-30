@@ -170,6 +170,8 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
         process_name: Some("socks-client".to_string()),
         process_exe: None,
         app_name: None,
+        source_ip: "127.0.0.1".to_string(),
+        source_port: 0,
         destination_ip,
         destination_port: port,
         destination_domain,
