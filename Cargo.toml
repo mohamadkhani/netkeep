@@ -8,6 +8,7 @@ members = [
   "crates/control-api",
   "crates/control-service",
   "crates/enforcer",
+  "crates/proxy-client",
   "apps/daemon",
   "apps/cli",
   "apps/gpui",

@@ -84,7 +84,8 @@ logiguard/
 │   ├── flow-classifier/       # Process & domain attribution
 │   ├── enforcer/              # nftables + NFQUEUE integration
 │   ├── state-store/           # SQLite repositories
-│   └── control-api/           # Unix socket protocol schema
+│   ├── control-api/           # Unix socket protocol schema
+│   └── proxy-client/          # SOCKS5/HTTP CONNECT proxy client
 ├── apps/
 │   ├── daemon/                # logiguardd (root systemd service)
 │   ├── cli/                   # logiguard-cli (operator interface)

@@ -11,6 +11,7 @@ core-types = { path = "../../crates/core-types" }
 decision-engine = { path = "../../crates/decision-engine" }
 enforcer = { path = "../../crates/enforcer" }
 flow-classifier = { path = "../../crates/flow-classifier" }
+proxy-client = { path = "../../crates/proxy-client" }
 serde_json = "1"
 state-store = { path = "../../crates/state-store" }
 metrics = "0.24"

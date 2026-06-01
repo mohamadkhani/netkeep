@@ -1,0 +1,11 @@
+[package]
+name = "proxy-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-types = { path = "../core-types" }
+base64 = "0.22"
+libc = "0.2"
+socket2 = { version = "0.6", features = ["all"] }

@@ -4015,6 +4015,7 @@ dependencies = [
  "libc",
  "metrics",
  "metrics-exporter-prometheus",
+ "proxy-client",
  "rusqlite",
  "serde_json",
  "socket2",
@@ -5416,6 +5417,16 @@ checksum = "4488a4a36b9a4ba6b9334a32a39971f77c1436ec82c38707bce707699cc3bbcb"
 dependencies = [
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "proxy-client"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "core-types",
+ "libc",
+ "socket2",
 ]
 
 [[package]]

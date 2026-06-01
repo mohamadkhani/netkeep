@@ -213,6 +213,13 @@ impl<S: VerdictSink> DryRunEnforcer<S> {
 /// where the relay's own SYN is held pending a user decision).
 pub const ROUTE_MARK_BASE: u32 = 20000;
 
+/// Special fwmark for packets that should be redirected to the transparent
+/// proxy. When the NFQUEUE verdict resolves a `RouteTarget::Proxy`, this mark
+/// is stamped on the packet. A nftables REDIRECT rule in the nat hook then
+/// sends the packet to the local transparent proxy port.
+/// Must be below ROUTE_MARK_BASE so it's not caught by the relay bypass rules.
+pub const PROXY_REDIRECT_MARK: u32 = ROUTE_MARK_BASE - 1;
+
 pub trait NftablesBootstrap: Send + Sync {
     /// Install the logiguard nftables table.
     ///
@@ -222,14 +229,16 @@ pub trait NftablesBootstrap: Send + Sync {
     /// * `route_mark_base` — marks at or above this value belong to logiguard
     ///   relay sockets and are preserved across other tools' marking chains
     ///   via conntrack mark save/restore.
-    fn setup(&self, queue_num: Option<u16>, route_mark_base: u32) -> Result<(), String>;
+    /// * `transparent_proxy_port` — when `Some(port)`, adds a nat REDIRECT
+    ///   rule that sends proxy-routed packets to the transparent proxy.
+    fn setup(&self, queue_num: Option<u16>, route_mark_base: u32, transparent_proxy_port: Option<u16>) -> Result<(), String>;
     fn teardown(&self) -> Result<(), String>;
 }
 
 pub struct SystemNftablesBootstrap;
 
 impl NftablesBootstrap for SystemNftablesBootstrap {
-    fn setup(&self, queue_num: Option<u16>, route_mark_base: u32) -> Result<(), String> {
+    fn setup(&self, queue_num: Option<u16>, route_mark_base: u32, transparent_proxy_port: Option<u16>) -> Result<(), String> {
         // Idempotent: tear down first, ignore errors (table may not exist yet).
         let _ = self.teardown();
         // Two-chain strategy to survive transparent-proxy tools (e.g. throne,
@@ -334,6 +343,12 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             // neighbor discovery entirely.
             script.push_str("add rule inet logiguard output_early meta l4proto icmp accept\n");
             script.push_str("add rule inet logiguard output_early meta l4proto icmpv6 accept\n");
+            // Proxy-routed packets carry PROXY_REDIRECT_MARK (below route_mark_base).
+            // Accept them without re-queuing so follow-on segments are not dropped
+            // while waiting for a userspace verdict.
+            script.push_str(&format!(
+                "add rule inet logiguard output_early meta mark {PROXY_REDIRECT_MARK} accept\n",
+            ));
             script.push_str(&format!(
                 "add rule inet logiguard output_early queue num {q}\n",
             ));
@@ -434,6 +449,20 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         script.push_str(&format!(
             "add rule inet logiguard postrouting ct mark >= {route_mark_base} oifname != \"lo\" masquerade\n",
         ));
+
+        // Transparent proxy redirect — packets with the PROXY_REDIRECT_MARK are
+        // redirected to the transparent proxy port. The proxy reads the original
+        // destination via SO_ORIGINAL_DST and tunnels through SOCKS/HTTP.
+        // Must run after output_reroute restores the mark from ct mark.
+        if let Some(transparent_proxy_port) = transparent_proxy_port {
+            script.push_str(
+                "add chain inet logiguard output_proxy_redirect { type nat hook output priority -50; policy accept; }\n",
+            );
+            script.push_str(&format!(
+                "add rule inet logiguard output_proxy_redirect meta mark {} meta l4proto tcp redirect to :{}\n",
+                PROXY_REDIRECT_MARK, transparent_proxy_port,
+            ));
+        }
 
         run_nft_script(&script)
     }
@@ -664,7 +693,7 @@ impl FakeBootstrap {
 }
 
 impl NftablesBootstrap for FakeBootstrap {
-    fn setup(&self, _queue_num: Option<u16>, _route_mark_base: u32) -> Result<(), String> {
+    fn setup(&self, _queue_num: Option<u16>, _route_mark_base: u32, _transparent_proxy_port: Option<u16>) -> Result<(), String> {
         self.setup_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.fail {
@@ -921,7 +950,7 @@ mod tests {
     #[test]
     fn fake_bootstrap_setup_records_call() {
         let b = FakeBootstrap::default();
-        assert!(b.setup(Some(0), ROUTE_MARK_BASE).is_ok());
+        assert!(b.setup(Some(0), ROUTE_MARK_BASE, None).is_ok());
         assert_eq!(b.setup_count(), 1);
         assert_eq!(b.teardown_count(), 0);
     }
@@ -939,7 +968,7 @@ mod tests {
             fail: true,
             ..Default::default()
         };
-        assert!(b.setup(Some(0), ROUTE_MARK_BASE).is_err());
+        assert!(b.setup(Some(0), ROUTE_MARK_BASE, None).is_err());
         assert!(b.teardown().is_err());
     }
 

@@ -12,7 +12,7 @@ mod metrics;
 
 use control_api::{ControlRequest, ControlResponse, PushNotification};
 use control_service::{ControlService, HealthConfig, SharedService};
-use core_types::{Egress, RouteTarget};
+use core_types::{Egress, ProxyConfig, RouteTarget};
 use decision_engine::{DecisionEngine, OverflowPolicy};
 use enforcer::dns_snoop::DnsSnoopWorker;
 use enforcer::nfqueue::NfqueueProcessor;
@@ -25,7 +25,7 @@ use flow_classifier::{
 use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
 use hickory_resolver::Resolver;
 use rusqlite::{params, Connection};
-use state_store::{EgressRepository, PendingRepository, RuleRepository, SqliteRuleRepository};
+use state_store::{EgressRepository, PendingRepository, ProxyRepository, RuleRepository, SqliteRuleRepository};
 use tokio::sync::broadcast;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
@@ -261,6 +261,36 @@ fn resolve_socket_addrs(
     }
     eprintln!("routed dns: host={host} target={target:?} resolvers=system addrs={socket_addrs:?}");
     Ok(socket_addrs)
+}
+
+/// Load a `ProxyConfig` from the database by ID.
+fn load_proxy_config(db_path: &str, proxy_id: &str) -> Result<ProxyConfig, String> {
+    let repo = state_store::SqliteRuleRepository::open(db_path)
+        .map_err(|e| format!("open repo for proxy config failed: {e}"))?;
+    repo.get_proxy(proxy_id).ok_or_else(|| {
+        format!("proxy '{proxy_id}' not found in database")
+    })
+}
+
+/// Connect to `host:port` through a SOCKS5 or HTTP proxy.
+/// For SOCKS5, the domain is sent directly to the proxy (proxy-side DNS resolution).
+/// For HTTP CONNECT, the domain is included in the CONNECT line.
+fn connect_via_proxy_target(
+    proxy: &ProxyConfig,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream, String> {
+    eprintln!(
+        "routed proxy connect: proxy={}:{} protocol={:?} target={host}:{port}",
+        proxy.host, proxy.port, proxy.protocol
+    );
+    proxy_client::connect_via_proxy(
+        proxy,
+        host,
+        port,
+        std::time::Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
+    )
+    .map_err(|e| format!("proxy connect to {}:{} failed: {e}", proxy.host, proxy.port))
 }
 
 #[cfg(target_os = "linux")]
@@ -586,25 +616,37 @@ fn open_routed_tcp(
     // sent.  Previously the connect happened inside the relay thread, so the
     // emulator received RoutedTcpReady immediately and curl was left stuck for
     // up to ROUTED_CONNECT_TIMEOUT_SECS before getting an abrupt TCP close.
-    let addrs = resolve_socket_addrs(&host, port, Some(&target), &db_path)?;
-    if let Some(first) = addrs.first() {
-        if let Some(route_line) = route_probe_for(&first.ip().to_string()) {
-            eprintln!(
-                "routed route-probe (default/unmarked): target={target:?} first_addr={first} ip_route_get=\"{route_line}\""
-            );
+    let upstream = match &target {
+        RouteTarget::Proxy(id) => {
+            // Proxy connections skip local DNS resolution — SOCKS5 and HTTP
+            // CONNECT send the domain to the proxy, which resolves it on the
+            // far side.  This also avoids leaking DNS through the local resolver.
+            let proxy = load_proxy_config(&db_path, id)?;
+            connect_via_proxy_target(&proxy, &host, port)
         }
-        if let Some(mark) = fwmark_for_route_probe(&target) {
-            if let Some(mline) = route_probe_marked(&first.ip().to_string(), mark) {
-                eprintln!(
-                    "routed route-probe (fwmark={mark}): target={target:?} first_addr={first} ip_route_get=\"{mline}\""
-                );
+        _ => {
+            // Tun/Device paths need local DNS resolution and route probes.
+            let addrs = resolve_socket_addrs(&host, port, Some(&target), &db_path)?;
+            if let Some(first) = addrs.first() {
+                if let Some(route_line) = route_probe_for(&first.ip().to_string()) {
+                    eprintln!(
+                        "routed route-probe (default/unmarked): target={target:?} first_addr={first} ip_route_get=\"{route_line}\""
+                    );
+                }
+                if let Some(mark) = fwmark_for_route_probe(&target) {
+                    if let Some(mline) = route_probe_marked(&first.ip().to_string(), mark) {
+                        eprintln!(
+                            "routed route-probe (fwmark={mark}): target={target:?} first_addr={first} ip_route_get=\"{mline}\""
+                        );
+                    }
+                }
+            }
+            match &target {
+                RouteTarget::Tun(iface) => connect_via_tun(&addrs, iface),
+                RouteTarget::Device(iface) => connect_via_device(&addrs, iface),
+                RouteTarget::Proxy(_) => unreachable!(),
             }
         }
-    }
-    let upstream = match &target {
-        RouteTarget::Tun(iface) => connect_via_tun(&addrs, iface),
-        RouteTarget::Device(iface) => connect_via_device(&addrs, iface),
-        RouteTarget::Proxy(id) => Err(format!("proxy routing not yet implemented: {id}")),
     }?;
 
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
@@ -642,6 +684,8 @@ struct DaemonRuntime {
     /// `queue num N` rules would just drop every packet.
     nfqueue_num: Option<u16>,
     route_mark_base: u32,
+    /// Port of the transparent SOCKS/HTTP proxy, if running.
+    transparent_proxy_port: Option<u16>,
 }
 
 /// Decision returned by [`plan_nfqueue_toggle`]. Splitting the gate logic from
@@ -724,7 +768,7 @@ fn handle_client(
             NfqueueToggleAction::Apply { queue } => {
                 // `bootstrap.is_some()` already checked by the planner.
                 let bs = runtime.bootstrap.as_deref().expect("bootstrap present");
-                match bs.setup(queue, runtime.route_mark_base) {
+                match bs.setup(queue, runtime.route_mark_base, runtime.transparent_proxy_port) {
                     Ok(()) => {
                         // Only commit the flag after nftables actually applied,
                         // so a kernel failure can't leave the UI claiming
@@ -914,7 +958,14 @@ fn main() {
     {
         let mut svc = service.lock().expect("service lock");
         svc.restore_pending(live_pending);
-        svc.set_route_mark_fn(|target| ensure_route_mark(target).ok());
+        svc.set_route_mark_fn(|target| match target {
+            // Proxy targets get a special redirect mark that triggers nftables
+            // REDIRECT to the transparent proxy port. The transparent proxy
+            // reads the original destination via SO_ORIGINAL_DST and connects
+            // through SOCKS/HTTP.
+            RouteTarget::Proxy(_) => Some(enforcer::PROXY_REDIRECT_MARK),
+            _ => ensure_route_mark(target).ok(),
+        });
     }
 
     let health = {
@@ -942,12 +993,51 @@ fn main() {
         .ok()
         .and_then(|s| s.trim().parse().ok());
 
+    // Start transparent proxy if there are enabled proxies configured.
+    // This must happen before nftables setup so we know the port for the
+    // REDIRECT rule.
+    let transparent_proxy_port: Option<u16> = {
+            let proxies: Vec<ProxyConfig> = {
+                let mut svc = service.lock().expect("service lock");
+                match svc.handle(control_api::ControlRequest::ListProxies) {
+                    control_api::ControlResponse::ProxyList(p) => p,
+                    _ => vec![],
+                }
+            };
+        let enabled_proxies: Vec<_> = proxies.into_iter().filter(|p| p.enabled).collect();
+        if enabled_proxies.is_empty() {
+            None
+        } else {
+            // Use the first enabled proxy for transparent redirection.
+            // TODO: per-egress proxy mapping (each egress may point to a different proxy).
+            let proxy = enabled_proxies.into_iter().next().unwrap();
+            let tp = proxy_client::transparent::TransparentProxy::bind(
+                "127.0.0.1:0",
+                proxy,
+                std::time::Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
+            )
+            .expect("transparent proxy bind failed");
+            let port = tp.local_addr().expect("transparent proxy local_addr failed").port();
+            let tp = Arc::new(tp);
+            std::thread::spawn(move || tp.run());
+            eprintln!("transparent proxy listening on 127.0.0.1:{port}");
+            Some(port)
+        }
+    };
+
     // Always install the nftables protection chains — they preserve our route
     // mark across other tools' marking chains (e.g. throne, sing-box) so that
     // device-routed relay connections actually leave via the requested NIC.
     // NFQUEUE rules are only added when LOGIGUARD_NFQUEUE is set.
     let bs: Arc<dyn NftablesBootstrap> = Arc::new(SystemNftablesBootstrap);
-    let nftables_ready = match bs.setup(nfqueue_num, route_mark_base) {
+    if transparent_proxy_port.is_some() && nfqueue_num.is_none() {
+        eprintln!(
+            "warning: transparent proxy is listening but LOGIGUARD_NFQUEUE is unset — \
+             outbound traffic will not be marked for proxy redirect (set LOGIGUARD_NFQUEUE, e.g. 0)"
+        );
+    }
+
+    let nftables_ready = match bs.setup(nfqueue_num, route_mark_base, transparent_proxy_port) {
         Ok(()) => {
             println!(
                 "nftables rules applied (route_mark_base={route_mark_base}, nfqueue={nfqueue_num:?})"
@@ -961,6 +1051,7 @@ fn main() {
     };
 
     // Start the NFQUEUE processor if enabled and nftables came up.
+    let transparent_proxy_port_for_recovery = transparent_proxy_port;
     let bootstrap: Option<Arc<dyn NftablesBootstrap>> = if nftables_ready {
         if let Some(queue_num) = nfqueue_num {
             let dns_cache = SniDnsCache::new();
@@ -979,10 +1070,11 @@ fn main() {
                     println!("nfqueue processor running on queue {queue_num}");
                     let bs_for_nfqueue = Arc::clone(&bs);
                     let route_mark_base_for_nfqueue = route_mark_base;
+                    let tp_port_for_nfqueue = transparent_proxy_port_for_recovery;
                     std::thread::spawn(move || {
                         let recover = |q: u16| -> Result<(), String> {
                             eprintln!("nfqueue recovery: re-applying nftables for queue {q}");
-                            bs_for_nfqueue.setup(Some(q), route_mark_base_for_nfqueue)
+                            bs_for_nfqueue.setup(Some(q), route_mark_base_for_nfqueue, tp_port_for_nfqueue)
                         };
                         if let Err(e) = processor.run_loop(queue_num, recover) {
                             eprintln!("nfqueue processor stopped: {e}");
@@ -999,10 +1091,11 @@ fn main() {
                                 println!("dns snoop running on queue {dns_q}");
                                 let bs_for_dns = Arc::clone(&bs);
                                 let rmb_for_dns = route_mark_base;
+                                let tp_port_for_dns = transparent_proxy_port_for_recovery;
                                 std::thread::spawn(move || {
                                     let recover = |q: u16| -> Result<(), String> {
                                         eprintln!("dns snoop recovery: re-applying nftables for queue {q}");
-                                        bs_for_dns.setup(Some(q), rmb_for_dns)
+                                        bs_for_dns.setup(Some(q), rmb_for_dns, tp_port_for_dns)
                                     };
                                     if let Err(e) = worker.run_loop(dns_q, recover) {
                                         eprintln!("dns snoop stopped: {e}");
@@ -1029,6 +1122,7 @@ fn main() {
         bootstrap: bootstrap.clone(),
         nfqueue_num,
         route_mark_base,
+        transparent_proxy_port: transparent_proxy_port_for_recovery,
     };
 
     for stream in listener.incoming() {

@@ -1,8 +1,8 @@
 # LogiGuard Current Implementation State
 
-**Test Status:** 168 tests passing (`cargo test --workspace`)
+**Test Status:** 180 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
-**Last Updated:** 2026-05-29
+**Last Updated:** 2026-06-01
 
 ## Completed Work
 
@@ -361,6 +361,30 @@ Compound bug — five interacting failure modes:
 - **Files:** [`crates/enforcer/src/lib.rs`](../crates/enforcer/src/lib.rs) (chain layout, masquerade, in-table unreachable, transactional `add_route`), [`crates/enforcer/src/nfqueue.rs`](../crates/enforcer/src/nfqueue.rs) (SYN classification, `tcp_syn` parse), [`crates/flow-classifier/src/lib.rs`](../crates/flow-classifier/src/lib.rs) (`RawPacket.tcp_syn`), [`apps/daemon/src/main.rs`](../apps/daemon/src/main.rs) (`ensure_route_mark` guard).
 - **Verification:** `curl --max-time 10 -v https://www.digikala.com` with a `Route via eg-lan-enp3s0` rule active and the VPN tun up — full TLS 1.3 handshake completes; conntrack records the SNAT (`10.x.x.x → 192.168.7.7`).
 
+## Bug Fixes (transparent proxy hardening, 2026-06-01)
+
+**Bug 13:** SOCKS5/HTTP CONNECT handshake had no I/O timeout. After `socket2::connect_timeout` established the TCP connection to the local proxy, the subsequent SOCKS greeting/method-selection/CONNECT exchange used blocking `read_exact()` with no timeout. If the upstream proxy (wireproxy) was unresponsive, the transparent proxy hung indefinitely, and the application (curl, httpie) saw a silent hang.
+
+- **Fix:** Set `SOCK_STREAM` read/write timeouts (`set_read_timeout`/`set_write_timeout`) on the TcpStream before the SOCKS/HTTP handshake, map `TimedOut` to `ProxyClientError::ConnectTimeout`, clear timeouts after handshake so the relay path is unthrottled.
+
+**Bug 14:** Transparent proxy listener lacked `IP_TRANSPARENT` socket option. The Linux kernel requires `IP_TRANSPARENT` on the listening socket for nftables `REDIRECT` to deliver connections. Without it, `accept()` and `SO_ORIGINAL_DST` could fail or behave incorrectly.
+
+- **Fix:** `bind_transparent_listener()` in `proxy-client::transparent` uses `socket2` to create the socket, sets `IP_TRANSPARENT` via `libc::setsockopt(SOL_IP, 19)`, then binds and listens.
+
+**Bug 15:** `SO_ORIGINAL_DST` only tried `SOL_IP` (IPv4). IPv6 connections redirected via nftables would fail the original-destination lookup.
+
+- **Fix:** `get_original_dst()` tries `SOL_IP` first, then falls back to `IPPROTO_IPV6` for IPv6 connections. Error messages include both attempts.
+
+**Bug 16:** NFQUEUE re-queued follow-on packets of proxy-routed connections. `PROXY_REDIRECT_MARK` (below `ROUTE_MARK_BASE`) wasn't matched by any bypass rule in `output_early`, so data segments after the initial SYN were sent through NFQUEUE again and could be dropped.
+
+- **Fix:** Added `meta mark {PROXY_REDIRECT_MARK} accept` rule in `output_early` before the `queue num {q}` rule.
+
+**Bug 17:** Silent misconfiguration when transparent proxy started without NFQUEUE. If proxies existed in DB but `LOGIGUARD_NFQUEUE` was unset, the transparent proxy listened but no outbound traffic was ever marked for redirect — no error, no traffic.
+
+- **Fix:** Daemon prints a warning: `transparent proxy is listening but LOGIGUARD_NFQUEUE is unset`.
+
+- **Files:** [`crates/proxy-client/src/lib.rs`](../crates/proxy-client/src/lib.rs) (handshake timeouts), [`crates/proxy-client/src/transparent.rs`](../crates/proxy-client/src/transparent.rs) (IP_TRANSPARENT, IPv6 SO_ORIGINAL_DST), [`crates/enforcer/src/lib.rs`](../crates/enforcer/src/lib.rs) (PROXY_REDIRECT_MARK bypass rule), [`apps/daemon/src/main.rs`](../apps/daemon/src/main.rs) (NFQUEUE unset warning).
+
 ## Critical Data Structures
 
 ### Rule
@@ -463,8 +487,9 @@ CREATE TABLE pending_decisions (
 | control-api | 11 | Request validation |
 | control-service | 12 | RPC handlers, pending lifecycle, push notifications |
 | cli | 17 | Command parsing, output formatting |
+| proxy-client | 12 | SOCKS5/HTTP CONNECT protocol encoding, auth handling, transparent proxy, error cases |
 | daemon + emulator integration | 3 | route target switch e2e (2), SOCKS5 allow relay (1) |
-| **Total** | **168** | |
+| **Total** | **180** | |
 
 ## CLI Commands
 
@@ -620,8 +645,8 @@ LOGIGUARD_NFQUEUE=0 \
 
 - **Lines of code (Rust):** ~6,000 (crates + apps)
 - **Test code:** ~2,500 (unit + integration)
-- **Test count:** 168 passing
-- **Crates:** 7 (core, policy, decision, flow, enforcer, state, control)
+- **Test count:** 180 passing
+- **Crates:** 8 (core, policy, decision, flow, enforcer, state, control, proxy-client)
 - **Apps:** 3 (daemon, CLI, GPUI)
 - **Database tables:** 6 (rules, flow_events, pending_decisions, egresses, egress_targets, egress_dns_servers, proxies)
 - **Unix socket path:** `/tmp/logiguard.sock`

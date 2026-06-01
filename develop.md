@@ -722,3 +722,46 @@ The daemon crashed when the kernel invalidated the NFQUEUE binding (nftables tab
 - [x] **Tests:** 168 passing (167 + 1 new: `transient_error_detection` covering ENOENT/EINTR/ENOBUFS/EWOULDBLOCK classification and safety negatives).
 
 - [x] **Documentation:** `docs/nfqueue-packet-interception.md` — new "NFQUEUE Error Recovery" section with error classification table, ENOENT recovery flow diagram, and wiring details.
+
+### 2026-05-31 (session 35 — SOCKS5/HTTP proxy client routing)
+
+Implements actual proxy routing for `RouteTarget::Proxy(id)`. Previously the proxy entity (CRUD, persistence, settings UI) was fully built but routing through the proxy was a stub returning `"proxy routing not yet implemented"`.
+
+- [x] **New crate: `crates/proxy-client/`.** Synchronous SOCKS5 (RFC 1928/1929) and HTTP CONNECT (RFC 7231 §4.3.6) client. No async runtime dependency — uses `socket2`-compatible `TcpStream` with configurable timeout. Public API:
+  - `connect_via_proxy(proxy, host, port, timeout) -> Result<TcpStream, ProxyClientError>`
+  - Error types: `Io`, `Protocol(msg)`, `AuthRejected`, `UnsupportedProtocol`, `ConnectTimeout`
+  - SOCKS5: greeting → method negotiation → optional username/password auth → CONNECT command with IPv4/IPv6/domain address types → reply parsing with bound-address consumption
+  - HTTP CONNECT: `CONNECT host:port HTTP/1.1` with optional `Proxy-Authorization: Basic` header → 200 status check → header skip
+  - Shadowsocks: returns `UnsupportedProtocol` (cipher/stream layer not yet implemented)
+
+- [x] **Daemon relay wiring (`apps/daemon/src/main.rs`).** `open_routed_tcp` now handles `RouteTarget::Proxy(id)`:
+  - Loads the proxy config from SQLite via `load_proxy_config(db_path, id)`
+  - Calls `proxy_client::connect_via_proxy` to establish the tunnel
+  - Skips local DNS resolution for proxy targets — SOCKS5 sends the domain to the proxy (proxy-side resolution), and HTTP CONNECT includes the domain in the request line. This avoids DNS leaks through the local resolver.
+  - The local relay (`TcpListener::bind("127.0.0.1:0")` + bidirectional byte copy) is unchanged
+
+- [x] **NFQUEUE verdict path for proxy-routed packets — transparent proxy.** When a packet matches a Route rule whose egress resolves to `RouteTarget::Proxy`, the NFQUEUE path stamps a special `PROXY_REDIRECT_MARK` (route_mark_base - 1) instead of a routing fwmark. A new nftables nat chain `output_proxy_redirect` (priority -50) REDIRECTs these marked packets to the transparent proxy port. The transparent proxy uses `SO_ORIGINAL_DST` to recover the original destination, then tunnels through SOCKS5/HTTP.
+  - `PROXY_REDIRECT_MARK` is deliberately below `ROUTE_MARK_BASE` so it bypasses all the save/restore/masquerade chains (which only match `>= base`)
+  - `TransparentProxy` server in `proxy-client::transparent`: accepts redirected connections, reads original destination via `SO_ORIGINAL_DST`, connects through the configured SOCKS/HTTP proxy, relays bytes bidirectionally
+  - The transparent proxy starts automatically when enabled proxies exist in the DB; binds to `127.0.0.1:0` (OS-assigned port)
+  - `set_route_mark_fn` in the daemon returns `Some(PROXY_REDIRECT_MARK)` for proxy targets (instead of `None`)
+  - `NftablesBootstrap::setup` signature extended with `transparent_proxy_port: Option<u16>` parameter
+  - `DaemonRuntime` stores `transparent_proxy_port` for recovery callbacks
+
+- [x] **Removed empty `crates/socks5-client/` directory** (pre-existing placeholder).
+
+- [x] **Tests:** 180 passing (168 + 12 new in `proxy-client`). New tests cover SOCKS5 greeting encoding (no-auth vs username/password auth), CONNECT request formatting (IPv4, IPv6, domain), HTTP CONNECT request construction (with and without Basic auth), response status parsing (200 and 407), Shadowsocks unsupported protocol rejection, and `SO_ORIGINAL_DST` constant verification.
+
+- [x] **Files:** `crates/proxy-client/Cargo.toml`, `crates/proxy-client/src/lib.rs`, `Cargo.toml` (workspace member), `apps/daemon/Cargo.toml` (dependency), `apps/daemon/src/main.rs` (relay wiring + route_mark_fn).
+
+### 2026-06-01 (session 36 — transparent proxy hardening)
+
+Bug fixes for the NFQUEUE transparent proxy path. The transparent proxy was accepting connections but failing to relay through SOCKS5 due to multiple issues:
+
+- [x] **SOCKS handshake I/O timeout.** After `socket2::connect_timeout` established the TCP connection, the SOCKS5 greeting/method-selection/CONNECT exchange used blocking `read_exact()` with no timeout. If wireproxy was unresponsive, the transparent proxy hung indefinitely. Fix: set read/write timeouts on the TcpStream before handshake, map `TimedOut` to `ConnectTimeout`, clear timeouts after handshake for unthrottled relay.
+- [x] **`IP_TRANSPARENT` socket option.** The transparent proxy listener was a plain `TcpListener::bind()`. Linux requires `IP_TRANSPARENT` on the listening socket for nftables `REDIRECT` to deliver connections. Fix: `bind_transparent_listener()` uses `socket2` + `libc::setsockopt(SOL_IP, IP_TRANSPARENT=19)`.
+- [x] **IPv6 `SO_ORIGINAL_DST`.** Only `SOL_IP` was tried for original-destination lookup. IPv6 connections would fail. Fix: try `SOL_IP` first, fall back to `IPPROTO_IPV6`.
+- [x] **NFQUEUE re-queuing proxy-marked packets.** `PROXY_REDIRECT_MARK` (below `ROUTE_MARK_BASE`) was not matched by any bypass rule, so follow-on data segments were re-queued and could be dropped. Fix: `meta mark {PROXY_REDIRECT_MARK} accept` before the `queue num` rule.
+- [x] **Silent misconfiguration warning.** When transparent proxy starts but `LOGIGUARD_NFQUEUE` is unset, daemon now prints a warning.
+
+- [x] **Tests:** 180 passing (no new tests; existing tests cover the unchanged protocol logic).
