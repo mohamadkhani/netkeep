@@ -765,3 +765,55 @@ Bug fixes for the NFQUEUE transparent proxy path. The transparent proxy was acce
 - [x] **Silent misconfiguration warning.** When transparent proxy starts but `LOGIGUARD_NFQUEUE` is unset, daemon now prints a warning.
 
 - [x] **Tests:** 180 passing (no new tests; existing tests cover the unchanged protocol logic).
+
+### 2026-06-01 (session 37 — eBPF DNS tracker + DNS forwarder for egress routing)
+
+Architecture: [`docs/dns-forwarder.md`](docs/dns-forwarder.md)
+
+Problem: Apps resolve DNS through the default system resolver, getting fake IPs from throne/VPN (e.g. `10.10.34.36` for all blocked domains). The transparent proxy connects to fake IPs through SOCKS, which fails. The 1:1 `SniDnsCache` is unreliable when throne returns the same IP for every domain.
+
+Solution: DNS forwarder on `127.0.0.1:53` that intercepts DNS queries, identifies the source process via eBPF, matches against routing rules, and resolves through the correct egress's DNS servers. Apps get real IPs, transparent proxy sends hostnames to SOCKS.
+
+- [x] **eBPF DNS tracker** (`crates/dns-tracker-ebpf/` + `crates/dns-tracker-common/` + `crates/dns-tracker/`):
+  - Kernel-space kprobe on `udp_sendmsg`: captures PID (`bpf_get_current_pid_tgid`), process name (`bpf_get_current_comm`), and DNS query domain (parsed from UDP payload)
+  - Filters for `dport == 53`
+  - Writes to BPF HashMap: `(src_ip, src_port) → (pid, comm, domain)`
+  - Userspace loader: `aya::Ebpf`, attach kprobe, expose `DnsTracker::lookup(src_ip, src_port) → Option<DnsQueryInfo>`
+  - Build: nightly + `bpfel-unknown-none` target + `bpf-linker`
+
+- [x] **DNS forwarder** (`crates/dns-tracker/src/forwarder.rs`):
+  - UDP server on `127.0.0.1:53`
+  - Per-query dispatch: eBPF lookup → process + domain → rule match → resolve through egress DNS
+  - Proxy egress: DNS-over-SOCKS5 (TCP with 2-byte length prefix)
+  - Tun egress: `SO_MARK` on outbound UDP socket for policy routing
+  - Device egress: `SO_BINDTODEVICE` on outbound UDP socket
+  - No match: forward to system DNS
+  - Populates shared `SniDnsCache` from DNS response A/AAAA records
+  - Proxy configs cached in-memory to avoid per-query SQLite opens
+
+- [x] **Daemon integration** (`apps/daemon/src/main.rs`):
+  - Start eBPF DNS tracker at boot
+  - Start DNS forwarder on `127.0.0.1:53`
+  - Share `SniDnsCache` between DNS forwarder, NFQUEUE processor, and DNS snoop
+  - Rule-matching closure for `(process, domain) → egress`
+  - `FwmarkResolver` closure for `RouteTarget → fwmark` (Tun egress DNS)
+
+- [x] **Build infrastructure**: `xtask/` for BPF bytecode compilation, `aya` dependency
+
+### 2026-06-02 (session 38 — code review fixes for sessions 35–37)
+
+Review: [`plans/code-review-session-35-37.md`](plans/code-review-session-35-37.md)
+
+- [x] **SO_MARK in `resolve_via_so_mark()`**: Tun egress DNS now sets `SO_MARK` via `libc::setsockopt` on the outbound UDP socket, routing DNS queries through the correct policy routing table
+- [x] **Wire `SniDnsCache` into DNS forwarder**: Forwarder parses A/AAAA records from DNS responses and populates the shared IP→domain cache; daemon creates one shared cache for forwarder + NFQUEUE + DNS snoop
+- [x] **Cache proxy configs**: `resolve_via_proxy()` checks in-memory cache before opening SQLite; first query loads from DB, subsequent queries hit cache
+- [x] **Remove unused deps**: Removed `enforcer` and `policy-engine` from `dns-tracker/Cargo.toml`
+- [x] **Delete dangling doc comment**: Removed orphan `/// Detect local interfaces` comment from `main.rs`
+- [x] **Fix `architecture.md`**: Replaced `dns-forwarder/` entry with `dns-tracker/` (forwarder is a module inside dns-tracker)
+- [x] **`cargo fmt --all`**: Fixed indentation and formatting across workspace
+
+**Deferred** (tracked in review doc):
+- IPv6 DNS forwarder: add debug log for dropped queries
+- eBPF BTF: runtime validation of hardcoded struct offsets
+- EDNS0: bump `DNS_BUF` from 512 to 4096
+- Socket pooling in `forward_udp()`

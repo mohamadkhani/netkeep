@@ -85,7 +85,10 @@ logiguard/
 │   ├── enforcer/              # nftables + NFQUEUE integration
 │   ├── state-store/           # SQLite repositories
 │   ├── control-api/           # Unix socket protocol schema
-│   └── proxy-client/          # SOCKS5/HTTP CONNECT proxy client
+│   ├── proxy-client/          # SOCKS5/HTTP CONNECT proxy client
+│   ├── dns-tracker-ebpf/      # eBPF kprobe for DNS query process attribution (BPF bytecode)
+│   ├── dns-tracker-common/    # Shared structs between BPF and userspace
+│   └── dns-tracker/           # Userspace eBPF loader + map reader + DNS forwarder
 ├── apps/
 │   ├── daemon/                # logiguardd (root systemd service)
 │   ├── cli/                   # logiguard-cli (operator interface)

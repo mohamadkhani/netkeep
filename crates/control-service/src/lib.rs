@@ -195,6 +195,14 @@ impl<R: Repository> ControlService<R> {
         self.notification_tx.clone()
     }
 
+    /// Pure rule lookup without side effects: no pending registration, no event logging.
+    /// Used by the DNS forwarder to find the egress for a `(process, domain)` pair.
+    /// Returns `Some((action, egress_id))` for the best matching rule, or `None`.
+    pub fn lookup_rule_only(&self, flow: &FlowContext) -> Option<(RuleAction, Option<String>)> {
+        let resolved = policy_engine::resolve_action(&self.repo.list_rules(), flow)?;
+        Some((resolved.action, resolved.egress_id))
+    }
+
     /// Resolve the first available `RouteTarget` for a Route action.
     /// Checks interface operstate for Device/Tun targets; Proxy targets are
     /// considered available unless the ProxyRepository marks them disabled.

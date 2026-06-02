@@ -27,7 +27,11 @@ pub struct TransparentProxy {
 
 impl TransparentProxy {
     /// Bind the transparent proxy on the given address.
-    pub fn bind(listen_addr: &str, proxy: ProxyConfig, timeout: Duration) -> Result<Self, ProxyClientError> {
+    pub fn bind(
+        listen_addr: &str,
+        proxy: ProxyConfig,
+        timeout: Duration,
+    ) -> Result<Self, ProxyClientError> {
         let listener = bind_transparent_listener(listen_addr)?;
         Ok(Self {
             listener,
@@ -101,8 +105,11 @@ fn bind_transparent_listener(listen_addr: &str) -> Result<TcpListener, ProxyClie
         SocketAddr::V4(_) => Domain::IPV4,
         SocketAddr::V6(_) => Domain::IPV6,
     };
-    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP)).map_err(ProxyClientError::Io)?;
-    socket.set_reuse_address(true).map_err(ProxyClientError::Io)?;
+    let socket =
+        Socket::new(domain, Type::STREAM, Some(Protocol::TCP)).map_err(ProxyClientError::Io)?;
+    socket
+        .set_reuse_address(true)
+        .map_err(ProxyClientError::Io)?;
 
     #[cfg(target_os = "linux")]
     {
@@ -135,8 +142,12 @@ fn relay_bidirectional(client: TcpStream, upstream: TcpStream) -> Result<(), Str
     let t1 = std::thread::spawn(move || copy(&mut c_read, &mut u_write).map_err(|e| e.to_string()));
     let t2 = std::thread::spawn(move || copy(&mut u_read, &mut c_write).map_err(|e| e.to_string()));
 
-    let _ = t1.join().map_err(|_| "relay thread join failed".to_string())??;
-    let _ = t2.join().map_err(|_| "relay thread join failed".to_string())??;
+    let _ = t1
+        .join()
+        .map_err(|_| "relay thread join failed".to_string())??;
+    let _ = t2
+        .join()
+        .map_err(|_| "relay thread join failed".to_string())??;
     Ok(())
 }
 
@@ -156,7 +167,8 @@ fn get_original_dst(stream: &TcpStream) -> Result<SocketAddr, String> {
 fn get_original_dst_level(stream: &TcpStream, level: libc::c_int) -> Result<SocketAddr, String> {
     let fd = stream.as_raw_fd();
     let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let mut addr_len: libc::socklen_t = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    let mut addr_len: libc::socklen_t =
+        std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
 
     let ret = unsafe {
         libc::getsockopt(

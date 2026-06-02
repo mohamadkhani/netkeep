@@ -106,10 +106,8 @@ pub(crate) fn is_queue_invalidated_error(e: &std::io::Error) -> bool {
 pub(crate) fn is_transient_netlink_error(e: &std::io::Error) -> bool {
     use std::io::ErrorKind;
     const ENOBUFS: i32 = 105; // Linux/POSIX
-    matches!(
-        e.kind(),
-        ErrorKind::Interrupted | ErrorKind::WouldBlock
-    ) || e.raw_os_error() == Some(ENOBUFS)
+    matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock)
+        || e.raw_os_error() == Some(ENOBUFS)
 }
 
 impl<C, FR> NfqueueProcessor<C, FR>
@@ -1106,24 +1104,30 @@ mod tests {
         assert!(!is_transient_netlink_error(
             &std::io::Error::from_raw_os_error(2)
         ));
-        assert!(is_queue_invalidated_error(&std::io::Error::from_raw_os_error(2)));
-        // EINTR — signal interrupt (truly transient)
-        assert!(is_transient_netlink_error(
-            &std::io::Error::new(ErrorKind::Interrupted, "interrupted")
+        assert!(is_queue_invalidated_error(
+            &std::io::Error::from_raw_os_error(2)
         ));
+        // EINTR — signal interrupt (truly transient)
+        assert!(is_transient_netlink_error(&std::io::Error::new(
+            ErrorKind::Interrupted,
+            "interrupted"
+        )));
         // ENOBUFS — kernel queue overflow (truly transient)
         assert!(is_transient_netlink_error(
             &std::io::Error::from_raw_os_error(105)
         ));
         // EAGAIN / EWOULDBLOCK (truly transient)
-        assert!(is_transient_netlink_error(
-            &std::io::Error::new(ErrorKind::WouldBlock, "would block")
-        ));
+        assert!(is_transient_netlink_error(&std::io::Error::new(
+            ErrorKind::WouldBlock,
+            "would block"
+        )));
         // EBADF — fatal, should kill the loop
         assert!(!is_transient_netlink_error(
             &std::io::Error::from_raw_os_error(9)
         ));
-        assert!(!is_queue_invalidated_error(&std::io::Error::from_raw_os_error(9)));
+        assert!(!is_queue_invalidated_error(
+            &std::io::Error::from_raw_os_error(9)
+        ));
         // ECONNREFUSED — fatal
         assert!(!is_transient_netlink_error(
             &std::io::Error::from_raw_os_error(111)

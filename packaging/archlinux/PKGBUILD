@@ -4,7 +4,7 @@
 
 pkgname=logiguard
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='Linux desktop network flow authorization (daemon, CLI, GPUI tray)'
 arch=('x86_64')
 url='https://github.com/mohammadreza-khani/logiguard'
@@ -18,8 +18,11 @@ depends=(
   'libxkbcommon'
   'xdotool'
 )
-makedepends=('cargo' 'pkgconf' 'clang' 'llvm' 'rsync')
-optdepends=('vulkan-mesa-layers: GPU stack for GPUI on some setups')
+makedepends=('rustup' 'pkgconf' 'clang' 'llvm' 'rsync')
+optdepends=(
+  'vulkan-mesa-layers: GPU stack for GPUI on some setups'
+  'systemd-resolved: disable stub listener if using LOGIGUARD_DNS_FORWARDER on port 53'
+)
 options=('!lto' '!debug')
 install=logiguard.install
 
@@ -35,12 +38,27 @@ prepare() {
     --exclude target \
     --exclude .git \
     "${_root}/" "${srcdir}/build/"
+
+  # Isolated toolchain for makepkg (nightly drives cargo; pinned 1.95.0 is minimal-only).
+  export RUSTUP_HOME="${srcdir}/.rustup"
+  export CARGO_HOME="${srcdir}/.cargo"
+  mkdir -p "${RUSTUP_HOME}" "${CARGO_HOME}"
+
+  rustup toolchain install nightly --profile minimal --component rust-src
+  rustup target add bpfel-unknown-none --toolchain nightly
+  cargo +nightly install bpf-linker --root "${CARGO_HOME}" --locked 2>/dev/null \
+    || cargo +nightly install bpf-linker --root "${CARGO_HOME}"
 }
 
 build() {
   cd "${srcdir}/build"
-  export RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}
-  cargo build --workspace --release --locked
+  export RUSTUP_HOME="${srcdir}/.rustup"
+  export CARGO_HOME="${srcdir}/.cargo"
+  export PATH="${CARGO_HOME}/bin:${PATH}"
+
+  # eBPF object must exist before dns-tracker embeds it via include_bytes!.
+  RUSTUP_TOOLCHAIN=nightly cargo xtask build-ebpf-release
+  RUSTUP_TOOLCHAIN=nightly cargo build --workspace --release --locked
 }
 
 package() {

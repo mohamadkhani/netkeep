@@ -2,6 +2,7 @@ post_install() {
   echo 'LogiGuard: enable and start the daemon with:'
   echo '  systemctl enable --now logiguardd.service'
   echo 'Optional: set LOGIGUARD_NFQUEUE in the unit for packet interception.'
+  echo 'Optional: set LOGIGUARD_DNS_FORWARDER=1 and nameserver 127.0.0.1 for egress DNS (see docs/dns-forwarder.md).'
   gtk-update-icon-cache -q -t -f usr/share/icons/hicolor 2>/dev/null || true
 }
 

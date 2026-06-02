@@ -12,6 +12,7 @@ decision-engine = { path = "../../crates/decision-engine" }
 enforcer = { path = "../../crates/enforcer" }
 flow-classifier = { path = "../../crates/flow-classifier" }
 proxy-client = { path = "../../crates/proxy-client" }
+dns-tracker = { path = "../../crates/dns-tracker" }
 serde_json = "1"
 state-store = { path = "../../crates/state-store" }
 metrics = "0.24"

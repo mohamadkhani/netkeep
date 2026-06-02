@@ -10,6 +10,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod metrics;
 
+use dns_tracker::forwarder::{DnsForwarder, EgressResolver, FwmarkResolver, SystemDns};
+use dns_tracker::DnsTracker;
+
 use control_api::{ControlRequest, ControlResponse, PushNotification};
 use control_service::{ControlService, HealthConfig, SharedService};
 use core_types::{Egress, ProxyConfig, RouteTarget};
@@ -25,7 +28,9 @@ use flow_classifier::{
 use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
 use hickory_resolver::Resolver;
 use rusqlite::{params, Connection};
-use state_store::{EgressRepository, PendingRepository, ProxyRepository, RuleRepository, SqliteRuleRepository};
+use state_store::{
+    EgressRepository, PendingRepository, ProxyRepository, RuleRepository, SqliteRuleRepository,
+};
 use tokio::sync::broadcast;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
@@ -108,9 +113,6 @@ fn now_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
-
-/// Detect local interfaces and build initial egress records.
-/// Includes:
 
 /// Returns true if the process `peer_pid` has stdin on a physical console
 /// (/dev/tty[0-9]* or /dev/console), not a pseudo-terminal (/dev/pts/*).
@@ -267,9 +269,8 @@ fn resolve_socket_addrs(
 fn load_proxy_config(db_path: &str, proxy_id: &str) -> Result<ProxyConfig, String> {
     let repo = state_store::SqliteRuleRepository::open(db_path)
         .map_err(|e| format!("open repo for proxy config failed: {e}"))?;
-    repo.get_proxy(proxy_id).ok_or_else(|| {
-        format!("proxy '{proxy_id}' not found in database")
-    })
+    repo.get_proxy(proxy_id)
+        .ok_or_else(|| format!("proxy '{proxy_id}' not found in database"))
 }
 
 /// Connect to `host:port` through a SOCKS5 or HTTP proxy.
@@ -684,8 +685,8 @@ struct DaemonRuntime {
     /// `queue num N` rules would just drop every packet.
     nfqueue_num: Option<u16>,
     route_mark_base: u32,
-    /// Port of the transparent SOCKS/HTTP proxy, if running.
-    transparent_proxy_port: Option<u16>,
+    /// Per-proxy (fwmark, local_port) pairs for nftables REDIRECT rules.
+    proxy_redirects: Vec<(u32, u16)>,
 }
 
 /// Decision returned by [`plan_nfqueue_toggle`]. Splitting the gate logic from
@@ -768,7 +769,7 @@ fn handle_client(
             NfqueueToggleAction::Apply { queue } => {
                 // `bootstrap.is_some()` already checked by the planner.
                 let bs = runtime.bootstrap.as_deref().expect("bootstrap present");
-                match bs.setup(queue, runtime.route_mark_base, runtime.transparent_proxy_port) {
+                match bs.setup(queue, runtime.route_mark_base, &runtime.proxy_redirects) {
                     Ok(()) => {
                         // Only commit the flag after nftables actually applied,
                         // so a kernel failure can't leave the UI claiming
@@ -958,14 +959,7 @@ fn main() {
     {
         let mut svc = service.lock().expect("service lock");
         svc.restore_pending(live_pending);
-        svc.set_route_mark_fn(|target| match target {
-            // Proxy targets get a special redirect mark that triggers nftables
-            // REDIRECT to the transparent proxy port. The transparent proxy
-            // reads the original destination via SO_ORIGINAL_DST and connects
-            // through SOCKS/HTTP.
-            RouteTarget::Proxy(_) => Some(enforcer::PROXY_REDIRECT_MARK),
-            _ => ensure_route_mark(target).ok(),
-        });
+        // route_mark_fn is set after proxy_marks is built below.
     }
 
     let health = {
@@ -993,51 +987,163 @@ fn main() {
         .ok()
         .and_then(|s| s.trim().parse().ok());
 
-    // Start transparent proxy if there are enabled proxies configured.
-    // This must happen before nftables setup so we know the port for the
-    // REDIRECT rule.
-    let transparent_proxy_port: Option<u16> = {
-            let proxies: Vec<ProxyConfig> = {
-                let mut svc = service.lock().expect("service lock");
-                match svc.handle(control_api::ControlRequest::ListProxies) {
-                    control_api::ControlResponse::ProxyList(p) => p,
-                    _ => vec![],
+    // Shared DNS cache for NFQUEUE classifier, DNS snoop, and DNS forwarder.
+    // Created unconditionally so all subsystems share the same IP→domain mappings.
+    let dns_cache = SniDnsCache::new();
+
+    // Start eBPF DNS tracker + DNS forwarder if enabled.
+    // Set LOGIGUARD_DNS_FORWARDER=1 to enable (requires root + CAP_BPF).
+    if std::env::var("LOGIGUARD_DNS_FORWARDER")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+    {
+        // Try to load eBPF DNS tracker.
+        let ebpf_tracker = match DnsTracker::load() {
+            Ok(t) => {
+                let t = Arc::new(t);
+                Some(t)
+            }
+            Err(e) => {
+                eprintln!("dns-tracker: eBPF load failed ({e}); will use SOCK_DIAG fallback only");
+                None
+            }
+        };
+
+        // Capture system DNS before we bind port 53.
+        let system_dns = SystemDns::from_resolv_conf();
+        eprintln!(
+            "dns-tracker: system DNS fallback: {:?}",
+            system_dns.as_ref().map(|s| s.addr)
+        );
+
+        // Build egress resolver closure: (process_name, domain) → (target, dns_servers).
+        let service_for_dns = Arc::clone(&service);
+        let db_for_dns = db_path.clone();
+        let egress_resolver: EgressResolver = Arc::new(move |process_name, domain| {
+            let svc = service_for_dns.lock().ok()?;
+            // We use the existing RegisterFlow path to match rules without side effects.
+            // Build a minimal FlowContext for policy matching.
+            let flow = core_types::FlowContext {
+                process_name: Some(process_name.to_string()),
+                process_exe: None,
+                app_name: None,
+                source_ip: String::new(),
+                source_port: 0,
+                destination_ip: String::new(),
+                destination_port: 53,
+                destination_domain: Some(domain.to_string()),
+                protocol: core_types::TransportProtocol::Udp,
+                direction: core_types::FlowDirection::Outbound,
+                device_label: None,
+            };
+            let decision = svc.lookup_rule_only(&flow);
+            match decision {
+                Some((core_types::RuleAction::Route, Some(egress_id))) => {
+                    // Resolve egress → target and DNS servers.
+                    let repo = state_store::SqliteRuleRepository::open(&db_for_dns).ok()?;
+                    let egress = repo.get_egress(&egress_id)?;
+                    // Pick first target.
+                    let target = egress.targets.into_iter().next()?;
+                    Some((target, egress.dns_servers))
+                }
+                _ => None,
+            }
+        });
+
+        // Build fwmark resolver: RouteTarget → fwmark for policy routing (Tun egress DNS).
+        let fwmark_resolver: FwmarkResolver =
+            Arc::new(|target: &RouteTarget| ensure_route_mark(target).ok());
+
+        match DnsForwarder::bind(
+            ebpf_tracker,
+            egress_resolver,
+            fwmark_resolver,
+            system_dns,
+            dns_cache.clone(),
+        ) {
+            Ok(forwarder) => {
+                std::thread::spawn(move || forwarder.run());
+                eprintln!("dns-forwarder: started on 127.0.0.1:53");
+            }
+            Err(e) => {
+                eprintln!("dns-forwarder: failed to bind port 53: {e}");
+                eprintln!("dns-forwarder: hint: set /etc/resolv.conf nameserver to 127.0.0.1 and ensure nothing else is using port 53");
+            }
+        }
+    }
+
+    // Start one transparent proxy per enabled proxy, each on a different port.
+    // Build a map: proxy_id → (fwmark, local_port).
+    // fwmarks are allocated below ROUTE_MARK_BASE (PROXY_REDIRECT_MARK range).
+    // PROXY_REDIRECT_MARK = ROUTE_MARK_BASE - 1; we allocate downward from there.
+    let proxy_marks: std::collections::HashMap<String, (u32, u16)> = {
+        let proxies: Vec<ProxyConfig> = {
+            let mut svc = service.lock().expect("service lock");
+            match svc.handle(control_api::ControlRequest::ListProxies) {
+                control_api::ControlResponse::ProxyList(p) => p,
+                _ => vec![],
+            }
+        };
+        let enabled_proxies: Vec<_> = proxies.into_iter().filter(|p| p.enabled).collect();
+        let mut map = std::collections::HashMap::new();
+        for (i, proxy) in enabled_proxies.into_iter().enumerate() {
+            // Allocate a mark below ROUTE_MARK_BASE: base-1, base-2, base-3, ...
+            let mark = route_mark_base - 1 - i as u32;
+            let tp = match proxy_client::transparent::TransparentProxy::bind(
+                "127.0.0.1:0",
+                proxy.clone(),
+                std::time::Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
+            ) {
+                Ok(tp) => tp,
+                Err(e) => {
+                    eprintln!("transparent proxy bind failed for proxy {}: {e}", proxy.id);
+                    continue;
                 }
             };
-        let enabled_proxies: Vec<_> = proxies.into_iter().filter(|p| p.enabled).collect();
-        if enabled_proxies.is_empty() {
-            None
-        } else {
-            // Use the first enabled proxy for transparent redirection.
-            // TODO: per-egress proxy mapping (each egress may point to a different proxy).
-            let proxy = enabled_proxies.into_iter().next().unwrap();
-            let tp = proxy_client::transparent::TransparentProxy::bind(
-                "127.0.0.1:0",
-                proxy,
-                std::time::Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
-            )
-            .expect("transparent proxy bind failed");
-            let port = tp.local_addr().expect("transparent proxy local_addr failed").port();
+            let port = tp
+                .local_addr()
+                .expect("transparent proxy local_addr failed")
+                .port();
             let tp = Arc::new(tp);
             std::thread::spawn(move || tp.run());
-            eprintln!("transparent proxy listening on 127.0.0.1:{port}");
-            Some(port)
+            eprintln!(
+                "transparent proxy for proxy {} listening on 127.0.0.1:{port} (fwmark={mark})",
+                proxy.id
+            );
+            map.insert(proxy.id, (mark, port));
         }
+        map
     };
+    // Build the list of (mark, port) pairs for nftables setup.
+    let proxy_redirects: Vec<(u32, u16)> = proxy_marks.values().copied().collect();
+
+    // Now that proxy_marks is ready, set the fwmark lookup function on the service.
+    {
+        let mut svc = service.lock().expect("service lock");
+        let proxy_marks_for_fn = proxy_marks.clone();
+        svc.set_route_mark_fn(move |target| match target {
+            RouteTarget::Proxy(id) => proxy_marks_for_fn
+                .get(id)
+                .map(|(mark, _port)| *mark)
+                .or(Some(enforcer::PROXY_REDIRECT_MARK)),
+            _ => ensure_route_mark(target).ok(),
+        });
+    }
 
     // Always install the nftables protection chains — they preserve our route
     // mark across other tools' marking chains (e.g. throne, sing-box) so that
     // device-routed relay connections actually leave via the requested NIC.
     // NFQUEUE rules are only added when LOGIGUARD_NFQUEUE is set.
     let bs: Arc<dyn NftablesBootstrap> = Arc::new(SystemNftablesBootstrap);
-    if transparent_proxy_port.is_some() && nfqueue_num.is_none() {
+    if !proxy_redirects.is_empty() && nfqueue_num.is_none() {
         eprintln!(
             "warning: transparent proxy is listening but LOGIGUARD_NFQUEUE is unset — \
              outbound traffic will not be marked for proxy redirect (set LOGIGUARD_NFQUEUE, e.g. 0)"
         );
     }
 
-    let nftables_ready = match bs.setup(nfqueue_num, route_mark_base, transparent_proxy_port) {
+    let nftables_ready = match bs.setup(nfqueue_num, route_mark_base, &proxy_redirects) {
         Ok(()) => {
             println!(
                 "nftables rules applied (route_mark_base={route_mark_base}, nfqueue={nfqueue_num:?})"
@@ -1051,10 +1157,9 @@ fn main() {
     };
 
     // Start the NFQUEUE processor if enabled and nftables came up.
-    let transparent_proxy_port_for_recovery = transparent_proxy_port;
+    let proxy_redirects_for_recovery = proxy_redirects.clone();
     let bootstrap: Option<Arc<dyn NftablesBootstrap>> = if nftables_ready {
         if let Some(queue_num) = nfqueue_num {
-            let dns_cache = SniDnsCache::new();
             let classifier = FlowClassifier::new(
                 ProcProcessResolver::new(),
                 dns_cache.clone(),
@@ -1070,11 +1175,15 @@ fn main() {
                     println!("nfqueue processor running on queue {queue_num}");
                     let bs_for_nfqueue = Arc::clone(&bs);
                     let route_mark_base_for_nfqueue = route_mark_base;
-                    let tp_port_for_nfqueue = transparent_proxy_port_for_recovery;
+                    let pr_for_nfqueue = proxy_redirects_for_recovery.clone();
                     std::thread::spawn(move || {
                         let recover = |q: u16| -> Result<(), String> {
                             eprintln!("nfqueue recovery: re-applying nftables for queue {q}");
-                            bs_for_nfqueue.setup(Some(q), route_mark_base_for_nfqueue, tp_port_for_nfqueue)
+                            bs_for_nfqueue.setup(
+                                Some(q),
+                                route_mark_base_for_nfqueue,
+                                &pr_for_nfqueue,
+                            )
                         };
                         if let Err(e) = processor.run_loop(queue_num, recover) {
                             eprintln!("nfqueue processor stopped: {e}");
@@ -1086,16 +1195,16 @@ fn main() {
                     // subsequent connections to the same IP are attributed a domain
                     // even when no SNI or HTTP Host header is available.
                     if let Some(dns_q) = queue_num.checked_add(1) {
-                        match DnsSnoopWorker::open(dns_q, dns_cache) {
+                        match DnsSnoopWorker::open(dns_q, dns_cache.clone()) {
                             Ok(mut worker) => {
                                 println!("dns snoop running on queue {dns_q}");
                                 let bs_for_dns = Arc::clone(&bs);
                                 let rmb_for_dns = route_mark_base;
-                                let tp_port_for_dns = transparent_proxy_port_for_recovery;
+                                let pr_for_dns = proxy_redirects_for_recovery.clone();
                                 std::thread::spawn(move || {
                                     let recover = |q: u16| -> Result<(), String> {
                                         eprintln!("dns snoop recovery: re-applying nftables for queue {q}");
-                                        bs_for_dns.setup(Some(q), rmb_for_dns, tp_port_for_dns)
+                                        bs_for_dns.setup(Some(q), rmb_for_dns, &pr_for_dns)
                                     };
                                     if let Err(e) = worker.run_loop(dns_q, recover) {
                                         eprintln!("dns snoop stopped: {e}");
@@ -1122,7 +1231,7 @@ fn main() {
         bootstrap: bootstrap.clone(),
         nfqueue_num,
         route_mark_base,
-        transparent_proxy_port: transparent_proxy_port_for_recovery,
+        proxy_redirects: proxy_redirects_for_recovery,
     };
 
     for stream in listener.incoming() {
