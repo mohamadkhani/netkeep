@@ -30,12 +30,16 @@ A kprobe on `udp_sendmsg` fires every time any process sends a UDP packet. The B
 
 This is written into a BPF HashMap keyed by `(src_ip, src_port)`.
 
+**Important:** The BPF program reads `skc_rcv_saddr` (the socket's **bound** address) as `src_ip`. For auto-bound UDP sockets, this is `0.0.0.0` — not the actual packet source IP. The userspace `lookup()` handles this by trying the specific IP first, then falling back to `0.0.0.0` (INADDR_ANY).
+
 The userspace loader (`DnsTracker`) attaches the kprobe via `aya`, and exposes:
 
 ```rust
 fn lookup(&self, src_ip: Ipv4Addr, src_port: u16) -> Option<DnsQueryInfo>
 // DnsQueryInfo { pid: u32, comm: String, domain: String }
 ```
+
+**Lookup strategy:** Tries `(src_ip, src_port)` first. If not found, retries with `(0.0.0.0, src_port)` to match auto-bound sockets.
 
 **Fallback:** If the eBPF map entry has been evicted (rare), the forwarder falls back to `ProcProcessResolver` (SOCK_DIAG + `/proc` scan). The app's UDP socket is still open while blocked on `getaddrinfo()`, so SOCK_DIAG succeeds.
 
@@ -123,6 +127,18 @@ The DNS forwarder and the transparent proxy complement each other:
 
 - DNS forwarder: app gets a **real IP** from the correct egress DNS → NFQUEUE routes TCP to transparent proxy using hostname from SniDnsCache
 - Transparent proxy: when DNS forwarder was used, `SniDnsCache` already has `ip → domain` → SOCKS5 CONNECT uses the domain name, not the IP
+
+## UDP Retry Behavior
+
+`forward_udp()` retries DNS queries on timeout (EAGAIN / WouldBlock):
+
+- **Per-attempt timeout:** 3 seconds
+- **Max retries:** 2 (3 total attempts: initial + 2 retries)
+- **Total max wait:** ~9 seconds
+- **Behavior:** On timeout, the query is resent to the upstream DNS server. On any other error (network unreachable, etc.), it fails immediately without retrying.
+- **Logging:** Each retry logs `dns-forwarder: retry N/2 to <upstream>`.
+
+This is standard DNS client behavior — UDP is unreliable, and resending is the correct recovery strategy.
 
 ## Notes for Future Work
 

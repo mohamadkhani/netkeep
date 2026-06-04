@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod metrics;
 
 use dns_tracker::forwarder::{DnsForwarder, EgressResolver, FwmarkResolver, SystemDns};
-use dns_tracker::DnsTracker;
+use dns_tracker::{DnsTracker, SockTracker};
 
 use control_api::{ControlRequest, ControlResponse, PushNotification};
 use control_service::{ControlService, HealthConfig, SharedService};
@@ -1156,12 +1156,35 @@ fn main() {
         }
     };
 
+    // Load eBPF socket tracker for instant PID resolution.
+    // This hooks inet_sock_set_state (TCP) and udp_sendmsg (UDP) in the kernel
+    // to capture PIDs at socket creation time — before NFQUEUE delivers packets.
+    // Falls back gracefully if eBPF is unavailable (no CAP_BPF, old kernel).
+    let sock_tracker: Option<Arc<SockTracker>> = match SockTracker::load() {
+        Ok(t) => {
+            eprintln!("sock-tracker: eBPF socket tracker loaded successfully");
+            Some(Arc::new(t))
+        }
+        Err(e) => {
+            eprintln!(
+                "sock-tracker: eBPF load failed ({e}); will use SOCK_DIAG + /proc fallback only"
+            );
+            None
+        }
+    };
+
     // Start the NFQUEUE processor if enabled and nftables came up.
     let proxy_redirects_for_recovery = proxy_redirects.clone();
     let bootstrap: Option<Arc<dyn NftablesBootstrap>> = if nftables_ready {
         if let Some(queue_num) = nfqueue_num {
+            let resolver: ProcProcessResolver = match sock_tracker {
+                Some(ref tracker) => ProcProcessResolver::with_sock_tracker(
+                    Arc::clone(tracker) as Arc<dyn flow_classifier::SocketTracker>
+                ),
+                None => ProcProcessResolver::new(),
+            };
             let classifier = FlowClassifier::new(
-                ProcProcessResolver::new(),
+                resolver,
                 dns_cache.clone(),
                 FakeDeviceLabelResolver { result: None },
             );

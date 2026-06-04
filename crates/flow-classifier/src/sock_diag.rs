@@ -22,25 +22,92 @@ const IPPROTO_UDP: u8 = 17;
 ///
 /// Returns `(inode, uid)` on success. `None` if the socket does not exist,
 /// netlink is unavailable, or the lookup fails.
+///
+/// **Dual-family query:** Many applications use `AF_INET6` sockets with
+/// `IPV6_V6ONLY=0` even for IPv4 destinations. The kernel records these in
+/// the IPv6 socket table as `::ffff:a.b.c.d`. Querying only `AF_INET` for an
+/// IPv4 source address misses these entries. We query both families and return
+/// the first match.
+///
+/// **UDP wildcard retry:** UDP sockets often bind to `0.0.0.0` (INADDR_ANY)
+/// rather than a specific source IP. If the specific-IP query returns nothing
+/// for UDP, we retry with the wildcard address.
 pub fn query_socket_inode(
     src_ip: IpAddr,
     src_port: u16,
     protocol: TransportProtocol,
 ) -> Option<(u64, u32)> {
-    let mut socket = Socket::new(NETLINK_SOCK_DIAG).ok()?;
-    socket.bind(&SocketAddr::new(0, 0)).ok()?;
-    let kernel_addr = SocketAddr::new(0, 0);
-    socket.connect(&kernel_addr).ok()?;
-
-    let family = match src_ip {
-        IpAddr::V4(_) => AF_INET,
-        IpAddr::V6(_) => AF_INET6,
-    };
     let ipproto = if matches!(protocol, TransportProtocol::Udp | TransportProtocol::Quic) {
         IPPROTO_UDP
     } else {
         IPPROTO_TCP
     };
+
+    // Build the ordered list of (family, source_address) to try.
+    // Primary family first, then the other family (handles AF_INET6 sockets
+    // used for IPv4 connections via ::ffff: mapped addresses).
+    let families: [(u8, IpAddr); 2] = match src_ip {
+        IpAddr::V4(v4) => [
+            (AF_INET, IpAddr::V4(v4)),
+            (AF_INET6, IpAddr::V6(v4.to_ipv6_mapped())),
+        ],
+        IpAddr::V6(v6) => [
+            (AF_INET6, IpAddr::V6(v6)),
+            // For IPv6 source, also try AF_INET in case it's an IPv4-mapped
+            // address that the kernel stores in the IPv4 table.
+            (AF_INET, v6.to_ipv4_mapped().map_or(src_ip, IpAddr::V4)),
+        ],
+    };
+
+    for &(family, query_ip) in &families {
+        if let Some(result) = query_single_family(family, query_ip, src_port, ipproto) {
+            return Some(result);
+        }
+    }
+
+    // UDP wildcard retry: if the specific-IP queries failed for UDP, try
+    // querying with INADDR_ANY (0.0.0.0) as the source address. This handles
+    // sockets that bind to the wildcard address but send from a real IP.
+    if matches!(protocol, TransportProtocol::Udp | TransportProtocol::Quic) {
+        let wildcard_ip = match src_ip {
+            IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        };
+        // Try both families for the wildcard too.
+        let wildcard_families: [(u8, IpAddr); 2] = match src_ip {
+            IpAddr::V4(_) => [
+                (AF_INET, wildcard_ip),
+                (
+                    AF_INET6,
+                    IpAddr::V6(std::net::Ipv4Addr::UNSPECIFIED.to_ipv6_mapped()),
+                ),
+            ],
+            IpAddr::V6(_) => [
+                (AF_INET6, wildcard_ip),
+                (AF_INET, IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+            ],
+        };
+        for &(family, query_ip) in &wildcard_families {
+            if let Some(result) = query_single_family(family, query_ip, src_port, ipproto) {
+                return Some(result);
+            }
+        }
+    }
+
+    None
+}
+
+/// Send a single SOCK_DIAG netlink query for one (family, source_address) pair.
+fn query_single_family(
+    family: u8,
+    query_ip: IpAddr,
+    src_port: u16,
+    ipproto: u8,
+) -> Option<(u64, u32)> {
+    let mut socket = Socket::new(NETLINK_SOCK_DIAG).ok()?;
+    socket.bind(&SocketAddr::new(0, 0)).ok()?;
+    let kernel_addr = SocketAddr::new(0, 0);
+    socket.connect(&kernel_addr).ok()?;
 
     let request = InetRequest {
         family,
@@ -50,8 +117,8 @@ pub fn query_socket_inode(
         socket_id: SocketId {
             source_port: src_port,
             destination_port: 0,
-            source_address: src_ip,
-            destination_address: wildcard_dest_addr(src_ip),
+            source_address: query_ip,
+            destination_address: wildcard_dest_addr(query_ip),
             interface_id: 0,
             cookie: [0u8; 8],
         },
@@ -84,14 +151,14 @@ pub fn query_socket_inode(
                 if h.socket_id.source_port != src_port {
                     continue;
                 }
-                if !sock_addr_matches(h.socket_id.source_address, src_ip) {
+                // The response address might be IPv4-mapped IPv6; normalize
+                // before comparing to the original query address.
+                if !sock_addr_matches(h.socket_id.source_address, query_ip) {
                     continue;
                 }
                 return Some((h.inode as u64, h.uid));
             }
-            NetlinkPayload::Error(err) => {
-                // Kernel rejected the request — treat as miss.
-                let _ = err;
+            NetlinkPayload::Error(_) => {
                 return None;
             }
             NetlinkPayload::Noop | NetlinkPayload::Overrun(_) => return None,

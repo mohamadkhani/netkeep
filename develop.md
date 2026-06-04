@@ -817,3 +817,24 @@ Review: [`plans/code-review-session-35-37.md`](plans/code-review-session-35-37.m
 - eBPF BTF: runtime validation of hardcoded struct offsets
 - EDNS0: bump `DNS_BUF` from 512 to 4096
 - Socket pooling in `forward_udp()`
+
+### 2026-06-02 (session 39 — eBPF socket tracker for 100% process detection)
+
+**Goal:** Eliminate process detection failures by capturing PIDs at the kernel level before NFQUEUE delivers packets.
+
+- [x] **SOCK_DIAG dual-family query** (`sock_diag.rs`): Query both `AF_INET` and `AF_INET6` for any source IP. Many apps use `AF_INET6` sockets with `IPV6_V6ONLY=0` for IPv4 connections — the kernel stores these as `::ffff:a.b.c.d` in the IPv6 table. Previously only queried one family.
+- [x] **SOCK_DIAG UDP wildcard retry** (`sock_diag.rs`): Retry with `INADDR_ANY` (0.0.0.0) when specific-IP queries fail for UDP/QUIC. UDP sockets often bind to the wildcard address.
+- [x] **eBPF socket tracker program** (`dns-tracker-ebpf/src/sock_tracker.rs`): New BPF program with three hooks:
+  - `tracepoint:sock:inet_sock_set_state` — captures PID at TCP `SYN_SENT`
+  - `kprobe:udp_sendmsg` — captures PID at every UDP send
+  - `kprobe:udp_lib_unhash` — cleans up stale entries on socket close
+  - Uses `SOCK_EVENTS` BPF HashMap (16384 entries) keyed by `(src_ip[16], src_port, protocol)`
+- [x] **Userspace SockTracker loader** (`dns-tracker/src/sock_tracker.rs`): Loads BPF program, attaches hooks, provides `lookup_pid()`. Implements `flow_classifier::SocketTracker` trait.
+- [x] **SocketTracker trait** (`flow-classifier/src/lib.rs`): New trait for dependency inversion — `flow-classifier` defines the trait, `dns-tracker` implements it. Avoids circular dependencies.
+- [x] **ProcProcessResolver integration** (`proc_resolver.rs`): New Step 0 — check eBPF map before SOCK_DIAG. Metrics: `logiguard.proc.resolver.ebpf.hits` / `misses`.
+- [x] **Daemon integration** (`main.rs`): Loads `SockTracker` at startup, passes to `ProcProcessResolver::with_sock_tracker()`. Graceful fallback on eBPF load failure.
+- [x] **xtask build**: Updated to build both `dns-tracker-ebpf` and `sock-tracker-ebpf` binaries.
+- [x] **Tests**: 4 new tests for `build_sock_key()` (IPv4→mapped IPv6, IPv6 raw, QUIC→UDP protocol, Other→0). All 180 workspace tests pass.
+- [x] **Documentation**: Updated `process-resolver.md`, `process-attribution-races.md` (Layer −1).
+- [x] **DNS forwarder retry logic** (`forwarder.rs`): `forward_udp()` now retries up to 2 times on timeout (EAGAIN) with 3s per-attempt timeout. Previously a single 8s attempt with no retry — standard DNS clients retry because UDP is unreliable.
+- [x] **DNS tracker wildcard fallback** (`tracker.rs`): `DnsTracker::lookup()` now tries `0.0.0.0` (INADDR_ANY) key when the specific-IP lookup fails. Auto-bound UDP sockets have `skc_rcv_saddr = 0.0.0.0` even when the actual packet source IP is `127.0.0.1`. This fixed the DNS forwarder attributing queries to `logiguard-daemon` instead of the real client (e.g. `chromium`).

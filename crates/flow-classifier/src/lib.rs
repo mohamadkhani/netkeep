@@ -409,3 +409,33 @@ mod tests {
         assert_eq!(ctx.device_label.as_deref(), Some("home-laptop"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// eBPF socket tracker trait (decouples flow-classifier from dns-tracker)
+// ---------------------------------------------------------------------------
+
+/// eBPF-based socket tracker that captures PIDs at socket creation time.
+///
+/// This trait decouples `flow-classifier` from the `dns-tracker` crate (which
+/// provides the eBPF loader). When available, the eBPF map is checked *before*
+/// SOCK_DIAG or `/proc/net` lookups, eliminating TOCTOU races entirely.
+pub trait SocketTracker: Send + Sync {
+    /// Look up the PID and UID for a socket by source IP, port, and protocol.
+    ///
+    /// Returns `None` if the eBPF map has no entry (socket created before the
+    /// tracker was loaded, or the entry was evicted).
+    fn lookup_pid(
+        &self,
+        src_ip: std::net::IpAddr,
+        src_port: u16,
+        protocol: TransportProtocol,
+    ) -> Option<TrackedProcess>;
+}
+
+/// Result from the eBPF socket tracker: PID and UID captured at socket
+/// creation/send time.
+#[derive(Debug, Clone)]
+pub struct TrackedProcess {
+    pub pid: u32,
+    pub uid: u32,
+}

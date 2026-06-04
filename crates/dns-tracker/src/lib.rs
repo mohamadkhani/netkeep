@@ -1,7 +1,9 @@
 pub mod forwarder;
+pub mod sock_tracker;
 mod tracker;
 
 pub use forwarder::DnsForwarder;
+pub use sock_tracker::{SockTracker, TrackedProcess};
 pub use tracker::{DnsQueryInfo, DnsTracker};
 
 /// Shared key layout mirroring crates/dns-tracker-ebpf/src/main.rs DnsKey.

@@ -11,8 +11,6 @@ use crate::tracker::DnsTracker;
 
 /// Timeout for DNS-over-SOCKS5 handshake and TCP exchange.
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
-/// Timeout for plain UDP DNS fallback (system DNS).
-const UDP_DNS_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Maximum DNS message size (standard UDP limit).
 const DNS_BUF: usize = 512;
@@ -488,20 +486,49 @@ fn resolve_via_bindtodevice(
     Err(format!("all device DNS servers failed for iface {iface}"))
 }
 
+/// Per-attempt timeout for UDP DNS retries.
+const UDP_RETRY_TIMEOUT: Duration = Duration::from_secs(3);
+/// Maximum number of send attempts for a single UDP DNS query.
+const UDP_MAX_RETRIES: usize = 2;
+
 /// Forward a UDP DNS query to `upstream` and return the response.
+///
+/// Retries up to [`UDP_MAX_RETRIES`] times on timeout (EAGAIN / WouldBlock).
+/// DNS over UDP is inherently unreliable; retries are standard client behavior.
 fn forward_udp(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>, String> {
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
     socket
-        .set_read_timeout(Some(UDP_DNS_TIMEOUT))
+        .set_read_timeout(Some(UDP_RETRY_TIMEOUT))
         .map_err(|e| e.to_string())?;
-    socket
-        .send_to(query, upstream)
-        .map_err(|e| format!("send to {upstream}: {e}"))?;
-    let mut buf = [0u8; DNS_BUF];
-    let n = socket
-        .recv(&mut buf)
-        .map_err(|e| format!("recv from {upstream}: {e}"))?;
-    Ok(buf[..n].to_vec())
+
+    let mut last_err = String::new();
+    for attempt in 0..=UDP_MAX_RETRIES {
+        if attempt > 0 {
+            eprintln!(
+                "dns-forwarder: retry {attempt}/{} to {upstream}",
+                UDP_MAX_RETRIES
+            );
+        }
+        socket
+            .send_to(query, upstream)
+            .map_err(|e| format!("send to {upstream}: {e}"))?;
+
+        let mut buf = [0u8; DNS_BUF];
+        match socket.recv(&mut buf) {
+            Ok(n) => return Ok(buf[..n].to_vec()),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Timeout — retry.
+                last_err = format!("recv from {upstream}: {e}");
+                continue;
+            }
+            Err(e) => {
+                return Err(format!("recv from {upstream}: {e}"));
+            }
+        }
+    }
+    Err(format!(
+        "recv from {upstream}: {last_err} (after {UDP_MAX_RETRIES} retries)"
+    ))
 }
 
 // ---------------------------------------------------------------------------

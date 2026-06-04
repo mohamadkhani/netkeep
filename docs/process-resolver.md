@@ -29,8 +29,18 @@ You do **not** have the process name. The kernel knows which process opened the 
 └──────────────────────┬─────────────────────────┘
                        │ miss
                        ▼
+eBPF socket tracker (sock_tracker.rs)
+  BPF map lookup by (src_ip, src_port, protocol)
+  PID captured at socket creation (TCP SYN_SENT) or
+  send time (udp_sendmsg) — before NFQUEUE delivery
+  → returns (pid, uid) with zero TOCTOU race
+        │
+        │ miss (tracker not loaded, old kernel, etc.)
+        ▼
 SOCK_DIAG netlink (sock_diag.rs)
   inet_diag by (src_ip, src_port) — kernel socket table
+  dual-family query (AF_INET + AF_INET6) for mapped sockets
+  UDP wildcard retry (INADDR_ANY) for wildcard-bound sockets
   returns inode + uid in one round-trip (no /proc race)
         │
         │ miss → fallback
@@ -80,11 +90,47 @@ SOCK_DIAG netlink (sock_diag.rs)
 
 ---
 
+## Step 0: eBPF Socket Tracker (instant PID — zero TOCTOU)
+
+The eBPF socket tracker hooks into kernel tracepoints and kprobes to capture the PID at the exact moment a socket is created or a packet is sent — **before** NFQUEUE delivers the packet to userspace. This eliminates the TOCTOU race entirely.
+
+### How it works
+
+| Hook | Type | Trigger | What it captures |
+|---|---|---|---|
+| `sock:inet_sock_set_state` | tracepoint | TCP enters `SYN_SENT` | PID, UID, src_ip, src_port |
+| `udp_sendmsg` | kprobe | Every UDP send | PID, UID, src_ip, src_port |
+| `udp_lib_unhash` | kprobe | UDP socket close | Removes stale map entry |
+
+The eBPF program stores `(src_ip, src_port, protocol) → (pid, uid, timestamp_ns)` in a BPF `HashMap` (`SOCK_EVENTS`, 16384 entries). IPv4 addresses are normalized to IPv4-mapped IPv6 (`::ffff:a.b.c.d`) in the key.
+
+### Userspace loader
+
+`dns_tracker::SockTracker` (in `crates/dns-tracker/src/sock_tracker.rs`) loads the BPF ELF, attaches the three programs, and exposes `lookup_pid(src_ip, src_port, protocol) → Option<TrackedProcess>`. It implements the `flow_classifier::SocketTracker` trait for dependency inversion.
+
+### Integration
+
+`ProcProcessResolver::find_pid()` checks the eBPF map **first** (Step 0). If it returns a PID, the entire `/proc` lookup chain is skipped. Metrics: `logiguard.proc.resolver.ebpf.hits` / `logiguard.proc.resolver.ebpf.misses`.
+
+### Graceful degradation
+
+If the eBPF program fails to load (missing `CAP_BPF`, old kernel, etc.), the daemon falls back to SOCK_DIAG + `/proc` + `ss` as before. The `SockTracker::load()` error is logged and the resolver is created without a tracker.
+
+### Build
+
+The eBPF bytecode is compiled separately via `cargo xtask build-ebpf-release` and embedded with `include_bytes!` at compile time. The build produces two BPF binaries: `dns-tracker-ebpf` (DNS snooping) and `sock-tracker-ebpf` (socket tracking).
+
+---
+
 ## Step 1: Find the Socket Inode
 
-### SOCK_DIAG netlink (primary)
+### SOCK_DIAG netlink (primary — with dual-family + UDP wildcard)
 
 `sock_diag::query_socket_inode` opens a `NETLINK_SOCK_DIAG` socket and sends an `InetRequest` with `SocketId` set to the flow's `(src_ip, src_port)` (destination fields wildcarded). The kernel returns `InetResponse` with `inode` and `uid` from its internal socket structures — the same data `ss` uses, but without a subprocess and without waiting for `/proc/net/tcp` to be updated.
+
+**Dual-family query:** Many applications use `AF_INET6` sockets with `IPV6_V6ONLY=0` even for IPv4 destinations. The kernel records these in the IPv6 socket table as `::ffff:a.b.c.d`. Querying only `AF_INET` for an IPv4 source address misses these entries. The resolver now queries both `AF_INET` and `AF_INET6` for any source IP, returning the first match.
+
+**UDP wildcard retry:** UDP sockets often bind to `0.0.0.0` (`INADDR_ANY`) rather than a specific source IP. If the specific-IP query returns nothing for UDP/QUIC, the resolver retries with the wildcard address in both address families.
 
 On failure (permission denied, parse error, no matching socket), lookup falls through to `/proc/net` and then `ss`.
 

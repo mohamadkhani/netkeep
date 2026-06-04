@@ -51,26 +51,40 @@ impl DnsTracker {
 
     /// Look up a DNS query event by source IP and port.
     ///
-    /// Returns `None` if the BPF map has no entry for this key (i.e. the
-    /// socket was not a DNS query, or the entry was evicted).
+    /// Tries the specific source IP first, then falls back to `0.0.0.0`
+    /// (INADDR_ANY). Auto-bound UDP sockets have `skc_rcv_saddr = 0.0.0.0`
+    /// even when the actual packet source IP is `127.0.0.1` or a real IP.
+    ///
+    /// Returns `None` if the BPF map has no entry for either key.
     pub fn lookup(&self, src_ip: Ipv4Addr, src_port: u16) -> Option<DnsQueryInfo> {
         let map: HashMap<_, DnsKey, DnsEvent> =
             HashMap::try_from(self.ebpf.map("DNS_EVENTS")?).ok()?;
 
+        // Try 1: specific source IP.
         let key = DnsKey {
             src_ip4: u32::from(src_ip).to_be(),
             src_port,
             _pad: 0,
         };
+        if let Some(event) = map.get(&key, 0).ok() {
+            return Some(DnsQueryInfo {
+                pid: event.pid,
+                comm: null_terminated_str(&event.comm).to_string(),
+                domain: null_terminated_str(&event.domain).to_string(),
+            });
+        }
 
-        let event = map.get(&key, 0).ok()?;
-        let comm = null_terminated_str(&event.comm).to_string();
-        let domain = null_terminated_str(&event.domain).to_string();
-
+        // Try 2: wildcard (0.0.0.0) — auto-bound UDP sockets.
+        let wildcard_key = DnsKey {
+            src_ip4: 0u32.to_be(),
+            src_port,
+            _pad: 0,
+        };
+        let event = map.get(&wildcard_key, 0).ok()?;
         Some(DnsQueryInfo {
             pid: event.pid,
-            comm,
-            domain,
+            comm: null_terminated_str(&event.comm).to_string(),
+            domain: null_terminated_str(&event.domain).to_string(),
         })
     }
 }
