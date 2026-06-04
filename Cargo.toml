@@ -9,6 +9,8 @@ members = [
   "crates/control-service",
   "crates/enforcer",
   "crates/proxy-client",
+  "crates/dns-tracker",
+  "xtask",
   "apps/daemon",
   "apps/cli",
   "apps/gpui",

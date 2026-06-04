@@ -1,0 +1,30 @@
+[package]
+name = "dns-tracker-ebpf"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+
+[[bin]]
+name = "dns-tracker-ebpf"
+path = "src/main.rs"
+
+[[bin]]
+name = "sock-tracker-ebpf"
+path = "src/sock_tracker.rs"
+
+[profile.dev]
+opt-level = 3
+debug = false
+panic = "abort"
+
+[profile.release]
+opt-level = 3
+debug = false
+panic = "abort"
+lto = true

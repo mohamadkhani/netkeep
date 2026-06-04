@@ -1,0 +1,19 @@
+[package]
+name = "dns-tracker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-types = { path = "../core-types" }
+flow-classifier = { path = "../flow-classifier" }
+proxy-client = { path = "../proxy-client" }
+state-store = { path = "../state-store" }
+
+aya = "0.13"
+aya-log = "0.2"
+anyhow = "1"
+libc = "0.2"
+socket2 = { version = "0.6", features = ["all"] }
+log = "0.4"
+

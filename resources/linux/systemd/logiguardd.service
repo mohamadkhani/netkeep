@@ -16,6 +16,8 @@ Environment=LOGIGUARD_SOCKET_PATH=/run/logiguard/logiguard.sock
 Environment=LOGIGUARD_DB_PATH=/var/lib/logiguard/logiguard.db
 # Uncomment when you want kernel interception (requires nft rules + NFQUEUE):
 Environment=LOGIGUARD_NFQUEUE=0
+# Egress-aware DNS forwarder on 127.0.0.1:53 (requires free port 53 + nameserver 127.0.0.1):
+# Environment=LOGIGUARD_DNS_FORWARDER=1
 ExecStart=/usr/bin/logiguardd
 Restart=on-failure
 RestartSec=2

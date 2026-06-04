@@ -1,5 +1,6 @@
 # Rust
 /target/
+crates/dns-tracker-ebpf/target/
 **/*.rs.bk
 
 # IDE / OS

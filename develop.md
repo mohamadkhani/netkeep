@@ -200,6 +200,7 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 - [x] **Decision dialog clips content with many egresses** — fixed 2026-05-13. Window height was hardcoded at 580px; replaced with dynamic estimate (~600px base + 28px per egress row, capped at 90% of display). Root container no longer uses `h_full()`/`overflow_hidden()`.
 - [x] **Default route not first in "Route via" selector** — fixed 2026-05-13. Egresses from the daemon are sorted alphabetically by id; `eg-default` can come after `eg-eth0`. Now sorted: system default first, then available, then unavailable.
 - [x] **Settings window doesn't focus when re-clicked from tray** — fixed 2026-05-14. The tray process obtains an xdg-activation token via GTK's `GdkAppLaunchContext` (which carries the user's click serial) and sends it to the settings process via Unix socket. The settings process sets `XDG_ACTIVATION_TOKEN` and calls `activate_window()`. Even when Mutter rejects full activation, it uses the `app_id` to show an urgency/attention indicator. Settings window state is preserved.
+- [x] **Daemon's own connections attributed to "logiguard-daemon"** — fixed 2026-06-04. The daemon's outbound sockets (DNS forwarder system fallback, TCP relay, proxy connects) were not marked with `SO_MARK`, so nftables queued them to NFQUEUE. The process resolver correctly identified them as belonging to `logiguard-daemon` — but that's the wrong process; the real application that triggered the connection was hidden behind the relay. Fix: added `DAEMON_BYPASS_MARK` (19998, below `ROUTE_MARK_BASE` to avoid triggering policy routing) stamped via `SO_MARK` on all daemon-originated sockets. A new nftables `output_early` accept rule for this mark bypasses NFQUEUE entirely. See [`docs/nfqueue-packet-interception.md`](docs/nfqueue-packet-interception.md) → Daemon bypass mark.
 
 ## 5) Definition of Done (MVP)
 
@@ -765,3 +766,76 @@ Bug fixes for the NFQUEUE transparent proxy path. The transparent proxy was acce
 - [x] **Silent misconfiguration warning.** When transparent proxy starts but `LOGIGUARD_NFQUEUE` is unset, daemon now prints a warning.
 
 - [x] **Tests:** 180 passing (no new tests; existing tests cover the unchanged protocol logic).
+
+### 2026-06-01 (session 37 — eBPF DNS tracker + DNS forwarder for egress routing)
+
+Architecture: [`docs/dns-forwarder.md`](docs/dns-forwarder.md)
+
+Problem: Apps resolve DNS through the default system resolver, getting fake IPs from throne/VPN (e.g. `10.10.34.36` for all blocked domains). The transparent proxy connects to fake IPs through SOCKS, which fails. The 1:1 `SniDnsCache` is unreliable when throne returns the same IP for every domain.
+
+Solution: DNS forwarder on `127.0.0.1:53` that intercepts DNS queries, identifies the source process via eBPF, matches against routing rules, and resolves through the correct egress's DNS servers. Apps get real IPs, transparent proxy sends hostnames to SOCKS.
+
+- [x] **eBPF DNS tracker** (`crates/dns-tracker-ebpf/` + `crates/dns-tracker-common/` + `crates/dns-tracker/`):
+  - Kernel-space kprobe on `udp_sendmsg`: captures PID (`bpf_get_current_pid_tgid`), process name (`bpf_get_current_comm`), and DNS query domain (parsed from UDP payload)
+  - Filters for `dport == 53`
+  - Writes to BPF HashMap: `(src_ip, src_port) → (pid, comm, domain)`
+  - Userspace loader: `aya::Ebpf`, attach kprobe, expose `DnsTracker::lookup(src_ip, src_port) → Option<DnsQueryInfo>`
+  - Build: nightly + `bpfel-unknown-none` target + `bpf-linker`
+
+- [x] **DNS forwarder** (`crates/dns-tracker/src/forwarder.rs`):
+  - UDP server on `127.0.0.1:53`
+  - Per-query dispatch: eBPF lookup → process + domain → rule match → resolve through egress DNS
+  - Proxy egress: DNS-over-SOCKS5 (TCP with 2-byte length prefix)
+  - Tun egress: `SO_MARK` on outbound UDP socket for policy routing
+  - Device egress: `SO_BINDTODEVICE` on outbound UDP socket
+  - No match: forward to system DNS
+  - Populates shared `SniDnsCache` from DNS response A/AAAA records
+  - Proxy configs cached in-memory to avoid per-query SQLite opens
+
+- [x] **Daemon integration** (`apps/daemon/src/main.rs`):
+  - Start eBPF DNS tracker at boot
+  - Start DNS forwarder on `127.0.0.1:53`
+  - Share `SniDnsCache` between DNS forwarder, NFQUEUE processor, and DNS snoop
+  - Rule-matching closure for `(process, domain) → egress`
+  - `FwmarkResolver` closure for `RouteTarget → fwmark` (Tun egress DNS)
+
+- [x] **Build infrastructure**: `xtask/` for BPF bytecode compilation, `aya` dependency
+
+### 2026-06-02 (session 38 — code review fixes for sessions 35–37)
+
+Review: [`plans/code-review-session-35-37.md`](plans/code-review-session-35-37.md)
+
+- [x] **SO_MARK in `resolve_via_so_mark()`**: Tun egress DNS now sets `SO_MARK` via `libc::setsockopt` on the outbound UDP socket, routing DNS queries through the correct policy routing table
+- [x] **Wire `SniDnsCache` into DNS forwarder**: Forwarder parses A/AAAA records from DNS responses and populates the shared IP→domain cache; daemon creates one shared cache for forwarder + NFQUEUE + DNS snoop
+- [x] **Cache proxy configs**: `resolve_via_proxy()` checks in-memory cache before opening SQLite; first query loads from DB, subsequent queries hit cache
+- [x] **Remove unused deps**: Removed `enforcer` and `policy-engine` from `dns-tracker/Cargo.toml`
+- [x] **Delete dangling doc comment**: Removed orphan `/// Detect local interfaces` comment from `main.rs`
+- [x] **Fix `architecture.md`**: Replaced `dns-forwarder/` entry with `dns-tracker/` (forwarder is a module inside dns-tracker)
+- [x] **`cargo fmt --all`**: Fixed indentation and formatting across workspace
+
+**Deferred** (tracked in review doc):
+- IPv6 DNS forwarder: add debug log for dropped queries
+- eBPF BTF: runtime validation of hardcoded struct offsets
+- EDNS0: bump `DNS_BUF` from 512 to 4096
+- Socket pooling in `forward_udp()`
+
+### 2026-06-02 (session 39 — eBPF socket tracker for 100% process detection)
+
+**Goal:** Eliminate process detection failures by capturing PIDs at the kernel level before NFQUEUE delivers packets.
+
+- [x] **SOCK_DIAG dual-family query** (`sock_diag.rs`): Query both `AF_INET` and `AF_INET6` for any source IP. Many apps use `AF_INET6` sockets with `IPV6_V6ONLY=0` for IPv4 connections — the kernel stores these as `::ffff:a.b.c.d` in the IPv6 table. Previously only queried one family.
+- [x] **SOCK_DIAG UDP wildcard retry** (`sock_diag.rs`): Retry with `INADDR_ANY` (0.0.0.0) when specific-IP queries fail for UDP/QUIC. UDP sockets often bind to the wildcard address.
+- [x] **eBPF socket tracker program** (`dns-tracker-ebpf/src/sock_tracker.rs`): New BPF program with three hooks:
+  - `tracepoint:sock:inet_sock_set_state` — captures PID at TCP `SYN_SENT`
+  - `kprobe:udp_sendmsg` — captures PID at every UDP send
+  - `kprobe:udp_lib_unhash` — cleans up stale entries on socket close
+  - Uses `SOCK_EVENTS` BPF HashMap (16384 entries) keyed by `(src_ip[16], src_port, protocol)`
+- [x] **Userspace SockTracker loader** (`dns-tracker/src/sock_tracker.rs`): Loads BPF program, attaches hooks, provides `lookup_pid()`. Implements `flow_classifier::SocketTracker` trait.
+- [x] **SocketTracker trait** (`flow-classifier/src/lib.rs`): New trait for dependency inversion — `flow-classifier` defines the trait, `dns-tracker` implements it. Avoids circular dependencies.
+- [x] **ProcProcessResolver integration** (`proc_resolver.rs`): New Step 0 — check eBPF map before SOCK_DIAG. Metrics: `logiguard.proc.resolver.ebpf.hits` / `misses`.
+- [x] **Daemon integration** (`main.rs`): Loads `SockTracker` at startup, passes to `ProcProcessResolver::with_sock_tracker()`. Graceful fallback on eBPF load failure.
+- [x] **xtask build**: Updated to build both `dns-tracker-ebpf` and `sock-tracker-ebpf` binaries.
+- [x] **Tests**: 4 new tests for `build_sock_key()` (IPv4→mapped IPv6, IPv6 raw, QUIC→UDP protocol, Other→0). All 180 workspace tests pass.
+- [x] **Documentation**: Updated `process-resolver.md`, `process-attribution-races.md` (Layer −1).
+- [x] **DNS forwarder retry logic** (`forwarder.rs`): `forward_udp()` now retries up to 2 times on timeout (EAGAIN) with 3s per-attempt timeout. Previously a single 8s attempt with no retry — standard DNS clients retry because UDP is unreliable.
+- [x] **DNS tracker wildcard fallback** (`tracker.rs`): `DnsTracker::lookup()` now tries `0.0.0.0` (INADDR_ANY) key when the specific-IP lookup fails. Auto-bound UDP sockets have `skc_rcv_saddr = 0.0.0.0` even when the actual packet source IP is `127.0.0.1`. This fixed the DNS forwarder attributing queries to `logiguard-daemon` instead of the real client (e.g. `chromium`).

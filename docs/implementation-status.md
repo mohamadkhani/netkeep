@@ -570,9 +570,9 @@ Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 
 1. **ProcessResolver on high-churn systems:** `/proc/*/fd` scan is O(processes×fds). Adequate for desktop use; would need an inode→pid index for server-scale traffic.
 
-2. **SNI — TCP/HTTPS only:** TLS ClientHello SNI extraction works for TCP. QUIC encrypts its Initial packets in newer versions; SNI hint is None for QUIC flows. DNS snoop cache (not yet implemented) would fill this gap.
+2. **SNI — TCP/HTTPS only:** TLS ClientHello SNI extraction works for TCP. QUIC encrypts its Initial packets in newer versions; SNI hint is None for QUIC flows. DNS snoop cache fills this gap for snooped domains.
 
-3. **No DNS Snoop Cache:** For UDP/QUIC flows the destination shows as IP-only. Plaintext DNS response interception would provide domain hints, but DoH traffic is invisible to this approach.
+3. ~~**No DNS Snoop Cache:**~~ DNS snoop worker implemented. Plaintext DNS responses are intercepted on INPUT hook. DoH traffic remains invisible.
 
 4. **Queue Overflow Policy:** Hardcoded to deny on overflow. User cannot change at runtime (only via env var).
 
@@ -585,6 +585,35 @@ Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 8. **Per-egress DNS in UI:** DNS servers are persisted and can be edited manually in SQLite, but GPUI DNS management views are not yet implemented.
 
 9. **libayatana-appindicator deprecation warning:** The system tray prints a startup warning (`libayatana-appindicator is deprecated. Please use libayatana-appindicator-glib in newly written code.`). This is cosmetic — the tray works correctly. Migration to the newer library or the `ksni` approach is blocked on upstream Rust crate stabilization.
+
+10. **Fake DNS from throne/VPN:** When throne's TUN mode returns the same fake IP (e.g. `10.10.34.36`) for all blocked domains, the 1:1 `SniDnsCache` cannot distinguish them. The DNS forwarder (planned) resolves this by intercepting DNS queries and resolving through the correct egress before the app receives any IP.
+
+## Planned Work
+
+### eBPF DNS Tracker + DNS Forwarder (session 37, hardened in session 38)
+
+Architecture: [`docs/dns-forwarder.md`](dns-forwarder.md)
+
+**Crates:**
+- `crates/dns-tracker-ebpf/` — kernel-space BPF kprobe on `udp_sendmsg`, captures `(pid, comm, domain)` for DNS queries (port 53)
+- `crates/dns-tracker-common/` — shared structs (`DnsQueryInfo`) between BPF and userspace
+- `crates/dns-tracker/` — userspace loader using `aya`, exposes `DnsTracker::lookup(src_ip, src_port)` + DNS forwarder (`forwarder.rs`)
+
+**DNS forwarder features (session 37–38):**
+- UDP server on `127.0.0.1:53`, env-gated via `LOGIGUARD_DNS_FORWARDER=1`
+- Per-query dispatch: eBPF lookup → process + domain → rule match → resolve through egress DNS
+- Proxy egress: DNS-over-SOCKS5 (TCP with 2-byte length prefix)
+- Tun egress: `SO_MARK` on outbound UDP socket for policy routing
+- Device egress: `SO_BINDTODEVICE` on outbound UDP socket
+- No match → forward to system DNS (reads `/etc/resolv.conf`, skips loopback)
+- Populates shared `SniDnsCache` from DNS response A/AAAA records
+- Proxy configs cached in-memory to avoid per-query SQLite opens
+
+**Build requirements:**
+- `rustup toolchain install nightly --component rust-src`
+- `rustup target add bpfel-unknown-none --toolchain nightly`
+- `cargo install bpf-linker`
+- Two-step build: `cargo xtask build-ebpf` then `cargo build --workspace`
 
 ## Build and Run
 

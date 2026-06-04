@@ -166,6 +166,39 @@ If you remove any layer, an above row reappears as a duplicate dialog.
 
 ---
 
+## Bug 23 — Daemon's own connections intercepted (fixed 2026-06-04)
+
+This is not a process attribution race per se, but it produces the same visible symptom: `process=Some("logiguard-daemon")` in policy logs.
+
+### Root cause
+
+The daemon makes outbound connections on behalf of applications:
+
+- DNS forwarder system fallback (`forward_udp`) — plain UDP to the system DNS server.
+- DNS forwarder device-egress fallback (`resolve_via_bindtodevice`) — UDP with `SO_BINDTODEVICE`.
+- DNS forwarder proxy-egress (`dns_over_socks`) — TCP to a SOCKS5 proxy.
+- TCP relay proxy connects (`connect_via_proxy_target`) — TCP to a SOCKS5/HTTP proxy.
+- TCP relay device fallback (`connect_plain`) — plain TCP.
+
+None of these sockets had `SO_MARK` set. The nftables `output_early` chain only bypasses NFQUEUE for packets with `mark >= ROUTE_MARK_BASE` (20000) or specific proxy marks. All unmarked daemon traffic was queued to NFQUEUE, classified as `process=logiguard-daemon`, and triggered policy matching.
+
+This was **not** a resolver failure — the resolver correctly identified the process. The problem was that the daemon's relay/DNS connections should never have been intercepted in the first place.
+
+### Fix
+
+Added `DAEMON_BYPASS_MARK` (19998, defined in `enforcer::DAEMON_BYPASS_MARK`) — a dedicated fwmark below `ROUTE_MARK_BASE` that:
+
+1. **Bypasses NFQUEUE** via a new nftables `output_early` accept rule: `meta mark 19998 accept`.
+2. **Does NOT trigger policy routing** — marks below 20000 don't match any `ip rule add fwmark N lookup T` entries, so the daemon's connections follow the system default route.
+
+All daemon-originated sockets now call `SO_MARK(DAEMON_BYPASS_MARK)` before connect/send.
+
+### Why not use `ROUTE_MARK_BASE`?
+
+Using `ROUTE_MARK_BASE` (20000) would cause the daemon's own connections to be routed through a specific egress interface (e.g. a VPN tunnel) via the policy routing table — breaking connectivity when the real application needs the default route.
+
+---
+
 ## Bug 22 — ACK eviction + Electron fd gap (fixed 2026-05-15)
 
 This is a worked example of two bugs that compounded to produce the `process=None` symptom in production (`electron → api2.cursor.sh`).
@@ -308,10 +341,54 @@ Layer 0 is not a substitute for proper per-socket resolution. It is specifically
 
 ---
 
+## Layer −1 — eBPF socket tracker (added 2026-06-02)
+
+The eBPF socket tracker eliminates the TOCTOU race **entirely** by capturing the PID at the kernel level, before NFQUEUE delivers the packet to userspace.
+
+### How it works
+
+Three eBPF hooks populate a shared BPF `HashMap` (`SOCK_EVENTS`, 16384 entries):
+
+| Hook | Type | When it fires | What it does |
+|---|---|---|---|
+| `sock:inet_sock_set_state` | tracepoint | TCP enters `SYN_SENT` | Inserts `(src_ip, src_port, TCP) → (pid, uid, ts)` |
+| `udp_sendmsg` | kprobe | Every UDP send | Inserts `(src_ip, src_port, UDP) → (pid, uid, ts)` |
+| `udp_lib_unhash` | kprobe | UDP socket close | Removes the entry |
+
+`ProcProcessResolver::find_pid()` checks this map **first** (Step 0). On a hit, the entire SOCK_DIAG → `/proc/net` → `/proc/*/fd` → `ss` chain is skipped. The PID is already known — no TOCTOU race, no fork/exec fd-visibility gap, no inode=0 false match.
+
+### Why this is different from the other layers
+
+- **Layer 0** (NFQUEUE caches) patches up *after* a miss — it restores attribution from a previous successful lookup. The eBPF tracker *prevents* the miss.
+- **Layer 1** (per-socket cache) avoids redundant lookups for the same socket. The eBPF tracker provides the *first* lookup result.
+- **Layer 2** (dedup) prevents duplicate prompts. The eBPF tracker ensures the *first* prompt has the correct process name.
+- **Layer 3** (forgiving match) tolerates `process=None`. The eBPF tracker aims to make `process=None` rare.
+
+### Graceful degradation
+
+If the eBPF program fails to load (no `CAP_BPF`, kernel < 5.5, etc.), the daemon logs a warning and falls back to SOCK_DIAG + `/proc` + `ss`. All existing defense layers remain active.
+
+### Metrics
+
+- `logiguard.proc.resolver.ebpf.hits` — PID found via eBPF map
+- `logiguard.proc.resolver.ebpf.misses` — eBPF map had no entry (fell through to SOCK_DIAG)
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `crates/dns-tracker-ebpf/src/sock_tracker.rs` | eBPF program (BPF bytecode) |
+| `crates/dns-tracker/src/sock_tracker.rs` | Userspace loader + `SocketTracker` trait impl |
+| `crates/flow-classifier/src/lib.rs` | `SocketTracker` trait + `TrackedProcess` struct |
+| `crates/flow-classifier/src/proc_resolver.rs` | Step 0 integration in `find_pid()` |
+| `crates/flow-classifier/src/sock_diag.rs` | Dual-family + UDP wildcard SOCK_DIAG fix |
+
+---
+
 ## When to revisit
 
-Add a fourth layer if you ever ship one of:
+The eBPF socket tracker (Layer −1) addresses the first bullet below — it returns a PID without touching `/proc/net/*`. Remaining areas to revisit:
 
-- a per-PID resolver that can return a name without `/proc/net/*` (the cache layer's TTL becomes irrelevant);
 - a resolver that returns `(name, confidence)` instead of `Option<name>` (Layer 3's "specific destination" guard could be replaced by a confidence threshold);
-- packet-level user-space queues other than NFQUEUE (the race window changes shape).
+- packet-level user-space queues other than NFQUEUE (the race window changes shape);
+- eBPF BTF: runtime validation of hardcoded struct offsets in `sock_tracker.rs` (currently hardcoded for x86_64, Linux 6.x).

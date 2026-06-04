@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -8,11 +9,12 @@ use core_types::TransportProtocol;
 use metrics::{counter, histogram};
 
 use crate::sock_diag;
-use crate::{ProcessInfo, ProcessResolver};
+use crate::{ProcessInfo, ProcessResolver, SocketTracker};
 
 /// Real ProcessResolver: (src_ip, src_port, protocol) → ProcessInfo.
 ///
 /// Lookup pipeline:
+///   0. eBPF socket tracker → PID + UID (instant, no /proc race at all).
 ///   1. Per-socket cache hit — successful resolutions are cached for 60 s.
 ///   2. SOCK_DIAG netlink → inode + uid (kernel socket table, no /proc race).
 ///   3. /proc/net/{tcp,tcp6,udp,udp6} → inode + uid (with retry delays).
@@ -27,6 +29,9 @@ pub struct ProcProcessResolver {
     /// Pacman owner cache keyed by exe path. Stores `None` for paths not
     /// owned by any package to avoid repeated subprocess invocations.
     pacman_cache: Mutex<HashMap<String, Option<String>>>,
+    /// Optional eBPF socket tracker for instant PID resolution.
+    /// When available, checked before SOCK_DIAG — eliminates TOCTOU races.
+    sock_tracker: Option<Arc<dyn SocketTracker>>,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
@@ -56,14 +61,37 @@ impl ProcProcessResolver {
         Self {
             cache: Mutex::new(HashMap::new()),
             pacman_cache: Mutex::new(HashMap::new()),
+            sock_tracker: None,
+        }
+    }
+
+    /// Create a resolver with an eBPF socket tracker for instant PID lookup.
+    pub fn with_sock_tracker(tracker: Arc<dyn SocketTracker>) -> Self {
+        Self {
+            cache: Mutex::new(HashMap::new()),
+            pacman_cache: Mutex::new(HashMap::new()),
+            sock_tracker: Some(tracker),
         }
     }
 
     /// Find the PID that owns the socket:
+    ///   0. eBPF socket tracker (instant, no /proc race at all).
     ///   1. SOCK_DIAG netlink (kernel socket table, no /proc race).
     ///   2. /proc/net + /proc/*/fd scan with retries.
     ///   3. `ss` command fallback if both paths miss the inode or fd scan.
     fn find_pid(&self, ip: IpAddr, port: u16, protocol: TransportProtocol) -> Option<u32> {
+        // Step 0: eBPF socket tracker — instant PID lookup from BPF map.
+        // The eBPF program captures the PID at socket creation time (TCP SYN_SENT)
+        // or at send time (udp_sendmsg), BEFORE the packet reaches NFQUEUE.
+        // This eliminates all TOCTOU races.
+        if let Some(ref tracker) = self.sock_tracker {
+            if let Some(tracked) = tracker.lookup_pid(ip, port, protocol) {
+                counter!("logiguard.proc.resolver.ebpf.hits").increment(1);
+                return Some(tracked.pid);
+            }
+            counter!("logiguard.proc.resolver.ebpf.misses").increment(1);
+        }
+
         let inode_uid = sock_diag::query_socket_inode(ip, port, protocol)
             .or_else(|| retry_find_socket(ip, port, protocol));
         if let Some((inode, uid)) = inode_uid {

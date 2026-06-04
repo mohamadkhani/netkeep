@@ -220,6 +220,20 @@ pub const ROUTE_MARK_BASE: u32 = 20000;
 /// Must be below ROUTE_MARK_BASE so it's not caught by the relay bypass rules.
 pub const PROXY_REDIRECT_MARK: u32 = ROUTE_MARK_BASE - 1;
 
+/// Fwmark stamped on daemon-originated sockets (DNS forwarder, relay connects,
+/// proxy connects) so nftables bypasses NFQUEUE for the daemon's own traffic.
+/// Without this mark, the daemon's outbound packets are intercepted and
+/// attributed to "logiguard-daemon" instead of the real application.
+///
+/// This mark is intentionally **not** in the `>= ROUTE_MARK_BASE` range so
+/// that it does NOT trigger policy routing rules (`ip rule add fwmark N
+/// lookup T`). The daemon's own connections should follow the system default
+/// route, not be forced through a specific egress interface.
+///
+/// The nftables `output_early` chain has an explicit accept rule for this
+/// exact mark value, placed before the `queue num N` rule.
+pub const DAEMON_BYPASS_MARK: u32 = PROXY_REDIRECT_MARK - 1;
+
 pub trait NftablesBootstrap: Send + Sync {
     /// Install the logiguard nftables table.
     ///
@@ -229,16 +243,27 @@ pub trait NftablesBootstrap: Send + Sync {
     /// * `route_mark_base` — marks at or above this value belong to logiguard
     ///   relay sockets and are preserved across other tools' marking chains
     ///   via conntrack mark save/restore.
-    /// * `transparent_proxy_port` — when `Some(port)`, adds a nat REDIRECT
-    ///   rule that sends proxy-routed packets to the transparent proxy.
-    fn setup(&self, queue_num: Option<u16>, route_mark_base: u32, transparent_proxy_port: Option<u16>) -> Result<(), String>;
+    /// * `proxy_redirects` — list of `(fwmark, local_port)` pairs, one per
+    ///   enabled proxy. Each entry generates a REDIRECT rule that sends packets
+    ///   carrying that fwmark to the corresponding local transparent proxy port.
+    fn setup(
+        &self,
+        queue_num: Option<u16>,
+        route_mark_base: u32,
+        proxy_redirects: &[(u32, u16)],
+    ) -> Result<(), String>;
     fn teardown(&self) -> Result<(), String>;
 }
 
 pub struct SystemNftablesBootstrap;
 
 impl NftablesBootstrap for SystemNftablesBootstrap {
-    fn setup(&self, queue_num: Option<u16>, route_mark_base: u32, transparent_proxy_port: Option<u16>) -> Result<(), String> {
+    fn setup(
+        &self,
+        queue_num: Option<u16>,
+        route_mark_base: u32,
+        proxy_redirects: &[(u32, u16)],
+    ) -> Result<(), String> {
         // Idempotent: tear down first, ignore errors (table may not exist yet).
         let _ = self.teardown();
         // Two-chain strategy to survive transparent-proxy tools (e.g. throne,
@@ -343,11 +368,26 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             // neighbor discovery entirely.
             script.push_str("add rule inet logiguard output_early meta l4proto icmp accept\n");
             script.push_str("add rule inet logiguard output_early meta l4proto icmpv6 accept\n");
-            // Proxy-routed packets carry PROXY_REDIRECT_MARK (below route_mark_base).
-            // Accept them without re-queuing so follow-on segments are not dropped
-            // while waiting for a userspace verdict.
+            // Proxy-routed packets carry a per-proxy fwmark (below route_mark_base).
+            // Accept them without re-queuing so follow-on segments are not dropped.
+            for (mark, _port) in proxy_redirects {
+                script.push_str(&format!(
+                    "add rule inet logiguard output_early meta mark {mark} accept\n",
+                ));
+            }
+            // Also accept the legacy single PROXY_REDIRECT_MARK for backwards compat.
             script.push_str(&format!(
                 "add rule inet logiguard output_early meta mark {PROXY_REDIRECT_MARK} accept\n",
+            ));
+            // Daemon bypass mark — stamped on daemon-originated sockets (DNS
+            // forwarder, relay connects, proxy connects) so they skip NFQUEUE.
+            // Without this, the daemon's own traffic is intercepted and
+            // attributed to "logiguard-daemon" instead of the real application.
+            // Uses a dedicated mark (not >= route_mark_base) to avoid triggering
+            // policy routing rules — the daemon's own connections follow the
+            // system default route.
+            script.push_str(&format!(
+                "add rule inet logiguard output_early meta mark {DAEMON_BYPASS_MARK} accept\n",
             ));
             script.push_str(&format!(
                 "add rule inet logiguard output_early queue num {q}\n",
@@ -450,18 +490,19 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             "add rule inet logiguard postrouting ct mark >= {route_mark_base} oifname != \"lo\" masquerade\n",
         ));
 
-        // Transparent proxy redirect — packets with the PROXY_REDIRECT_MARK are
-        // redirected to the transparent proxy port. The proxy reads the original
-        // destination via SO_ORIGINAL_DST and tunnels through SOCKS/HTTP.
-        // Must run after output_reroute restores the mark from ct mark.
-        if let Some(transparent_proxy_port) = transparent_proxy_port {
+        // Per-proxy REDIRECT rules — each proxy has its own fwmark and local port.
+        // Packets carrying a proxy fwmark are redirected to the corresponding
+        // transparent proxy port. The proxy reads the original destination via
+        // SO_ORIGINAL_DST and tunnels through SOCKS/HTTP.
+        if !proxy_redirects.is_empty() {
             script.push_str(
                 "add chain inet logiguard output_proxy_redirect { type nat hook output priority -50; policy accept; }\n",
             );
-            script.push_str(&format!(
-                "add rule inet logiguard output_proxy_redirect meta mark {} meta l4proto tcp redirect to :{}\n",
-                PROXY_REDIRECT_MARK, transparent_proxy_port,
-            ));
+            for (mark, port) in proxy_redirects {
+                script.push_str(&format!(
+                    "add rule inet logiguard output_proxy_redirect meta mark {mark} meta l4proto tcp redirect to :{port}\n",
+                ));
+            }
         }
 
         run_nft_script(&script)
@@ -693,7 +734,12 @@ impl FakeBootstrap {
 }
 
 impl NftablesBootstrap for FakeBootstrap {
-    fn setup(&self, _queue_num: Option<u16>, _route_mark_base: u32, _transparent_proxy_port: Option<u16>) -> Result<(), String> {
+    fn setup(
+        &self,
+        _queue_num: Option<u16>,
+        _route_mark_base: u32,
+        _proxy_redirects: &[(u32, u16)],
+    ) -> Result<(), String> {
         self.setup_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.fail {
@@ -950,7 +996,7 @@ mod tests {
     #[test]
     fn fake_bootstrap_setup_records_call() {
         let b = FakeBootstrap::default();
-        assert!(b.setup(Some(0), ROUTE_MARK_BASE, None).is_ok());
+        assert!(b.setup(Some(0), ROUTE_MARK_BASE, &[]).is_ok());
         assert_eq!(b.setup_count(), 1);
         assert_eq!(b.teardown_count(), 0);
     }
@@ -968,7 +1014,7 @@ mod tests {
             fail: true,
             ..Default::default()
         };
-        assert!(b.setup(Some(0), ROUTE_MARK_BASE, None).is_err());
+        assert!(b.setup(Some(0), ROUTE_MARK_BASE, &[]).is_err());
         assert!(b.teardown().is_err());
     }
 

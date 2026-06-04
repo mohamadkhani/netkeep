@@ -84,7 +84,7 @@ pub fn connect_via_proxy(
             }
         })?;
 
-    let mut stream: TcpStream = socket.into();
+    let stream: TcpStream = socket.into();
     stream
         .set_read_timeout(Some(timeout))
         .map_err(ProxyClientError::Io)?;
@@ -235,8 +235,8 @@ fn socks5_connect(
 
     // Read bound address (we don't need it, but must consume it)
     let bound_addr_len = match reply_header[3] {
-        0x01 => 4 + 2,   // IPv4 + port
-        0x04 => 16 + 2,  // IPv6 + port
+        0x01 => 4 + 2,  // IPv4 + port
+        0x04 => 16 + 2, // IPv6 + port
         0x03 => {
             let mut len_buf = [0u8; 1];
             stream.read_exact(&mut len_buf).map_err(map_io_err)?;
@@ -283,8 +283,8 @@ fn http_connect(
     let mut request = format!("CONNECT {host_port} HTTP/1.1\r\nHost: {host_port}\r\n");
 
     if let ProxyAuth::Basic { username, password } = &proxy.auth {
-        let credentials = base64::engine::general_purpose::STANDARD
-            .encode(format!("{username}:{password}"));
+        let credentials =
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
         request.push_str(&format!("Proxy-Authorization: Basic {credentials}\r\n"));
     }
 
@@ -297,9 +297,7 @@ fn http_connect(
     loop {
         stream.read_exact(&mut buf).map_err(map_io_err)?;
         response.push(buf[0]);
-        if response.len() >= 4
-            && response[response.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
-        {
+        if response.len() >= 4 && response[response.len() - 4..] == [b'\r', b'\n', b'\r', b'\n'] {
             break;
         }
         if response.len() > 8192 {
@@ -341,7 +339,6 @@ fn http_connect(
 mod tests {
     use super::*;
 
-
     fn mk_proxy(protocol: ProxyProtocol, auth: ProxyAuth) -> ProxyConfig {
         ProxyConfig {
             id: "test-proxy".to_string(),
@@ -359,7 +356,10 @@ mod tests {
     #[test]
     fn socks5_reply_descriptions() {
         assert_eq!(socks5_reply_description(0x00), "succeeded");
-        assert_eq!(socks5_reply_description(0x01), "general SOCKS server failure");
+        assert_eq!(
+            socks5_reply_description(0x01),
+            "general SOCKS server failure"
+        );
         assert_eq!(socks5_reply_description(0x05), "connection refused");
         assert_eq!(socks5_reply_description(0xFF), "unknown");
     }
@@ -408,10 +408,7 @@ mod tests {
             IpAddr::V6(_) => unreachable!(),
         }
         req.extend_from_slice(&80u16.to_be_bytes());
-        assert_eq!(
-            req,
-            vec![0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0, 80]
-        );
+        assert_eq!(req, vec![0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0, 80]);
     }
 
     #[test]
@@ -425,8 +422,8 @@ mod tests {
         assert_eq!(
             req,
             vec![
-                0x05, 0x01, 0x00, 0x03, 11, b'e', b'x', b'a', b'm', b'p',
-                b'l', b'e', b'.', b'c', b'o', b'm', 0x01, 0xBB
+                0x05, 0x01, 0x00, 0x03, 11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c',
+                b'o', b'm', 0x01, 0xBB
             ]
         );
     }
@@ -460,8 +457,8 @@ mod tests {
         let host_port = format!("{host}:{port}");
         let mut request = format!("CONNECT {host_port} HTTP/1.1\r\nHost: {host_port}\r\n");
         if let ProxyAuth::Basic { username, password } = &proxy.auth {
-            let credentials = base64::engine::general_purpose::STANDARD
-                .encode(format!("{username}:{password}"));
+            let credentials =
+                base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
             request.push_str(&format!("Proxy-Authorization: Basic {credentials}\r\n"));
         }
         request.push_str("\r\n");
