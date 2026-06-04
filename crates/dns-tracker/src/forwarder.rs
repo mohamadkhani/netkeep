@@ -75,6 +75,11 @@ pub struct DnsForwarder {
     dns_cache: SniDnsCache,
     /// Cache of proxy configs keyed by proxy_id to avoid per-query SQLite opens.
     proxy_cache: Arc<Mutex<HashMap<String, ProxyConfig>>>,
+    /// Fwmark stamped on all daemon-originated sockets so nftables bypasses
+    /// NFQUEUE. Without this, the daemon's own DNS/TCP relay connections are
+    /// intercepted and attributed to "logiguard-daemon" instead of the real
+    /// application. Set to `ROUTE_MARK_BASE` (20000) by the daemon.
+    daemon_mark: u32,
 }
 
 impl DnsForwarder {
@@ -87,17 +92,22 @@ impl DnsForwarder {
     /// policy routing (used by Tun egress). Returns `None` to fall back to plain UDP.
     ///
     /// `dns_cache` — shared IP→domain cache populated from DNS response A/AAAA records.
+    ///
+    /// `daemon_mark` — fwmark stamped on all daemon-originated sockets so
+    /// nftables bypasses NFQUEUE. Must be `>= ROUTE_MARK_BASE` (20000).
+    /// Pass 0 to disable marking (e.g. in tests).
     pub fn bind(
         tracker: Option<Arc<DnsTracker>>,
         egress_resolver: EgressResolver,
         fwmark_resolver: FwmarkResolver,
         system_dns: Option<SystemDns>,
         dns_cache: SniDnsCache,
+        daemon_mark: u32,
     ) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("127.0.0.1:53")?;
         socket.set_read_timeout(Some(Duration::from_secs(30)))?;
         eprintln!(
-            "dns-forwarder: listening on 127.0.0.1:53 (system DNS fallback: {:?})",
+            "dns-forwarder: listening on 127.0.0.1:53 (system DNS fallback: {:?}, daemon_mark={daemon_mark})",
             system_dns.as_ref().map(|s| s.addr)
         );
         Ok(Self {
@@ -109,6 +119,7 @@ impl DnsForwarder {
             system_dns,
             dns_cache,
             proxy_cache: Arc::new(Mutex::new(HashMap::new())),
+            daemon_mark,
         })
     }
 
@@ -258,7 +269,9 @@ impl DnsForwarder {
                 let fwmark = (self.fwmark_resolver)(target).unwrap_or(0);
                 resolve_via_so_mark(query, dns_servers, iface, fwmark)
             }
-            RouteTarget::Device(iface) => resolve_via_bindtodevice(query, dns_servers, iface),
+            RouteTarget::Device(iface) => {
+                resolve_via_bindtodevice(query, dns_servers, iface, self.daemon_mark)
+            }
         };
         // If egress DNS fails, fall back to system DNS so the app still gets a response.
         // The NFQUEUE transparent proxy will handle routing the subsequent TCP connection.
@@ -276,7 +289,7 @@ impl DnsForwarder {
             .system_dns
             .as_ref()
             .ok_or_else(|| "no system DNS configured".to_string())?;
-        forward_udp(query, upstream.addr)
+        forward_udp(query, upstream.addr, self.daemon_mark)
     }
 
     /// Send DNS query via SOCKS5 (DNS-over-SOCKS5).
@@ -316,7 +329,7 @@ impl DnsForwarder {
 
         let mut last_err = String::new();
         for dns_server in dns_servers {
-            match dns_over_socks(&proxy, dns_server, query) {
+            match dns_over_socks(&proxy, dns_server, query, self.daemon_mark) {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
                     last_err = format!("{dns_server}: {e}");
@@ -336,15 +349,39 @@ impl DnsForwarder {
 /// Uses TCP DNS (RFC 1035 §4.2.2 — 2-byte message length prefix) because
 /// SOCKS5 CONNECT only supports TCP streams. Most public DNS servers (1.1.1.1,
 /// 8.8.8.8) accept DNS-over-TCP on port 53.
+///
+/// `daemon_mark` is set via `SO_MARK` on the TCP socket so nftables bypasses
+/// NFQUEUE for the daemon's own proxy connections.
 fn dns_over_socks(
     proxy: &ProxyConfig,
     dns_server_ip: &str,
     query: &[u8],
+    daemon_mark: u32,
 ) -> Result<Vec<u8>, String> {
     use std::io::{Read, Write};
+    use std::os::unix::io::AsRawFd;
 
     let mut stream = proxy_client::connect_via_proxy(proxy, dns_server_ip, 53, DNS_TIMEOUT)
         .map_err(|e| format!("socks connect to {dns_server_ip}:53: {e}"))?;
+
+    // Stamp daemon fwmark so nftables output_early bypasses NFQUEUE.
+    if daemon_mark != 0 {
+        let ret = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                &daemon_mark as *const u32 as *const libc::c_void,
+                std::mem::size_of::<u32>() as libc::socklen_t,
+            )
+        };
+        if ret < 0 {
+            eprintln!(
+                "dns-forwarder: SO_MARK({daemon_mark}) on dns_over_socks socket failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
 
     // TCP DNS framing: 2-byte big-endian length prefix, then query.
     let len_prefix = (query.len() as u16).to_be_bytes();
@@ -435,6 +472,7 @@ fn resolve_via_bindtodevice(
     query: &[u8],
     dns_servers: &[String],
     iface: &str,
+    daemon_mark: u32,
 ) -> Result<Vec<u8>, String> {
     use std::io;
     use std::os::unix::io::AsRawFd;
@@ -462,6 +500,25 @@ fn resolve_via_bindtodevice(
                 "dns-forwarder: SO_BINDTODEVICE({iface}) failed: {}",
                 io::Error::last_os_error()
             );
+        }
+
+        // Stamp daemon fwmark so nftables output_early bypasses NFQUEUE.
+        if daemon_mark != 0 {
+            let ret = unsafe {
+                libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_MARK,
+                    &daemon_mark as *const u32 as *const libc::c_void,
+                    std::mem::size_of::<u32>() as libc::socklen_t,
+                )
+            };
+            if ret < 0 {
+                eprintln!(
+                    "dns-forwarder: SO_MARK({daemon_mark}) on bindtodevice socket failed: {}",
+                    io::Error::last_os_error()
+                );
+            }
         }
 
         socket
@@ -495,8 +552,33 @@ const UDP_MAX_RETRIES: usize = 2;
 ///
 /// Retries up to [`UDP_MAX_RETRIES`] times on timeout (EAGAIN / WouldBlock).
 /// DNS over UDP is inherently unreliable; retries are standard client behavior.
-fn forward_udp(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>, String> {
+///
+/// `daemon_mark` is set via `SO_MARK` so the daemon's own DNS packets bypass
+/// NFQUEUE. Pass 0 to skip marking (e.g. in tests).
+fn forward_udp(query: &[u8], upstream: SocketAddr, daemon_mark: u32) -> Result<Vec<u8>, String> {
+    use std::os::unix::io::AsRawFd;
+
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+
+    // Stamp daemon fwmark so nftables output_early bypasses NFQUEUE.
+    if daemon_mark != 0 {
+        let ret = unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                &daemon_mark as *const u32 as *const libc::c_void,
+                std::mem::size_of::<u32>() as libc::socklen_t,
+            )
+        };
+        if ret < 0 {
+            eprintln!(
+                "dns-forwarder: SO_MARK({daemon_mark}) on forward_udp socket failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
     socket
         .set_read_timeout(Some(UDP_RETRY_TIMEOUT))
         .map_err(|e| e.to_string())?;

@@ -220,6 +220,20 @@ pub const ROUTE_MARK_BASE: u32 = 20000;
 /// Must be below ROUTE_MARK_BASE so it's not caught by the relay bypass rules.
 pub const PROXY_REDIRECT_MARK: u32 = ROUTE_MARK_BASE - 1;
 
+/// Fwmark stamped on daemon-originated sockets (DNS forwarder, relay connects,
+/// proxy connects) so nftables bypasses NFQUEUE for the daemon's own traffic.
+/// Without this mark, the daemon's outbound packets are intercepted and
+/// attributed to "logiguard-daemon" instead of the real application.
+///
+/// This mark is intentionally **not** in the `>= ROUTE_MARK_BASE` range so
+/// that it does NOT trigger policy routing rules (`ip rule add fwmark N
+/// lookup T`). The daemon's own connections should follow the system default
+/// route, not be forced through a specific egress interface.
+///
+/// The nftables `output_early` chain has an explicit accept rule for this
+/// exact mark value, placed before the `queue num N` rule.
+pub const DAEMON_BYPASS_MARK: u32 = PROXY_REDIRECT_MARK - 1;
+
 pub trait NftablesBootstrap: Send + Sync {
     /// Install the logiguard nftables table.
     ///
@@ -364,6 +378,16 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             // Also accept the legacy single PROXY_REDIRECT_MARK for backwards compat.
             script.push_str(&format!(
                 "add rule inet logiguard output_early meta mark {PROXY_REDIRECT_MARK} accept\n",
+            ));
+            // Daemon bypass mark — stamped on daemon-originated sockets (DNS
+            // forwarder, relay connects, proxy connects) so they skip NFQUEUE.
+            // Without this, the daemon's own traffic is intercepted and
+            // attributed to "logiguard-daemon" instead of the real application.
+            // Uses a dedicated mark (not >= route_mark_base) to avoid triggering
+            // policy routing rules — the daemon's own connections follow the
+            // system default route.
+            script.push_str(&format!(
+                "add rule inet logiguard output_early meta mark {DAEMON_BYPASS_MARK} accept\n",
             ));
             script.push_str(&format!(
                 "add rule inet logiguard output_early queue num {q}\n",

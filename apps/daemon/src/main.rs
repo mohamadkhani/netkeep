@@ -276,22 +276,50 @@ fn load_proxy_config(db_path: &str, proxy_id: &str) -> Result<ProxyConfig, Strin
 /// Connect to `host:port` through a SOCKS5 or HTTP proxy.
 /// For SOCKS5, the domain is sent directly to the proxy (proxy-side DNS resolution).
 /// For HTTP CONNECT, the domain is included in the CONNECT line.
+///
+/// `daemon_mark` is stamped via `SO_MARK` on the proxy TCP socket so that
+/// nftables bypasses NFQUEUE for the daemon's own relay connections.
 fn connect_via_proxy_target(
     proxy: &ProxyConfig,
     host: &str,
     port: u16,
+    daemon_mark: u32,
 ) -> Result<TcpStream, String> {
     eprintln!(
-        "routed proxy connect: proxy={}:{} protocol={:?} target={host}:{port}",
+        "routed proxy connect: proxy={}:{} protocol={:?} target={host}:{port} daemon_mark={daemon_mark}",
         proxy.host, proxy.port, proxy.protocol
     );
-    proxy_client::connect_via_proxy(
+    let stream = proxy_client::connect_via_proxy(
         proxy,
         host,
         port,
         std::time::Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
     )
-    .map_err(|e| format!("proxy connect to {}:{} failed: {e}", proxy.host, proxy.port))
+    .map_err(|e| format!("proxy connect to {}:{} failed: {e}", proxy.host, proxy.port))?;
+
+    // Stamp daemon fwmark so nftables output_early bypasses NFQUEUE.
+    // This must happen AFTER connect() because proxy_client returns an
+    // already-connected stream. We set the mark on the fd so subsequent
+    // packets (data relay) carry the mark.
+    if daemon_mark != 0 {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                &daemon_mark as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u32,
+            )
+        };
+        if ret < 0 {
+            eprintln!(
+                "routed proxy connect: SO_MARK({daemon_mark}) failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    Ok(stream)
 }
 
 #[cfg(target_os = "linux")]
@@ -379,7 +407,7 @@ fn connect_via_device(addrs: &[SocketAddr], iface: &str) -> Result<TcpStream, St
             "routed device connect fallback: env {DEVICE_ROUTE_FALLBACK_ENV}=1, \
              iface={iface}, current_default={current_default:?}, retrying plain connect"
         );
-        return connect_plain(addrs);
+        return connect_plain(addrs, enforcer::DAEMON_BYPASS_MARK);
     }
     Err(last_err.unwrap_or_else(|| "no candidate address to connect".to_string()))
 }
@@ -461,7 +489,13 @@ fn fwmark_for_route_probe(target: &RouteTarget) -> Option<u32> {
     }
 }
 
-fn connect_plain(addrs: &[SocketAddr]) -> Result<TcpStream, String> {
+/// Connect to the first reachable address using a plain TCP socket.
+///
+/// `daemon_mark` is stamped via `SO_MARK` so nftables bypasses NFQUEUE for
+/// the daemon's own relay connections. Without this, the daemon's outbound
+/// packets are intercepted and attributed to "logiguard-daemon" instead of
+/// the real application.
+fn connect_plain(addrs: &[SocketAddr], daemon_mark: u32) -> Result<TcpStream, String> {
     let mut last_err: Option<String> = None;
     for sockaddr in addrs {
         let socket = socket2::Socket::new(
@@ -470,6 +504,26 @@ fn connect_plain(addrs: &[SocketAddr]) -> Result<TcpStream, String> {
             Some(socket2::Protocol::TCP),
         )
         .map_err(|e| format!("socket create failed: {e}"))?;
+
+        // Stamp daemon fwmark so nftables output_early bypasses NFQUEUE.
+        if daemon_mark != 0 {
+            unsafe {
+                let ret = libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_MARK,
+                    &daemon_mark as *const u32 as *const _,
+                    std::mem::size_of::<u32>() as u32,
+                );
+                if ret < 0 {
+                    eprintln!(
+                        "connect_plain: SO_MARK({daemon_mark}) failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+        }
+
         let sock_addr: socket2::SockAddr = (*sockaddr).into();
         match socket.connect_timeout(&sock_addr, Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS)) {
             Ok(()) => return Ok(TcpStream::from(socket)),
@@ -623,7 +677,7 @@ fn open_routed_tcp(
             // CONNECT send the domain to the proxy, which resolves it on the
             // far side.  This also avoids leaking DNS through the local resolver.
             let proxy = load_proxy_config(&db_path, id)?;
-            connect_via_proxy_target(&proxy, &host, port)
+            connect_via_proxy_target(&proxy, &host, port, enforcer::DAEMON_BYPASS_MARK)
         }
         _ => {
             // Tun/Device paths need local DNS resolution and route probes.
@@ -1061,6 +1115,7 @@ fn main() {
             fwmark_resolver,
             system_dns,
             dns_cache.clone(),
+            enforcer::DAEMON_BYPASS_MARK,
         ) {
             Ok(forwarder) => {
                 std::thread::spawn(move || forwarder.run());

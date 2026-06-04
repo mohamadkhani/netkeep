@@ -109,6 +109,12 @@ table inet logiguard {
     ct mark >= 20000 meta mark set ct mark accept
     meta mark >= 20000 ct mark set meta mark accept
 
+    # Daemon bypass mark — daemon's own sockets (DNS forwarder, relay
+    # connects, proxy connects) carry this mark to skip NFQUEUE.
+    # Uses a dedicated mark BELOW 20000 so it does NOT trigger policy
+    # routing rules (the daemon's own connections follow the default route).
+    meta mark 19998 accept
+
     # Loopback / DNS / ICMP / ICMPv6 bypass.
     oifname "lo" accept
     ip daddr 127.0.0.0/8 accept
@@ -161,6 +167,23 @@ table inet logiguard {
 ```
 
 The `queue num N` statement puts the packet in NFQUEUE number N and **blocks** it until userspace replies. The kernel will not forward or transmit the packet until a verdict arrives.
+
+### Daemon bypass mark (`DAEMON_BYPASS_MARK = 19998`)
+
+The daemon itself makes outbound network connections:
+
+- **DNS forwarder** — system DNS fallback (`forward_udp`), device-egress DNS (`resolve_via_bindtodevice`), proxy-egress DNS (`dns_over_socks`).
+- **TCP relay** — proxy connects (`connect_via_proxy_target`), device fallback connects (`connect_plain`).
+
+Without a bypass mark, these connections pass through `output_early` unmarked, hit the `queue num N` rule, and get intercepted by NFQUEUE. The process resolver correctly identifies them as belonging to `logiguard-daemon` — but that's the wrong attribution. The real application that triggered the connection is hidden behind the relay.
+
+The fix stamps `SO_MARK(DAEMON_BYPASS_MARK)` on all daemon-originated sockets. The nftables `output_early` chain has an explicit accept rule for this mark value, placed before `queue num N`, so the daemon's own traffic bypasses NFQUEUE entirely.
+
+**Why not use `ROUTE_MARK_BASE` (20000)?** Marks ≥ 20000 trigger policy routing rules (`ip rule add fwmark N lookup T`), which would force the daemon's own connections through a specific egress interface instead of the system default route. `DAEMON_BYPASS_MARK` (19998) is intentionally below this threshold so the daemon's connections follow normal routing.
+
+**Already-covered paths** (no `DAEMON_BYPASS_MARK` needed):
+- `connect_via_tun()` and `connect_via_device()` — already set `SO_MARK` with `ensure_route_mark()` (≥ `ROUTE_MARK_BASE`) for egress-specific routing.
+- `resolve_via_so_mark()` — already sets `SO_MARK` with egress-specific fwmark for TUN DNS.
 
 ---
 

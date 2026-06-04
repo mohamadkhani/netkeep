@@ -166,6 +166,39 @@ If you remove any layer, an above row reappears as a duplicate dialog.
 
 ---
 
+## Bug 23 — Daemon's own connections intercepted (fixed 2026-06-04)
+
+This is not a process attribution race per se, but it produces the same visible symptom: `process=Some("logiguard-daemon")` in policy logs.
+
+### Root cause
+
+The daemon makes outbound connections on behalf of applications:
+
+- DNS forwarder system fallback (`forward_udp`) — plain UDP to the system DNS server.
+- DNS forwarder device-egress fallback (`resolve_via_bindtodevice`) — UDP with `SO_BINDTODEVICE`.
+- DNS forwarder proxy-egress (`dns_over_socks`) — TCP to a SOCKS5 proxy.
+- TCP relay proxy connects (`connect_via_proxy_target`) — TCP to a SOCKS5/HTTP proxy.
+- TCP relay device fallback (`connect_plain`) — plain TCP.
+
+None of these sockets had `SO_MARK` set. The nftables `output_early` chain only bypasses NFQUEUE for packets with `mark >= ROUTE_MARK_BASE` (20000) or specific proxy marks. All unmarked daemon traffic was queued to NFQUEUE, classified as `process=logiguard-daemon`, and triggered policy matching.
+
+This was **not** a resolver failure — the resolver correctly identified the process. The problem was that the daemon's relay/DNS connections should never have been intercepted in the first place.
+
+### Fix
+
+Added `DAEMON_BYPASS_MARK` (19998, defined in `enforcer::DAEMON_BYPASS_MARK`) — a dedicated fwmark below `ROUTE_MARK_BASE` that:
+
+1. **Bypasses NFQUEUE** via a new nftables `output_early` accept rule: `meta mark 19998 accept`.
+2. **Does NOT trigger policy routing** — marks below 20000 don't match any `ip rule add fwmark N lookup T` entries, so the daemon's connections follow the system default route.
+
+All daemon-originated sockets now call `SO_MARK(DAEMON_BYPASS_MARK)` before connect/send.
+
+### Why not use `ROUTE_MARK_BASE`?
+
+Using `ROUTE_MARK_BASE` (20000) would cause the daemon's own connections to be routed through a specific egress interface (e.g. a VPN tunnel) via the policy routing table — breaking connectivity when the real application needs the default route.
+
+---
+
 ## Bug 22 — ACK eviction + Electron fd gap (fixed 2026-05-15)
 
 This is a worked example of two bugs that compounded to produce the `process=None` symptom in production (`electron → api2.cursor.sh`).
