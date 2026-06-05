@@ -38,12 +38,12 @@ impl EgressDelegate {
             socket_path,
             columns: vec![
                 Column::new("id", "ID").width(px(90.)),
-                Column::new("name", "Name").width(px(140.)),
+                Column::new("name", "Name").width(px(130.)),
                 Column::new("type", "Type").width(px(80.)),
-                Column::new("targets", "Targets").width(px(200.)),
-                Column::new("dns", "DNS").width(px(140.)),
+                Column::new("targets", "Targets").width(px(180.)),
+                Column::new("dns", "DNS").width(px(120.)),
                 Column::new("status", "Status").width(px(80.)),
-                Column::new("controls", "").width(px(160.)).resizable(false),
+                Column::new("controls", "").width(px(220.)).resizable(false),
             ],
         }
     }
@@ -69,6 +69,14 @@ impl EgressDelegate {
             return ("VPN", colors::green());
         }
         ("DIRECT", colors::muted())
+    }
+
+    /// Returns true if this egress has at least one proxy target.
+    fn has_proxy_target(egress: &Egress) -> bool {
+        egress
+            .targets
+            .iter()
+            .any(|t| matches!(t, RouteTarget::Proxy(_)))
     }
 }
 
@@ -159,7 +167,7 @@ impl TableDelegate for EgressDelegate {
                 };
                 table_badge(label, color)
             }
-            // Controls (edit + delete for non-system)
+            // Controls (test + edit + delete for non-system)
             6 => {
                 if egress.is_system_default {
                     return div().into_any_element();
@@ -171,27 +179,54 @@ impl TableDelegate for EgressDelegate {
                 let egress_edit = egress.clone();
                 let state_edit = self.state_weak.clone();
 
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
+                // Test button — only shown for egresses with proxy targets
+                let has_proxy = Self::has_proxy_target(egress);
+                let egress_for_test = egress.clone();
+                let state_test = self.state_weak.clone();
+
+                let mut row = div().flex().items_center().gap(px(4.));
+
+                // Test button (only for proxy-containing egresses)
+                if has_proxy {
+                    row = row.child(
+                        action_btn(format!("eg-test-{eid}"), "Test", colors::teal()).on_click(
+                            move |_, _, cx| {
+                                let egress = egress_for_test.clone();
+                                if let Some(st) = state_test.upgrade() {
+                                    let _ = cx.update_entity(
+                                        &st,
+                                        |s: &mut SettingsState, cx| {
+                                            s.egress_test_request = Some(egress);
+                                            cx.notify();
+                                        },
+                                    );
+                                }
+                            },
+                        ),
+                    );
+                }
+
+                row
                     // Edit button — sets egress_edit_request side-channel
                     .child(
                         action_btn(format!("eg-edit-{eid}"), "Edit", colors::primary()).on_click(
                             move |_, _, cx| {
                                 let egress = egress_edit.clone();
                                 if let Some(st) = state_edit.upgrade() {
-                                    let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
-                                        s.egress_edit_request = Some(egress);
-                                        cx.notify();
-                                    });
+                                    let _ = cx.update_entity(
+                                        &st,
+                                        |s: &mut SettingsState, cx| {
+                                            s.egress_edit_request = Some(egress);
+                                            cx.notify();
+                                        },
+                                    );
                                 }
                             },
                         ),
                     )
                     // Delete button
                     .child(
-                        action_btn(format!("eg-del-{eid}"), "Delete", colors::error()).on_click(
+                        action_btn(format!("eg-del-{eid}"), "Del", colors::error()).on_click(
                             move |_, _, cx| {
                                 let eid_req = eid.clone();
                                 let eid_cmp = eid.clone();
@@ -208,22 +243,26 @@ impl TableDelegate for EgressDelegate {
                                         })
                                         .await;
                                     if let Some(st) = weak.upgrade() {
-                                        let _ =
-                                            cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                        let _ = cx.update_entity(
+                                            &st,
+                                            |s: &mut SettingsState, cx| {
                                                 match res {
                                                     Ok(ControlResponse::Ok) => {
                                                         s.egresses.retain(|e| e.id != eid_cmp);
                                                         s.load_generation =
                                                             s.load_generation.saturating_add(1);
-                                                        s.status = Some("Egress removed.".into());
+                                                        s.status =
+                                                            Some("Egress removed.".into());
                                                     }
                                                     Ok(ControlResponse::Error(msg)) => {
-                                                        s.status =
-                                                            Some(format!("delete failed: {msg}"));
+                                                        s.status = Some(format!(
+                                                            "delete failed: {msg}"
+                                                        ));
                                                     }
                                                     Err(e) => {
-                                                        s.status =
-                                                            Some(format!("delete failed: {e}"));
+                                                        s.status = Some(format!(
+                                                            "delete failed: {e}"
+                                                        ));
                                                     }
                                                     _ => {
                                                         s.status = Some(
@@ -232,7 +271,8 @@ impl TableDelegate for EgressDelegate {
                                                     }
                                                 }
                                                 cx.notify();
-                                            });
+                                            },
+                                    );
                                     }
                                 })
                                 .detach();

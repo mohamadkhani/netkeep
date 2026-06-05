@@ -497,3 +497,358 @@ mod tests {
         assert!(matches!(result, Err(ProxyClientError::UnsupportedProtocol)));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Connectivity testing functions
+// ---------------------------------------------------------------------------
+
+/// Test HTTP/HTTPS connectivity through a proxy.
+///
+/// Connects to the URL's host:port via the proxy, sends an HTTP HEAD request,
+/// waits for the response status line, and returns the round-trip latency in ms.
+pub fn test_http_connectivity(
+    proxy: &ProxyConfig,
+    url: &str,
+    timeout: Duration,
+) -> Result<u64, ProxyClientError> {
+    let start = std::time::Instant::now();
+
+    // Parse URL to extract host, port, and scheme
+    let (host, _port, is_https) = parse_test_url(url)?;
+
+    // Always use port 80 — we send plain HTTP (no TLS), so connecting to
+    // port 443 would cause the server to reject us immediately.
+    let port = 80;
+
+    // Connect through the proxy
+    let mut stream = connect_via_proxy(proxy, &host, port, timeout)?;
+
+    // Send HTTP HEAD request
+    let request = format!("HEAD / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(ProxyClientError::Io)?;
+
+    // Read response status line
+    let mut response = Vec::new();
+    let mut buf = [0u8; 1];
+    loop {
+        stream.read_exact(&mut buf).map_err(ProxyClientError::Io)?;
+        response.push(buf[0]);
+        if response.len() >= 4 && response[response.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
+        {
+            break;
+        }
+        if response.len() > 8192 {
+            return Err(ProxyClientError::Protocol(
+                "HTTP response headers too large".to_string(),
+            ));
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let latency_ms = elapsed.as_millis() as u64;
+
+    // Parse status line to check for success
+    let response_str = String::from_utf8_lossy(&response);
+    let status_line = response_str
+        .lines()
+        .next()
+        .ok_or_else(|| ProxyClientError::Protocol("empty HTTP response".to_string()))?;
+
+    let parts: Vec<&str> = status_line.splitn(3, ' ').collect();
+    if parts.len() < 2 {
+        return Err(ProxyClientError::Protocol(format!(
+            "malformed HTTP response: {status_line}"
+        )));
+    }
+
+    let status_code: u16 = parts[1].parse().map_err(|_| {
+        ProxyClientError::Protocol(format!("non-numeric HTTP status: {}", parts[1]))
+    })?;
+
+    // Accept any 2xx or 3xx response as success
+    if !(200..400).contains(&status_code) {
+        return Err(ProxyClientError::Protocol(format!(
+            "HTTP {status_code} {}",
+            parts.get(2).unwrap_or(&"")
+        )));
+    }
+
+    let _ = is_https; // already handled: we always use port 80
+    Ok(latency_ms)
+}
+
+/// Test DNS resolution through a proxy.
+///
+/// Connects to 8.8.8.8:53 (Google DNS) via the proxy, sends a DNS A query
+/// for the given domain, waits for the response, and returns the round-trip
+/// latency in ms.
+pub fn test_dns_connectivity(
+    proxy: &ProxyConfig,
+    domain: &str,
+    timeout: Duration,
+) -> Result<u64, ProxyClientError> {
+    let start = std::time::Instant::now();
+
+    // Connect to Google DNS through the proxy
+    let mut stream = connect_via_proxy(proxy, "8.8.8.8", 53, timeout)?;
+
+    // Set read timeout so we don't block forever on unresponsive servers
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(ProxyClientError::Io)?;
+
+    // Build a minimal DNS A query
+    let query = build_dns_a_query(domain);
+
+    // DNS over TCP: 2-byte length prefix
+    let len_bytes = (query.len() as u16).to_be_bytes();
+    stream
+        .write_all(&len_bytes)
+        .map_err(ProxyClientError::Io)?;
+    stream
+        .write_all(&query)
+        .map_err(ProxyClientError::Io)?;
+
+    // Read response length prefix — use a loop to handle partial reads
+    let mut len_buf = [0u8; 2];
+    let mut len_read = 0;
+    while len_read < 2 {
+        match stream.read(&mut len_buf[len_read..]) {
+            Ok(0) => {
+                return Err(ProxyClientError::Protocol(
+                    "proxy closed connection before DNS response length was received".to_string(),
+                ))
+            }
+            Ok(n) => len_read += n,
+            Err(e) => return Err(ProxyClientError::Io(e)),
+        }
+    }
+    let resp_len = u16::from_be_bytes(len_buf) as usize;
+
+    if resp_len > 4096 {
+        return Err(ProxyClientError::Protocol(
+            "DNS response too large".to_string(),
+        ));
+    }
+
+    // Read response body — accumulate bytes, tolerate early EOF
+    let mut resp_buf = vec![0u8; resp_len];
+    let mut total_read = 0;
+    while total_read < resp_len {
+        match stream.read(&mut resp_buf[total_read..]) {
+            Ok(0) => break, // EOF — remote closed connection
+            Ok(n) => total_read += n,
+            Err(e) => {
+                // If we already have a DNS header worth of data, try to validate it
+                if total_read >= 12 {
+                    break;
+                }
+                return Err(ProxyClientError::Io(e));
+            }
+        }
+    }
+    resp_buf.truncate(total_read);
+
+    let elapsed = start.elapsed();
+    let latency_ms = elapsed.as_millis() as u64;
+
+    // Minimal validation: response must be at least 12 bytes (DNS header)
+    if resp_buf.len() < 12 {
+        return Err(ProxyClientError::Protocol(format!(
+            "DNS response too short (got {} bytes, need at least 12 for header)",
+            resp_buf.len()
+        )));
+    }
+
+    // Check QR bit (bit 7 of first byte of flags) — must be 1 (response)
+    let flags_hi = resp_buf[2];
+    if flags_hi & 0x80 == 0 {
+        return Err(ProxyClientError::Protocol(
+            "DNS response has QR=0 (not a response)".to_string(),
+        ));
+    }
+
+    // Check RCODE (bits 3-0 of second byte of flags)
+    let rcode = resp_buf[3] & 0x0F;
+    if rcode != 0 {
+        return Err(ProxyClientError::Protocol(format!(
+            "DNS response RCODE={rcode}"
+        )));
+    }
+
+    Ok(latency_ms)
+}
+
+/// Parse a URL into (host, port, is_https).
+fn parse_test_url(url: &str) -> Result<(String, u16, bool), ProxyClientError> {
+    let url = url.trim();
+
+    // Extract scheme
+    let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
+        ("https", rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        ("http", rest)
+    } else {
+        // Default to https
+        ("https", url)
+    };
+
+    if rest.is_empty() {
+        return Err(ProxyClientError::Protocol(
+            "URL has no host".to_string(),
+        ));
+    }
+
+    // Strip path/query/fragment
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    let host_port = host_port.split('?').next().unwrap_or(host_port);
+    let host_port = host_port.split('#').next().unwrap_or(host_port);
+
+    // Handle [IPv6]:port
+    if let Some(host_port_inner) = host_port.strip_prefix('[') {
+        if let Some(bracket_end) = host_port_inner.find(']') {
+            let host = &host_port_inner[..bracket_end];
+            let rest = &host_port_inner[bracket_end + 1..];
+            let port = if let Some(port_str) = rest.strip_prefix(':') {
+                port_str.parse::<u16>().map_err(|_| {
+                    ProxyClientError::Protocol(format!("invalid port in URL: {port_str}"))
+                })?
+            } else if scheme == "https" {
+                443
+            } else {
+                80
+            };
+            return Ok((host.to_string(), port, scheme == "https"));
+        }
+    }
+
+    // Handle host:port
+    if let Some(colon_pos) = host_port.rfind(':') {
+        let host = &host_port[..colon_pos];
+        let port_str = &host_port[colon_pos + 1..];
+        let port = port_str.parse::<u16>().map_err(|_| {
+            ProxyClientError::Protocol(format!("invalid port in URL: {port_str}"))
+        })?;
+        Ok((host.to_string(), port, scheme == "https"))
+    } else {
+        let port = if scheme == "https" { 443 } else { 80 };
+        Ok((host_port.to_string(), port, scheme == "https"))
+    }
+}
+
+/// Build a minimal DNS A query packet for the given domain.
+fn build_dns_a_query(domain: &str) -> Vec<u8> {
+    let mut packet = Vec::new();
+
+    // Transaction ID (arbitrary)
+    packet.extend_from_slice(&[0x12, 0x34]);
+    // Flags: standard query, recursion desired
+    packet.extend_from_slice(&[0x01, 0x00]);
+    // QDCOUNT = 1
+    packet.extend_from_slice(&[0x00, 0x01]);
+    // ANCOUNT = 0
+    packet.extend_from_slice(&[0x00, 0x00]);
+    // NSCOUNT = 0
+    packet.extend_from_slice(&[0x00, 0x00]);
+    // ARCOUNT = 0
+    packet.extend_from_slice(&[0x00, 0x00]);
+
+    // QNAME: domain labels
+    for label in domain.split('.') {
+        let label_bytes = label.as_bytes();
+        packet.push(label_bytes.len() as u8);
+        packet.extend_from_slice(label_bytes);
+    }
+    packet.push(0x00); // root label
+
+    // QTYPE = A (1)
+    packet.extend_from_slice(&[0x00, 0x01]);
+    // QCLASS = IN (1)
+    packet.extend_from_slice(&[0x00, 0x01]);
+
+    packet
+}
+
+#[cfg(test)]
+mod connectivity_tests {
+    use super::*;
+
+    #[test]
+    fn parse_url_https_default_port() {
+        let (host, port, is_https) = parse_test_url("https://example.com").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 443);
+        assert!(is_https);
+    }
+
+    #[test]
+    fn parse_url_http_default_port() {
+        let (host, port, is_https) = parse_test_url("http://example.com").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 80);
+        assert!(!is_https);
+    }
+
+    #[test]
+    fn parse_url_with_port() {
+        let (host, port, is_https) = parse_test_url("https://example.com:8443/path").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 8443);
+        assert!(is_https);
+    }
+
+    #[test]
+    fn parse_url_no_scheme_defaults_https() {
+        let (host, port, is_https) = parse_test_url("example.com").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 443);
+        assert!(is_https);
+    }
+
+    #[test]
+    fn parse_url_with_query_and_fragment() {
+        let (host, port, _) = parse_test_url("http://example.com:8080/path?q=1#frag").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn parse_url_empty_returns_error() {
+        let result = parse_test_url("https://");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_dns_query_structure() {
+        let query = build_dns_a_query("example.com");
+        // Transaction ID
+        assert_eq!(&query[0..2], &[0x12, 0x34]);
+        // Flags: standard query, RD=1
+        assert_eq!(&query[2..4], &[0x01, 0x00]);
+        // QDCOUNT = 1
+        assert_eq!(&query[4..6], &[0x00, 0x01]);
+        // QTYPE = A (1)
+        let len = query.len();
+        assert_eq!(&query[len - 4..len - 2], &[0x00, 0x01]);
+        // QCLASS = IN (1)
+        assert_eq!(&query[len - 2..len], &[0x00, 0x01]);
+    }
+
+    #[test]
+    fn build_dns_query_labels() {
+        let query = build_dns_a_query("www.example.com");
+        // Label "www" (3 bytes)
+        assert_eq!(query[12], 3);
+        assert_eq!(&query[13..16], b"www");
+        // Label "example" (7 bytes)
+        assert_eq!(query[16], 7);
+        assert_eq!(&query[17..24], b"example");
+        // Label "com" (3 bytes)
+        assert_eq!(query[24], 3);
+        assert_eq!(&query[25..28], b"com");
+        // Root label
+        assert_eq!(query[28], 0);
+    }
+}

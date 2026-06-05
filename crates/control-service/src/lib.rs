@@ -292,6 +292,8 @@ impl<R: Repository> ControlService<R> {
             ControlRequest::UpsertProxy(_) => "upsert_proxy",
             ControlRequest::DeleteProxy { .. } => "delete_proxy",
             ControlRequest::ListProxies => "list_proxies",
+            ControlRequest::TestProxyHttp { .. } => "test_proxy_http",
+            ControlRequest::TestProxyDns { .. } => "test_proxy_dns",
         };
         counter!("logiguard.control.requests", "type" => request_type).increment(1);
         let handle_start = Instant::now();
@@ -522,6 +524,46 @@ impl<R: Repository> ControlService<R> {
                 let mut proxies = self.repo.list_proxies();
                 proxies.sort_by(|a, b| a.id.cmp(&b.id));
                 ControlResponse::ProxyList(proxies)
+            }
+            ControlRequest::TestProxyHttp { proxy_id, url } => {
+                match self.repo.get_proxy(&proxy_id) {
+                    Some(proxy) => {
+                        let timeout = std::time::Duration::from_secs(10);
+                        match proxy_client::test_http_connectivity(&proxy, &url, timeout) {
+                            Ok(latency_ms) => ControlResponse::ProxyTestResult {
+                                success: true,
+                                latency_ms,
+                                error: None,
+                            },
+                            Err(e) => ControlResponse::ProxyTestResult {
+                                success: false,
+                                latency_ms: 0,
+                                error: Some(e.to_string()),
+                            },
+                        }
+                    }
+                    None => ControlResponse::Error(format!("proxy '{proxy_id}' not found")),
+                }
+            }
+            ControlRequest::TestProxyDns { proxy_id, domain } => {
+                match self.repo.get_proxy(&proxy_id) {
+                    Some(proxy) => {
+                        let timeout = std::time::Duration::from_secs(10);
+                        match proxy_client::test_dns_connectivity(&proxy, &domain, timeout) {
+                            Ok(latency_ms) => ControlResponse::ProxyTestResult {
+                                success: true,
+                                latency_ms,
+                                error: None,
+                            },
+                            Err(e) => ControlResponse::ProxyTestResult {
+                                success: false,
+                                latency_ms: 0,
+                                error: Some(e.to_string()),
+                            },
+                        }
+                    }
+                    None => ControlResponse::Error(format!("proxy '{proxy_id}' not found")),
+                }
             }
         };
         histogram!("logiguard.control.request.duration", "type" => request_type)

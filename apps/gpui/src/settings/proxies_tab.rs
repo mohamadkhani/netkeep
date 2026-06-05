@@ -36,12 +36,12 @@ impl ProxiesDelegate {
             state_weak,
             socket_path,
             columns: vec![
-                Column::new("name", "Name").width(px(140.)),
+                Column::new("name", "Name").width(px(130.)),
                 Column::new("protocol", "Protocol").width(px(80.)),
-                Column::new("address", "Address").width(px(160.)),
-                Column::new("auth", "Auth").width(px(120.)),
+                Column::new("address", "Address").width(px(140.)),
+                Column::new("auth", "Auth").width(px(100.)),
                 Column::new("status", "Status").width(px(80.)),
-                Column::new("controls", "").width(px(180.)).resizable(false),
+                Column::new("controls", "").width(px(240.)).resizable(false),
             ],
         }
     }
@@ -120,14 +120,16 @@ impl TableDelegate for ProxiesDelegate {
                 };
                 table_badge(label, color)
             }
-            // Controls (edit + toggle + delete)
+            // Controls (test + edit + toggle + delete)
             5 => {
                 let proxy_edit = proxy.clone();
                 let proxy_toggle = proxy.clone();
+                let proxy_test = proxy.clone();
                 let pid_del = proxy.id.clone();
 
                 let state_edit = self.state_weak.clone();
                 let state_toggle = self.state_weak.clone();
+                let state_test = self.state_weak.clone();
                 let state_del = self.state_weak.clone();
 
                 let socket_toggle = self.socket_path.clone();
@@ -136,7 +138,20 @@ impl TableDelegate for ProxiesDelegate {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(px(4.))
+                    // Test
+                    .child(
+                        action_btn(format!("px-test-{}", proxy.id), "Test", colors::teal())
+                            .on_click(move |_, _, cx| {
+                                let proxy = proxy_test.clone();
+                                if let Some(st) = state_test.upgrade() {
+                                    let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                        s.proxy_test_request = Some(proxy);
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
                     // Edit
                     .child(
                         action_btn(format!("px-edit-{}", proxy.id), "Edit", colors::primary())
@@ -154,7 +169,7 @@ impl TableDelegate for ProxiesDelegate {
                     .child(
                         action_btn(
                             format!("px-tog-{}", proxy.id),
-                            if proxy.enabled { "Disable" } else { "Enable" },
+                            if proxy.enabled { "Dis" } else { "En" },
                             if proxy.enabled {
                                 colors::muted()
                             } else {
@@ -214,7 +229,7 @@ impl TableDelegate for ProxiesDelegate {
                     )
                     // Delete
                     .child(
-                        action_btn(format!("px-del-{pid_del}"), "Delete", colors::error())
+                        action_btn(format!("px-del-{pid_del}"), "Del", colors::error())
                             .on_click(move |_, _, cx| {
                                 let pid_req = pid_del.clone();
                                 let pid_cmp = pid_del.clone();

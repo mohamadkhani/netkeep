@@ -362,6 +362,9 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
                 Ok(body)
             }
         }
+        ControlResponse::ProxyTestResult { success, latency_ms, error } => {
+            Ok(format!("test result: success={success} latency={latency_ms}ms error={error:?}"))
+        }
         ControlResponse::NfqueueStatus { enabled, queue_num } => {
             Ok(format!("nfqueue enabled={enabled} queue_num={queue_num:?}"))
         }

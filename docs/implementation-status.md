@@ -487,9 +487,9 @@ CREATE TABLE pending_decisions (
 | control-api | 11 | Request validation |
 | control-service | 12 | RPC handlers, pending lifecycle, push notifications |
 | cli | 17 | Command parsing, output formatting |
-| proxy-client | 12 | SOCKS5/HTTP CONNECT protocol encoding, auth handling, transparent proxy, error cases |
+| proxy-client | 19 | SOCKS5/HTTP CONNECT protocol encoding, auth handling, transparent proxy, URL parsing, DNS query building, connectivity tests |
 | daemon + emulator integration | 3 | route target switch e2e (2), SOCKS5 allow relay (1) |
-| **Total** | **180** | |
+| **Total** | **198** | |
 
 ## CLI Commands
 
@@ -685,4 +685,4 @@ LOGIGUARD_NFQUEUE=0 \
 
 ## Conclusion
 
-LogiGuard is feature-complete for MVP (Phase 1-4). Core logic tested extensively. Settings window uses gpui-component Table and Dialog for data management. Proxy support fully implemented across all crates. Enforcement path fully wired: real ProcessResolver reads `/proc`, TLS SNI extraction populates destination domain. Ready for Phase 2 integration testing and real-world deployment.
+LogiGuard is feature-complete for MVP (Phase 1-4). Core logic tested extensively (198 tests). Settings window uses gpui-component Table and Dialog for data management. Proxy support fully implemented across all crates, including connectivity test modal (HTTP HEAD on port 80 + DNS A query to 8.8.8.8:53 through proxy tunnel). Enforcement path fully wired: real ProcessResolver reads `/proc`, TLS SNI extraction populates destination domain. Ready for Phase 2 integration testing and real-world deployment.

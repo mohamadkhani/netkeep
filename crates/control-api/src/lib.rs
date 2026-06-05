@@ -56,6 +56,17 @@ pub enum ControlRequest {
     SetNfqueueEnabled {
         enabled: bool,
     },
+    // Proxy connectivity testing
+    /// Test HTTP/HTTPS connectivity through a proxy.
+    TestProxyHttp {
+        proxy_id: String,
+        url: String,
+    },
+    /// Test DNS resolution through a proxy.
+    TestProxyDns {
+        proxy_id: String,
+        domain: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +121,12 @@ pub enum ControlResponse {
         enabled: bool,
         queue_num: Option<u16>,
     },
+    /// Result of a proxy connectivity test (HTTP or DNS).
+    ProxyTestResult {
+        success: bool,
+        latency_ms: u64,
+        error: Option<String>,
+    },
 }
 
 // NEW: Push notifications sent from daemon to subscribers
@@ -153,6 +170,18 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
         }
         ControlRequest::DeleteProxy { id } if id.trim().is_empty() => {
             Err("proxy id cannot be empty".to_string())
+        }
+        ControlRequest::TestProxyHttp { proxy_id, .. } if proxy_id.trim().is_empty() => {
+            Err("proxy id cannot be empty".to_string())
+        }
+        ControlRequest::TestProxyDns { proxy_id, .. } if proxy_id.trim().is_empty() => {
+            Err("proxy id cannot be empty".to_string())
+        }
+        ControlRequest::TestProxyHttp { url, .. } if url.trim().is_empty() => {
+            Err("url cannot be empty".to_string())
+        }
+        ControlRequest::TestProxyDns { domain, .. } if domain.trim().is_empty() => {
+            Err("domain cannot be empty".to_string())
         }
         _ => Ok(()),
     }
@@ -293,5 +322,71 @@ mod tests {
         };
         let json = serde_json::to_string(&notif).unwrap();
         assert!(json.contains("PendingExpired"));
+    }
+
+    #[test]
+    fn rejects_empty_proxy_id_for_test_http() {
+        let req = ControlRequest::TestProxyHttp {
+            proxy_id: "".to_string(),
+            url: "https://example.com".to_string(),
+        };
+        assert_eq!(
+            validate_request(&req),
+            Err("proxy id cannot be empty".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_empty_url_for_test_http() {
+        let req = ControlRequest::TestProxyHttp {
+            proxy_id: "px-1".to_string(),
+            url: "  ".to_string(),
+        };
+        assert_eq!(
+            validate_request(&req),
+            Err("url cannot be empty".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_empty_domain_for_test_dns() {
+        let req = ControlRequest::TestProxyDns {
+            proxy_id: "px-1".to_string(),
+            domain: "".to_string(),
+        };
+        assert_eq!(
+            validate_request(&req),
+            Err("domain cannot be empty".to_string())
+        );
+    }
+
+    #[test]
+    fn accepts_valid_test_proxy_http() {
+        let req = ControlRequest::TestProxyHttp {
+            proxy_id: "px-1".to_string(),
+            url: "https://example.com".to_string(),
+        };
+        assert_eq!(validate_request(&req), Ok(()));
+    }
+
+    #[test]
+    fn accepts_valid_test_proxy_dns() {
+        let req = ControlRequest::TestProxyDns {
+            proxy_id: "px-1".to_string(),
+            domain: "google.com".to_string(),
+        };
+        assert_eq!(validate_request(&req), Ok(()));
+    }
+
+    #[test]
+    fn proxy_test_result_serializes() {
+        let resp = ControlResponse::ProxyTestResult {
+            success: true,
+            latency_ms: 150,
+            error: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("ProxyTestResult"));
+        assert!(json.contains("150"));
     }
 }

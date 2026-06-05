@@ -839,3 +839,62 @@ Review: [`plans/code-review-session-35-37.md`](plans/code-review-session-35-37.m
 - [x] **Documentation**: Updated `process-resolver.md`, `process-attribution-races.md` (Layer −1).
 - [x] **DNS forwarder retry logic** (`forwarder.rs`): `forward_udp()` now retries up to 2 times on timeout (EAGAIN) with 3s per-attempt timeout. Previously a single 8s attempt with no retry — standard DNS clients retry because UDP is unreliable.
 - [x] **DNS tracker wildcard fallback** (`tracker.rs`): `DnsTracker::lookup()` now tries `0.0.0.0` (INADDR_ANY) key when the specific-IP lookup fails. Auto-bound UDP sockets have `skc_rcv_saddr = 0.0.0.0` even when the actual packet source IP is `127.0.0.1`. This fixed the DNS forwarder attributing queries to `logiguard-daemon` instead of the real client (e.g. `chromium`).
+
+### 2026-06-05 (session 38 — proxy/egress connectivity test modal)
+
+New feature: "Test" button on each proxy and egress table row in the settings GUI. Opens a modal dialog for testing proxy connectivity via HTTP/HTTPS and DNS.
+
+- [x] **Control API** (`crates/control-api/src/lib.rs`):
+  - New `ControlRequest::TestProxyHttp { proxy_id, url }` — test HTTP/HTTPS connectivity through a proxy.
+  - New `ControlRequest::TestProxyDns { proxy_id, domain }` — test DNS resolution through a proxy (via 8.8.8.8:53).
+  - New `ControlResponse::ProxyTestResult { success, latency_ms, error }` — result for both test types.
+  - Validation: rejects empty proxy_id, url, and domain.
+
+- [x] **Proxy client test functions** (`crates/proxy-client/src/lib.rs`):
+  - `test_http_connectivity(proxy, url, timeout)` — connects via proxy to port 80 (always, since we send plain HTTP without TLS), sends HTTP HEAD, measures round-trip latency in ms.
+  - `test_dns_connectivity(proxy, domain, timeout)` — connects to 8.8.8.8:53 via proxy, sends DNS A query over TCP, measures round-trip latency in ms. Uses resilient `read()` loop instead of `read_exact()` to handle partial responses and early EOF gracefully.
+  - `parse_test_url(url)` — extracts (host, port, is_https) from HTTP/HTTPS URLs.
+  - `build_dns_a_query(domain)` — builds a minimal DNS A query wire-format packet.
+
+- [x] **Control service handler** (`crates/control-service/src/lib.rs`):
+  - `TestProxyHttp`: looks up proxy by ID → calls `proxy_client::test_http_connectivity` → returns `ProxyTestResult`.
+  - `TestProxyDns`: looks up proxy by ID → calls `proxy_client::test_dns_connectivity` → returns `ProxyTestResult`.
+  - 10-second timeout per test.
+  - Added `proxy-client` dependency to `control-service/Cargo.toml`.
+
+- [x] **Proxy table "Test" button** (`apps/gpui/src/settings/proxies_tab.rs`):
+  - Added teal "Test" button in Controls column alongside Edit/Toggle/Delete.
+  - On click: sets `SettingsState.proxy_test_request = Some(proxy)` + `cx.notify()`.
+  - Controls column widened from 180px to 240px.
+
+- [x] **Egress table "Test" button** (`apps/gpui/src/settings/egress_tab.rs`):
+  - Added teal "Test" button for egresses that contain at least one `RouteTarget::Proxy(_)` target.
+  - On click: resolves first proxy target from egress → sets `SettingsState.egress_test_request = Some(egress)` + `cx.notify()`.
+  - Controls column widened from 160px to 220px.
+
+- [x] **Settings state** (`apps/gpui/src/settings/mod.rs`):
+  - New `SettingsState.proxy_test_request: Option<ProxyConfig>` — side-channel for proxy test.
+  - New `SettingsState.egress_test_request: Option<Egress>` — side-channel for egress test.
+  - Observer drains test requests and opens the test dialog.
+
+- [x] **Test modal dialog** (`apps/gpui/src/settings/mod.rs::open_proxy_test_dialog`):
+  - Shows proxy name, protocol badge, and host:port at the top.
+  - URL input (default `http://www.google.com`) + "Test HTTP" button — always connects to port 80 since no TLS is performed.
+  - Domain input (default `google.com`) + "Test DNS" button — sends DNS A query to 8.8.8.8:53 through the proxy tunnel.
+  - Results area: green ✓ with latency in ms on success, red ✗ with error message on failure.
+  - Loading states: ⏳ "Testing..." shown while async test is running (per-button `Arc<Mutex<bool>>` flags).
+  - Async test execution: spawns background task → sends `TestProxyHttp`/`TestProxyDns` to daemon → updates shared result state → triggers dialog re-render.
+  - Close button.
+
+- [x] **CLI match arm** (`apps/cli/src/main.rs`):
+  - Added `ControlResponse::ProxyTestResult` match arm to fix non-exhaustive pattern.
+
+- [x] **Tests:** 18 new tests — 8 in `control-api` (validation + serialization), 8 in `proxy-client` (URL parsing, DNS query building), 2 in `proxy-client` (connectivity_tests). Workspace total **180 → 198** tests, no regressions.
+
+- [x] **Build:** Full workspace `cargo build --workspace` and `cargo test --workspace` pass cleanly.
+
+**Bug fixes (same session):**
+
+- **HTTP test "failed to fill whole buffer":** `test_http_connectivity` was connecting to port 443 (from `https://` URL parsing) but sending a plain HTTP HEAD request — no TLS handshake. The server immediately closed the connection. Fixed by always using port 80 regardless of URL scheme, since we don't perform TLS. Default URL changed from `https://www.google.com` to `http://www.google.com` in the settings dialog.
+
+- **DNS test "failed to fill whole buffer":** `test_dns_connectivity` used `read_exact()` which fails when the TCP stream gets EOF before the full buffer is filled (e.g., proxy closes connection mid-response, fragmented reads). Fixed by using `stream.read()` in a loop with `set_read_timeout()`, tolerating early EOF on the response body if ≥12 bytes (DNS header) are already received. Descriptive error messages replace raw IO errors.

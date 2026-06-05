@@ -263,6 +263,8 @@ UpsertProxy(ProxyConfig)
 DeleteProxy { id }
 ListProxies
 SetNfqueueEnabled { enabled }
+TestProxyHttp { proxy_id, url }
+TestProxyDns { proxy_id, domain }
 ```
 
 **Responses:**
@@ -280,6 +282,7 @@ Unlocked
 RoutedTcpReady { listen_addr }
 EgressList(Vec<Egress>)
 ProxyList(Vec<ProxyConfig>)
+ProxyTestResult { success, latency_ms, error }
 Error(String)
 ```
 
@@ -365,7 +368,7 @@ Every system effect behind a trait:
 **flow-classifier:** 7+ tests (process attribution, domain inference, conflicts)  
 **enforcer:** 8+ tests (packet parsing, verdict paths, nftables programming)  
 **state-store:** 8+ tests (CRUD, persistence, migrations)  
-**control-api:** 5+ tests (request validation)
+**control-api:** 13+ tests (request validation, serialization, proxy test validation)
 
 **Current:** 77 tests passing.
 

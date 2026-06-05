@@ -11,6 +11,7 @@ decision-engine = { path = "../decision-engine" }
 enforcer = { path = "../enforcer" }
 policy-engine = { path = "../policy-engine" }
 state-store = { path = "../state-store" }
+proxy-client = { path = "../proxy-client" }
 tokio = { version = "1", features = ["sync"] }
 metrics = "0.24"
 

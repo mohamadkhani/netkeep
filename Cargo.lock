@@ -1155,6 +1155,7 @@ dependencies = [
  "enforcer",
  "metrics",
  "policy-engine",
+ "proxy-client",
  "state-store",
  "tokio",
 ]
