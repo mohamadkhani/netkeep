@@ -2,23 +2,23 @@
 
 use gpui::{
     div, px, AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled, Window,
+    ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled,
 };
-use gpui_component::{h_flex, WindowExt as _};
+use gpui_component::h_flex;
 
 use crate::colors;
 
 // ── Modal Header ───────────────────────────────────────────────────────────
 //
 // Full-width title bar: icon (primary colour) + UPPERCASE label-caps title on the
-// left, ✕ close button on the right. Pass as `.title()` on a `Dialog` that has
-// `.p(px(0.))` so the header becomes full-bleed.
+// left. Pass as `.title()` on a `Dialog` that has `.p(px(0.))` so the header
+// becomes full-bleed. The Dialog's built-in close button (enabled by default)
+// handles closing.
 
 pub fn modal_header(icon: &str, title: &str) -> impl IntoElement {
     h_flex()
         .w_full()
         .items_center()
-        .justify_between()
         .bg(colors::surface_container_high())
         .border_b_1()
         .border_color(colors::border())
@@ -41,21 +41,6 @@ pub fn modal_header(icon: &str, title: &str) -> impl IntoElement {
                         .text_color(colors::text())
                         .child(title.to_string()),
                 ),
-        )
-        .child(
-            div()
-                .id(ElementId::Name("modal-close-x".into()))
-                .text_size(px(13.))
-                .text_color(colors::muted())
-                .p(px(5.))
-                .rounded(px(4.))
-                .cursor_pointer()
-                .on_click(
-                    |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
-                        window.close_dialog(cx);
-                    },
-                )
-                .child("✕"),
         )
 }
 
