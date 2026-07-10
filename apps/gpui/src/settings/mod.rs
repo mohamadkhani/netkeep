@@ -114,7 +114,7 @@ impl SettingsApp {
 
         let egress_table = cx.new(|cx| {
             TableState::new(
-                EgressDelegate::new(vec![], weak.clone(), socket_path.clone()),
+                EgressDelegate::new(vec![], vec![], weak.clone(), socket_path.clone()),
                 window,
                 cx,
             )
@@ -241,6 +241,7 @@ impl SettingsApp {
         });
         self.egress_table.update(cx, |table, _| {
             table.delegate_mut().egresses = egresses;
+            table.delegate_mut().proxies = proxies.clone();
             table.delegate_mut().state_weak = weak.clone();
             table.delegate_mut().socket_path = socket.clone();
         });
@@ -907,11 +908,21 @@ impl SettingsApp {
                         } else {
                             ("DEV", colors::muted())
                         };
-                    let tgt_name = tgt
-                        .split_once(':')
-                        .map(|(_, n)| n)
-                        .unwrap_or(tgt.as_str())
-                        .to_string();
+                    // Resolve the display name. For proxy targets, look up the
+                    // human-readable name from the ID; for tun/dev the ID itself
+                    // is already a usable interface name.
+                    let tgt_name = if let Some(proxy_id) = tgt.strip_prefix("proxy:") {
+                        proxy_options
+                            .iter()
+                            .find(|(id, _)| id == proxy_id)
+                            .map(|(_, name)| name.clone())
+                            .unwrap_or_else(|| proxy_id.to_string())
+                    } else {
+                        tgt.split_once(':')
+                            .map(|(_, n)| n)
+                            .unwrap_or(tgt.as_str())
+                            .to_string()
+                    };
                     div()
                         .id(gpui::ElementId::Name(format!("tgt-row-{i}").into()))
                         .flex()
@@ -1387,6 +1398,17 @@ impl SettingsApp {
             .unwrap_or(ProxyProtocol::Socks5);
         let init_auth = existing.map(|p| p.auth.clone()).unwrap_or(ProxyAuth::None);
 
+        // Snapshot existing proxy names for client-side uniqueness validation.
+        // Excludes the proxy being edited (if any) so renaming in-place is allowed.
+        let existing_names: Vec<String> = self
+            .state
+            .read(cx)
+            .proxies
+            .iter()
+            .filter(|p| existing_id.as_deref() != Some(&p.id))
+            .map(|p| p.name.clone())
+            .collect();
+
         // Create input entities before the Fn dialog closure.
         let name_input = cx.new(|cx| {
             let mut s = InputState::new(window, cx);
@@ -1447,12 +1469,38 @@ impl SettingsApp {
                 let sock = sock;
                 let eid = eid;
                 let auth_val = auth_val;
+                let existing_names = existing_names.clone();
                 Rc::new(move |cx: &mut gpui::App| -> bool {
                     let name = name_i.read(cx).value().to_string();
                     let host = host_i.read(cx).value().to_string();
                     let port_str = port_i.read(cx).value().to_string();
                     let port: u16 = port_str.trim().parse().unwrap_or(1080);
                     let proto = proto_for_ok.lock().unwrap().clone();
+
+                    // Client-side uniqueness check: pre-emptively reject duplicate
+                    // names so the dialog can stay open and show the error. The
+                    // server enforces this too (control-service).
+                    let trimmed = name.trim();
+                    if trimmed.is_empty() {
+                        if let Some(st) = state_w.upgrade() {
+                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                s.status = Some("proxy name must not be empty".into());
+                                cx.notify();
+                            });
+                        }
+                        return false;
+                    }
+                    if existing_names.iter().any(|n| n == trimmed) {
+                        if let Some(st) = state_w.upgrade() {
+                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                s.status =
+                                    Some(format!("proxy name '{trimmed}' is already in use"));
+                                cx.notify();
+                            });
+                        }
+                        return false;
+                    }
+
                     let id = eid
                         .clone()
                         .unwrap_or_else(|| format!("px-{}", crate::daemon::unix_now()));
@@ -1549,8 +1597,9 @@ impl SettingsApp {
                         .child(
                             action_btn("dialog-ok", ok_label, crate::colors::primary()).on_click(
                                 move |_, win, cx| {
-                                    do_save_btn(cx);
-                                    win.close_dialog(cx);
+                                    if do_save_btn(cx) {
+                                        win.close_dialog(cx);
+                                    }
                                 },
                             ),
                         ),

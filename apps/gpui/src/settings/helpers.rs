@@ -1,7 +1,7 @@
 //! Shared helper functions for the settings window.
 
 use control_api::{ControlRequest, ControlResponse};
-use core_types::RouteTarget;
+use core_types::{ProxyConfig, RouteTarget};
 use gpui::{AppContext as _, AsyncApp, WeakEntity};
 
 use crate::daemon;
@@ -100,3 +100,18 @@ pub fn route_summary(t: &RouteTarget) -> String {
         RouteTarget::Proxy(n) => format!("proxy:{n}"),
     }
 }
+
+/// Short human-readable summary of a route target that resolves proxy IDs to names.
+/// Uses a fallback to the ID if the proxy is not found.
+pub fn route_summary_with_proxy_lookup(t: &RouteTarget, proxies: &[ProxyConfig]) -> String {
+    match t {
+        RouteTarget::Tun(n) => format!("tun:{n}"),
+        RouteTarget::Device(n) => format!("dev:{n}"),
+        RouteTarget::Proxy(proxy_id) => proxies
+            .iter()
+            .find(|p| p.id == *proxy_id)
+            .map(|p| format!("proxy:{}", p.name))
+            .unwrap_or_else(|| format!("proxy:{proxy_id}")),
+    }
+}
+

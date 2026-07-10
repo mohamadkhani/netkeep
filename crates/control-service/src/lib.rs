@@ -510,6 +510,29 @@ impl<R: Repository> ControlService<R> {
                 }
             }
             ControlRequest::UpsertProxy(proxy) => {
+                // Enforce unique proxy names. Two distinct proxies must not share
+                // a name — names are what the user sees in selectors and the
+                // egress targets column, so duplicates would be ambiguous.
+                let name = proxy.name.trim();
+                if name.is_empty() {
+                    let response = ControlResponse::Error("proxy name must not be empty".to_string());
+                    histogram!("logiguard.control.request.duration", "type" => request_type)
+                        .record(handle_start.elapsed().as_secs_f64());
+                    return response;
+                }
+                let name_taken = self
+                    .repo
+                    .list_proxies()
+                    .iter()
+                    .any(|p| p.id != proxy.id && p.name == proxy.name);
+                if name_taken {
+                    let response = ControlResponse::Error(format!(
+                        "proxy name '{name}' is already in use"
+                    ));
+                    histogram!("logiguard.control.request.duration", "type" => request_type)
+                        .record(handle_start.elapsed().as_secs_f64());
+                    return response;
+                }
                 self.repo.upsert_proxy(&proxy);
                 ControlResponse::Ok
             }

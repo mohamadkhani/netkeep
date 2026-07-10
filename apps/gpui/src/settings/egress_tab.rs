@@ -1,7 +1,7 @@
 //! Egress tab — DataTable delegate for egress route management.
 
 use control_api::{ControlRequest, ControlResponse};
-use core_types::{Egress, RouteTarget};
+use core_types::{Egress, ProxyConfig, RouteTarget};
 use gpui::{
     div, px, App, AppContext as _, Context, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, WeakEntity, Window,
@@ -13,7 +13,7 @@ use crate::colors;
 use crate::components::{action_btn, table_badge};
 use crate::daemon;
 
-use super::helpers::route_summary;
+use super::helpers::route_summary_with_proxy_lookup;
 use super::SettingsState;
 
 // ── Delegate ───────────────────────────────────────────────────────────
@@ -21,6 +21,7 @@ use super::SettingsState;
 /// Table delegate that displays egress routes.
 pub struct EgressDelegate {
     pub egresses: Vec<Egress>,
+    pub proxies: Vec<ProxyConfig>,
     pub state_weak: WeakEntity<SettingsState>,
     pub socket_path: String,
     columns: Vec<Column>,
@@ -29,11 +30,13 @@ pub struct EgressDelegate {
 impl EgressDelegate {
     pub fn new(
         egresses: Vec<Egress>,
+        proxies: Vec<ProxyConfig>,
         state_weak: WeakEntity<SettingsState>,
         socket_path: String,
     ) -> Self {
         Self {
             egresses,
+            proxies,
             state_weak,
             socket_path,
             columns: vec![
@@ -136,8 +139,11 @@ impl TableDelegate for EgressDelegate {
                         .child("default routing")
                         .into_any_element()
                 } else {
-                    let targets: Vec<String> =
-                        egress.targets.iter().map(|t| route_summary(t)).collect();
+                    let targets: Vec<String> = egress
+                        .targets
+                        .iter()
+                        .map(|t| route_summary_with_proxy_lookup(t, &self.proxies))
+                        .collect();
                     div()
                         .text_color(colors::text())
                         .child(targets.join(", "))

@@ -61,7 +61,7 @@ Daemon (Unix socket)
             └──→ cx.observe() triggers sync_tables()
                  │
                  ├── rules_table.update() → RulesDelegate.rules = ...
-                 ├── egress_table.update() → EgressDelegate.egresses = ...
+                 ├── egress_table.update() → EgressDelegate.egresses = ..., EgressDelegate.proxies = ...
                  └── proxy_table.update() → ProxiesDelegate.proxies = ...
 ```
 
@@ -73,7 +73,7 @@ apps/gpui/src/settings/
 ├── rules_tab.rs     # RulesDelegate (TableDelegate for firewall rules)
 ├── egress_tab.rs    # EgressDelegate (TableDelegate for egress routes)
 ├── proxies_tab.rs   # ProxiesDelegate (TableDelegate for proxy configs)
-└── helpers.rs       # fetch_and_apply(), parse_dns_csv(), parse_targets_csv(), route_summary()
+└── helpers.rs       # fetch_and_apply(), parse_dns_csv(), parse_targets_csv(), route_summary(), route_summary_with_proxy_lookup()
 
 apps/gpui/src/components/
 ├── mod.rs           # re-exports all design-system primitives
@@ -136,10 +136,12 @@ pub struct SettingsApp {
 **Cell rendering:**
 - Col 0: Egress name (bold) + ID in parentheses (muted, 10px)
 - Col 1: `table_badge` — SYSTEM/PROXY/VPN/DIRECT
-- Col 2: Comma-separated target list (via `route_summary`)
+- Col 2: Comma-separated target list (via `route_summary_with_proxy_lookup` — displays proxy names, not IDs)
 - Col 3: DNS servers (or `—`)
 - Col 4: `table_badge` — ACTIVE/INACTIVE
 - Col 5: Edit button + Delete button (`action_btn`); hidden for system-default egress
+
+**Proxy name resolution:** `EgressDelegate` holds a `proxies: Vec<ProxyConfig>` field (synced alongside egresses in `sync_tables`) so the Targets column can resolve proxy IDs to human-readable names.
 
 ### ProxiesDelegate
 
