@@ -18,6 +18,18 @@ members = [
 ]
 resolver = "2"
 
+# Redirect every crate that asks for GPUI from upstream zed-industries/zed to
+# our GitHub fork (mohamadkhani/zed), which carries the Wayland
+# `Window::activate_with_token` patch. Without this, gpui-component (which pins
+# gpui to zed-industries/zed) would pull a *second*, unpatched copy of gpui into
+# the graph and the two sources would not unify — breaking our call site. Pin to
+# the same rev as apps/gpui/Cargo.toml.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { git = "https://github.com/mohamadkhani/zed", rev = "c612da6503499b7242ce60e7aa893184d63043ec", version = "=0.2.2" }
+gpui_platform = { git = "https://github.com/mohamadkhani/zed", rev = "c612da6503499b7242ce60e7aa893184d63043ec", version = "=0.1.0" }
+gpui_macros = { git = "https://github.com/mohamadkhani/zed", rev = "c612da6503499b7242ce60e7aa893184d63043ec", version = "=0.1.0" }
+gpui_web = { git = "https://github.com/mohamadkhani/zed", rev = "c612da6503499b7242ce60e7aa893184d63043ec", version = "=0.1.0" }
+
 [workspace.package]
 edition = "2021"
 version = "0.1.0"

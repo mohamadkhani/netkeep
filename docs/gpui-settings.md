@@ -4,10 +4,10 @@ Complete guide to the LogiGuard settings window implementation using gpui-compon
 
 ## Overview
 
-The settings window is a separate GPUI process (`--settings` flag) that manages firewall rules, egress routes, and proxy configurations. It uses gpui-component's `Table` component with custom `TableDelegate` implementations for each tab, and `Dialog` for detail/edit views.
+The settings window runs **in the same GPUI process** as the tray icon (the earlier `--settings` subprocess was removed when the tray was migrated to ksni). It manages firewall rules, egress routes, and proxy configurations using gpui-component's `Table` component with custom `TableDelegate` implementations for each tab, and `Dialog` for detail/edit views.
 
 **Window size:** 960×720 pixels  
-**Entry point:** [`main.rs::run_settings()`](../apps/gpui/src/main.rs)  
+**Entry point:** [`main.rs::run_tray_monitor()`](../apps/gpui/src/main.rs) (opens the window on first "Settings…" tray action; raises it on subsequent clicks)  
 **Module:** [`settings/`](../apps/gpui/src/settings/)
 
 ## Architecture
@@ -15,25 +15,26 @@ The settings window is a separate GPUI process (`--settings` flag) that manages 
 ### Process Model
 
 ```
-Tray icon (main logiguard-gpui process)
+logiguard-gpui (single process)
   │
-  ├── Monitor mode (default): polls daemon, spawns dialog per pending
-  │   - one-window gate is managed in the tray process
-  │   - tray waits on spawned `--pending-id` child and reopens gate on child exit
+  ├── Tray icon (ksni SNI service on a dedicated tokio-runtime thread)
+  │   - menu actions → std::mpsc channel → GPUI main loop
+  │   - "Settings…" → cx.open_window() if no window, else window.activate_with_token(token)
   │
-  └── --settings flag → std::process::Command::spawn()
+  ├── Monitor mode: polls daemon, spawns `--pending-id` dialog per pending decision
+  │
+  └── Settings window (opened in-process, raised on re-click)
        │
-       └── Settings process (independent lifecycle)
+       ├── gpui_component::init(cx)
+       ├── Theme::change(ThemeMode::Dark, None, cx)
+       ├── fonts::apply_design_fonts(cx)
+       │
+       └── cx.open_window(...)
+            │ WindowOptions { size: 960×720, titlebar }
             │
-            ├── gpui_component::init(cx)
-            ├── Theme::change(ThemeMode::Dark, None, cx)
-            ├── fonts::apply_design_fonts(cx)
-            │
-            └── cx.open_window(...)
-                 │ WindowOptions { size: 960×720, titlebar }
-                 │
-                 └── Root::new(SettingsApp, window, cx)  // Required for Dialog
+            └── Root::new(SettingsApp, window, cx)  // Required for Dialog
 ```
+
 
 ### Component Hierarchy
 

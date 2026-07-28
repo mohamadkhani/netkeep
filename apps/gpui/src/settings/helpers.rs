@@ -114,4 +114,3 @@ pub fn route_summary_with_proxy_lookup(t: &RouteTarget, proxies: &[ProxyConfig])
             .unwrap_or_else(|| format!("proxy:{proxy_id}")),
     }
 }
-

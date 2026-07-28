@@ -472,7 +472,7 @@ Prevents remote unlock attempts.
 
 ## Desktop Compatibility
 
-The GPUI tray icon uses `tray-icon` (via `libappindicator`), which implements the freedesktop **StatusNotifierItem** (SNI) / **DBusMenu** protocol. This is the same standard used by KDE Plasma's system tray.
+The GPUI tray icon uses a **vendored, patched `ksni`** (pure-Rust, at `crates/ksni/`), which implements the freedesktop **StatusNotifierItem** (SNI) / **DBusMenu** protocol over D-Bus (via `zbus`). This is the same standard used by KDE Plasma's system tray.
 
 | Desktop Environment | Status | Notes |
 |---|---|---|
@@ -482,20 +482,21 @@ The GPUI tray icon uses `tray-icon` (via `libappindicator`), which implements th
 | **Cinnamon** | Works out of the box | Built-in AppIndicator support |
 | **Sway / Hyprland** | Partial | Requires a tray bar like `waybar` with SNI support |
 
-**Known issue:** `libayatana-appindicator` prints a deprecation warning at startup (`libayatana-appindicator is deprecated. Please use libayatana-appindicator-glib`). This is cosmetic and does not affect functionality. The migration to `libayatana-appindicator-glib` (or the modern `ksni` approach) is tracked as a future enhancement pending upstream crate stabilization.
+**Why ksni (vendored+patched):** the stock crate does not implement the SNI `ProvideXdgActivationToken` D-Bus method. On GNOME/Wayland the AppIndicator shell extension mints an xdg-activation token **inside the compositor** and delivers it to the app via that method immediately before `Activate`; without it the app cannot authoritatively raise its own (non-focused) window, and Mutter falls back to a demand-attention notification. Our fork adds the method and surfaces the token via `Tray::on_activation_token`; the tray stashes it and feeds it to GPUI's `Window::activate_with_token` (GitHub GPUI fork `mohamadkhani/zed`, rev `c612da65`) on "Settings…". See [docs/tray-window-focus-wayland.md](tray-window-focus-wayland.md).
 
-**GTK requirement:** On Linux, `gtk::init()` must be called before creating the tray icon and menu. GPUI does not run a GTK main loop, so the app manually drains pending GTK events via `gtk::events_pending()` / `gtk::main_iteration_do()` on a 50ms polling timer. This ensures the AppIndicator menu updates correctly.
+**No GTK dependency:** the tray no longer links GTK/libappindicator. ksni's service runs on a dedicated current-thread `tokio` runtime in its own thread; menu actions are sent over a std::mpsc channel to the GPUI main loop.
 
 ## Settings Window Architecture
 
-The settings window (`--settings` flag) runs as a separate GPUI process. It uses gpui-component's `Table` and `Dialog` components for data management.
+The settings window runs **in the same GPUI process** as the tray (the earlier `--settings` subprocess was removed). It uses gpui-component's `Table` and `Dialog` components for data management.
 
 ### Process Model
 
 ```
-Tray icon (main process)
-  │ --settings flag → spawn separate process
-  └→ settings process (independent lifecycle)
+Tray icon (main GPUI process)
+  │ ksni tray service (separate thread, tokio runtime)
+  │    └→ menu actions → std::mpsc → GPUI main loop
+  └→ SettingsApp window (opened in-process on first "Settings…"; raised on subsequent clicks)
        │ gpui_component::init()
        │ Root::new(view, window, cx)  // Required for Dialog support
        └→ SettingsApp (Render)

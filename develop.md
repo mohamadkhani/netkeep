@@ -103,18 +103,18 @@ See [`docs/gpui-components.md`](docs/gpui-components.md) → Export Map for the 
 
 ### Linux packages required to build `logiguard-gpui`
 
-Linking the GPUI binary pulls in the system tray stack (`tray-icon` / GTK / `muda`). On Linux you need at least:
+The system tray is a vendored **ksni** crate (pure-Rust SNI over `zbus`) — it links no GTK or libappindicator. The remaining system-library needs come from GPUI itself (font-kit, GPU, input). On Linux you need at least:
 
-- **libappindicator** — AppIndicator / StatusNotifier client library (`-llibappindicator`).
-- **xdotool** — provides **libxdo** (`-lxdo`) on the X11 dependency path.
+- **xdotool** — provides **libxdo** (`-lxdo`) on GPUI's X11 dependency path.
+- A working **D-Bus session bus** (always present on a desktop) — ksni registers the `org.kde.StatusNotifierItem-<PID>-<n>` name on it.
 
 Arch Linux example:
 
 ```bash
-sudo pacman -S libappindicator xdotool
+sudo pacman -S xdotool
 ```
 
-Other distributions use different package names; install the equivalents that ship `libappindicator` and `libxdo`.
+(The earlier `libappindicator` dependency was removed when the tray was migrated to ksni.)
 
 ## 2) Core Architecture
 
@@ -173,7 +173,7 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 - [x] Monitor mode: polls daemon, spawns dialog per pending
 - [x] Connected to daemon via Unix socket
 - [x] Settings window (Rules, Egress, Proxies tabs) using Table + Dialog components
-- [x] Settings runs as separate process (close doesn't kill tray)
+- [x] Settings runs in-process with the tray (close window doesn't kill the tray app)
 - [x] Modular `settings/` directory (mod.rs, rules_tab.rs, egress_tab.rs, proxies_tab.rs, helpers.rs)
 - [x] Add/Edit Egress and Proxy form dialogs with custom modal header/footer
 - [x] Design-system primitives in `components/ds.rs` (badge, chip, dest_text, cidr_picker, label_row)
@@ -199,7 +199,7 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 - [ ] **Stale auto-seeded egresses in existing DB** — users who ran an older daemon have interface egresses stored in their SQLite DB. They need to delete them via the Egresses settings tab or by wiping the DB.
 - [x] **Decision dialog clips content with many egresses** — fixed 2026-05-13. Window height was hardcoded at 580px; replaced with dynamic estimate (~600px base + 28px per egress row, capped at 90% of display). Root container no longer uses `h_full()`/`overflow_hidden()`.
 - [x] **Default route not first in "Route via" selector** — fixed 2026-05-13. Egresses from the daemon are sorted alphabetically by id; `eg-default` can come after `eg-eth0`. Now sorted: system default first, then available, then unavailable.
-- [x] **Settings window doesn't focus when re-clicked from tray** — fixed 2026-05-14. The tray process obtains an xdg-activation token via GTK's `GdkAppLaunchContext` (which carries the user's click serial) and sends it to the settings process via Unix socket. The settings process sets `XDG_ACTIVATION_TOKEN` and calls `activate_window()`. Even when Mutter rejects full activation, it uses the `app_id` to show an urgency/attention indicator. Settings window state is preserved.
+- [x] **Settings window doesn't focus when re-clicked from tray** — fully fixed 2026-07-15. Root cause: GNOME's AppIndicator extension mints the xdg-activation token inside the compositor and delivers it via the SNI `ProvideXdgActivationToken` method, which the old `tray-icon`/libappindicator did not implement. Fix: migrated the tray to a vendored, patched **ksni** (`crates/ksni/`) that implements `ProvideXdgActivationToken`; the token is stashed and fed to GPUI's `Window::activate_with_token` (GitHub GPUI fork `mohamadkhani/zed`, rev `c612da65`). Tray + settings now share one GPUI process. (Earlier notes about GTK `GdkAppLaunchContext` / `XDG_ACTIVATION_TOKEN` over a Unix socket were superseded — an app cannot mint an authoritative token for its own background window.) Details: [`docs/tray-window-focus-wayland.md`](docs/tray-window-focus-wayland.md).
 - [x] **Daemon's own connections attributed to "logiguard-daemon"** — fixed 2026-06-04. The daemon's outbound sockets (DNS forwarder system fallback, TCP relay, proxy connects) were not marked with `SO_MARK`, so nftables queued them to NFQUEUE. The process resolver correctly identified them as belonging to `logiguard-daemon` — but that's the wrong process; the real application that triggered the connection was hidden behind the relay. Fix: added `DAEMON_BYPASS_MARK` (19998, below `ROUTE_MARK_BASE` to avoid triggering policy routing) stamped via `SO_MARK` on all daemon-originated sockets. A new nftables `output_early` accept rule for this mark bypasses NFQUEUE entirely. See [`docs/nfqueue-packet-interception.md`](docs/nfqueue-packet-interception.md) → Daemon bypass mark.
 
 ## 5) Definition of Done (MVP)
@@ -273,7 +273,7 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 - [x] Routed Tun: daemon-managed `ip rule` / fwmark tables
 
 ### 2026-05-09/10 (settings window + proxy architecture)
-- [x] Settings window: Rules, Egress, Proxies tabs; `--settings` flag; single-instance guard
+- [x] Settings window: Rules, Egress, Proxies tabs; in-process with the tray; single-instance guard
 - [x] `ProxyConfig`, `ProxyProtocol`, `ProxyAuth`, `EgressTarget` types
 - [x] `RouteTarget::Proxy(id)` replacing `RouteTarget::Socks`; proxy CRUD in daemon + CLI
 
@@ -460,7 +460,7 @@ Three UI polish fixes in one session:
 
 - [x] **Default route is first and selected in "Route via" selector.** Egresses from the daemon were sorted alphabetically by id (`eg-default` could come after `eg-eth0`), and `selected_egress_index` was always 0. After `fetch_egresses()`, the list is now sorted: system default first, then available egresses, then unavailable — so the Default Route chip is always at position 0 and selected by default. File: `apps/gpui/src/main.rs`.
 
-- [x] **Settings window focuses on re-click from tray (Wayland/GNOME).** `activate_window()` alone is a no-op on GNOME/Wayland because Mutter rejects activation tokens from processes without a recent user serial. The tray process (which has GTK with the user's click serial) now obtains an xdg-activation token via `GdkAppLaunchContext` / `get_startup_notify_id()` and sends it to the settings process via Unix socket. The settings process sets `XDG_ACTIVATION_TOKEN` and calls `activate_window()`. Even when full activation is rejected, Mutter uses the `app_id` to show an urgency/attention indicator. Settings window state is preserved.
+- [x] **Settings window focuses on re-click from tray (Wayland/GNOME).** Fully fixed 2026-07-15: GNOME's AppIndicator extension mints the xdg-activation token in the compositor and delivers it via the SNI `ProvideXdgActivationToken` method; the old `tray-icon`/libappindicator didn't implement it. Migrated the tray to a vendored, patched **ksni** (`crates/ksni/`) that implements that method, stashes the token, and feeds it to GPUI's `Window::activate_with_token` (GitHub fork `mohamadkhani/zed`, rev `c612da65`). Tray + settings share one GPUI process; the `--settings` subprocess and settings_ipc socket are gone. (The earlier GTK `get_startup_notify_id` / `XDG_ACTIVATION_TOKEN`-over-socket approach was superseded — an app can't mint an authoritative token for its own background window.) Details: [`docs/tray-window-focus-wayland.md`](docs/tray-window-focus-wayland.md).
 - **Files:** `apps/gpui/src/main.rs`.
 
 ### 2026-05-14 (session 26 — process resolver hardening + DB path + initial egress seeding)
@@ -780,7 +780,7 @@ Solution: DNS forwarder on `127.0.0.1:53` that intercepts DNS queries, identifie
   - Filters for `dport == 53`
   - Writes to BPF HashMap: `(src_ip, src_port) → (pid, comm, domain)`
   - Userspace loader: `aya::Ebpf`, attach kprobe, expose `DnsTracker::lookup(src_ip, src_port) → Option<DnsQueryInfo>`
-  - Build: nightly + `bpfel-unknown-none` target + `bpf-linker`
+  - Build: stable toolchain + `bpfel-unknown-none` target + `bpf-linker`, using `-Z build-std=core` unlocked via `RUSTC_BOOTSTRAP=1` (no nightly)
 
 - [x] **DNS forwarder** (`crates/dns-tracker/src/forwarder.rs`):
   - UDP server on `127.0.0.1:53`

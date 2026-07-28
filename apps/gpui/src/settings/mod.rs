@@ -185,15 +185,16 @@ impl SettingsApp {
             let egress_test = this.state.read(cx).egress_test_request.clone();
             if let Some(egress) = egress_test {
                 // Find the first proxy target in the egress
-                let proxy_config = egress
-                    .targets
-                    .iter()
-                    .find_map(|t| match t {
-                        core_types::RouteTarget::Proxy(pid) => {
-                            this.state.read(cx).proxies.iter().find(|p| p.id == *pid).cloned()
-                        }
-                        _ => None,
-                    });
+                let proxy_config = egress.targets.iter().find_map(|t| match t {
+                    core_types::RouteTarget::Proxy(pid) => this
+                        .state
+                        .read(cx)
+                        .proxies
+                        .iter()
+                        .find(|p| p.id == *pid)
+                        .cloned(),
+                    _ => None,
+                });
                 let _ = cx.update_entity(&this.state, |s, _cx| {
                     s.egress_test_request = None;
                 });
@@ -1652,7 +1653,7 @@ impl SettingsApp {
                 .on_ok(move |_, _, cx| do_save(cx))
         });
     }
-/// Open the proxy connectivity test dialog.
+    /// Open the proxy connectivity test dialog.
     fn open_proxy_test_dialog(
         &mut self,
         proxy: ProxyConfig,
@@ -1727,48 +1728,48 @@ impl SettingsApp {
                         .text_size(px(11.))
                         .child("Not tested yet")
                         .into_any_element(),
-                Some((true, ms, _)) => div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(colors::green())
-                            .child("✓"),
-                    )
-                    .child(
-                        div()
-                            .text_color(colors::green())
-                            .text_size(px(12.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(format!("{ms} ms")),
-                    )
-                    .child(
-                        div()
-                            .text_color(colors::muted())
-                            .text_size(px(11.))
-                            .child("HTTP connection OK"),
-                    )
-                    .into_any_element(),
-                Some((false, _, err)) => div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(colors::error())
-                            .child("✗"),
-                    )
-                    .child(
-                        div()
-                            .text_color(colors::error())
-                            .text_size(px(11.))
-                            .child(err.clone()),
-                    )
-                    .into_any_element(),
-            }
+                    Some((true, ms, _)) => div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(colors::green())
+                                .child("✓"),
+                        )
+                        .child(
+                            div()
+                                .text_color(colors::green())
+                                .text_size(px(12.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(format!("{ms} ms")),
+                        )
+                        .child(
+                            div()
+                                .text_color(colors::muted())
+                                .text_size(px(11.))
+                                .child("HTTP connection OK"),
+                        )
+                        .into_any_element(),
+                    Some((false, _, err)) => div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(colors::error())
+                                .child("✗"),
+                        )
+                        .child(
+                            div()
+                                .text_color(colors::error())
+                                .text_size(px(11.))
+                                .child(err.clone()),
+                        )
+                        .into_any_element(),
+                }
             };
 
             // DNS result display
@@ -1798,48 +1799,48 @@ impl SettingsApp {
                         .text_size(px(11.))
                         .child("Not tested yet")
                         .into_any_element(),
-                Some((true, ms, _)) => div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(colors::green())
-                            .child("✓"),
-                    )
-                    .child(
-                        div()
-                            .text_color(colors::green())
-                            .text_size(px(12.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(format!("{ms} ms")),
-                    )
-                    .child(
-                        div()
-                            .text_color(colors::muted())
-                            .text_size(px(11.))
-                            .child("DNS resolution OK"),
-                    )
-                    .into_any_element(),
-                Some((false, _, err)) => div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(colors::error())
-                            .child("✗"),
-                    )
-                    .child(
-                        div()
-                            .text_color(colors::error())
-                            .text_size(px(11.))
-                            .child(err.clone()),
-                    )
-                    .into_any_element(),
-            }
+                    Some((true, ms, _)) => div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(colors::green())
+                                .child("✓"),
+                        )
+                        .child(
+                            div()
+                                .text_color(colors::green())
+                                .text_size(px(12.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(format!("{ms} ms")),
+                        )
+                        .child(
+                            div()
+                                .text_color(colors::muted())
+                                .text_size(px(11.))
+                                .child("DNS resolution OK"),
+                        )
+                        .into_any_element(),
+                    Some((false, _, err)) => div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(colors::error())
+                                .child("✗"),
+                        )
+                        .child(
+                            div()
+                                .text_color(colors::error())
+                                .text_size(px(11.))
+                                .child(err.clone()),
+                        )
+                        .into_any_element(),
+                }
             };
 
             // Clones for async test callbacks
@@ -1920,10 +1921,7 @@ impl SettingsApp {
                                         .gap(px(8.))
                                         .items_center()
                                         .child(
-                                            v_flex()
-                                                .flex_1()
-                                                .gap(px(4.))
-                                                .child(Input::new(&url_c)),
+                                            v_flex().flex_1().gap(px(4.)).child(Input::new(&url_c)),
                                         )
                                         .child(
                                             action_btn(
@@ -1931,63 +1929,67 @@ impl SettingsApp {
                                                 "Test HTTP",
                                                 colors::primary(),
                                             )
-                                            .on_click(move |_, _, cx| {
-                                                let url = url_http.read(cx).value().to_string();
-                                                let hr = http_r_btn.clone();
-                                                let hl = http_loading_btn.clone();
-                                                let sock = sock_http.clone();
-                                                let pid = pid_http.clone();
-                                                let sw = state_w_http.clone();
-                                                *hl.lock().unwrap() = true;
-                                                if let Some(st) = sw.upgrade() {
-                                                    let _ = cx.update_entity(&st, |_, cx| { cx.notify(); });
-                                                }
-                                                cx.spawn(async move |cx| {
-                                                    let res = cx
-                                                        .background_executor()
-                                                        .spawn(async move {
-                                                            crate::daemon::send_request(
+                                            .on_click(
+                                                move |_, _, cx| {
+                                                    let url = url_http.read(cx).value().to_string();
+                                                    let hr = http_r_btn.clone();
+                                                    let hl = http_loading_btn.clone();
+                                                    let sock = sock_http.clone();
+                                                    let pid = pid_http.clone();
+                                                    let sw = state_w_http.clone();
+                                                    *hl.lock().unwrap() = true;
+                                                    if let Some(st) = sw.upgrade() {
+                                                        let _ = cx.update_entity(&st, |_, cx| {
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                    cx.spawn(async move |cx| {
+                                                        let res = cx
+                                                            .background_executor()
+                                                            .spawn(async move {
+                                                                crate::daemon::send_request(
                                                                 &sock,
                                                                 &ControlRequest::TestProxyHttp {
                                                                     proxy_id: pid,
                                                                     url,
                                                                 },
                                                             )
-                                                        })
-                                                        .await;
-                                                    let result = match res {
-                                                        Ok(ControlResponse::ProxyTestResult {
-                                                            success,
-                                                            latency_ms,
-                                                            error,
-                                                        }) => (
-                                                            success,
-                                                            latency_ms,
-                                                            error.unwrap_or_default(),
-                                                        ),
-                                                        Ok(ControlResponse::Error(msg)) => {
-                                                            (false, 0, msg)
+                                                            })
+                                                            .await;
+                                                        let result = match res {
+                                                            Ok(
+                                                                ControlResponse::ProxyTestResult {
+                                                                    success,
+                                                                    latency_ms,
+                                                                    error,
+                                                                },
+                                                            ) => (
+                                                                success,
+                                                                latency_ms,
+                                                                error.unwrap_or_default(),
+                                                            ),
+                                                            Ok(ControlResponse::Error(msg)) => {
+                                                                (false, 0, msg)
+                                                            }
+                                                            Err(e) => (false, 0, e.to_string()),
+                                                            _ => (
+                                                                false,
+                                                                0,
+                                                                "unexpected response".into(),
+                                                            ),
+                                                        };
+                                                        *hr.lock().unwrap() = Some(result);
+                                                        *hl.lock().unwrap() = false;
+                                                        if let Some(st) = sw.upgrade() {
+                                                            let _ =
+                                                                cx.update_entity(&st, |_, cx| {
+                                                                    cx.notify();
+                                                                });
                                                         }
-                                                        Err(e) => (false, 0, e.to_string()),
-                                                        _ => (
-                                                            false,
-                                                            0,
-                                                            "unexpected response".into(),
-                                                        ),
-                                                    };
-                                                    *hr.lock().unwrap() = Some(result);
-                                                    *hl.lock().unwrap() = false;
-                                                    if let Some(st) = sw.upgrade() {
-                                                        let _ = cx.update_entity(
-                                                            &st,
-                                                            |_, cx| {
-                                                                cx.notify();
-                                                            },
-                                                        );
-                                                    }
-                                                })
-                                                .detach();
-                                            }),
+                                                    })
+                                                    .detach();
+                                                },
+                                            ),
                                         ),
                                 )
                                 .child(http_display),
@@ -2013,64 +2015,68 @@ impl SettingsApp {
                                                 "Test DNS",
                                                 colors::primary(),
                                             )
-                                            .on_click(move |_, _, cx| {
-                                                let domain =
-                                                    domain_dns.read(cx).value().to_string();
-                                                let dr = dns_r_btn.clone();
-                                                let dl = dns_loading_btn.clone();
-                                                let sock = sock_dns.clone();
-                                                let pid = pid_dns.clone();
-                                                let sw = state_w_dns.clone();
-                                                *dl.lock().unwrap() = true;
-                                                if let Some(st) = sw.upgrade() {
-                                                    let _ = cx.update_entity(&st, |_, cx| { cx.notify(); });
-                                                }
-                                                cx.spawn(async move |cx| {
-                                                    let res = cx
-                                                        .background_executor()
-                                                        .spawn(async move {
-                                                            crate::daemon::send_request(
-                                                                &sock,
-                                                                &ControlRequest::TestProxyDns {
-                                                                    proxy_id: pid,
-                                                                    domain,
-                                                                },
-                                                            )
-                                                        })
-                                                        .await;
-                                                    let result = match res {
-                                                        Ok(ControlResponse::ProxyTestResult {
-                                                            success,
-                                                            latency_ms,
-                                                            error,
-                                                        }) => (
-                                                            success,
-                                                            latency_ms,
-                                                            error.unwrap_or_default(),
-                                                        ),
-                                                        Ok(ControlResponse::Error(msg)) => {
-                                                            (false, 0, msg)
-                                                        }
-                                                        Err(e) => (false, 0, e.to_string()),
-                                                        _ => (
-                                                            false,
-                                                            0,
-                                                            "unexpected response".into(),
-                                                        ),
-                                                    };
-                                                    *dr.lock().unwrap() = Some(result);
-                                                    *dl.lock().unwrap() = false;
+                                            .on_click(
+                                                move |_, _, cx| {
+                                                    let domain =
+                                                        domain_dns.read(cx).value().to_string();
+                                                    let dr = dns_r_btn.clone();
+                                                    let dl = dns_loading_btn.clone();
+                                                    let sock = sock_dns.clone();
+                                                    let pid = pid_dns.clone();
+                                                    let sw = state_w_dns.clone();
+                                                    *dl.lock().unwrap() = true;
                                                     if let Some(st) = sw.upgrade() {
-                                                        let _ = cx.update_entity(
-                                                            &st,
-                                                            |_, cx| {
-                                                                cx.notify();
-                                                            },
-                                                        );
+                                                        let _ = cx.update_entity(&st, |_, cx| {
+                                                            cx.notify();
+                                                        });
                                                     }
-                                                })
-                                                .detach();
-                                            }),
+                                                    cx.spawn(async move |cx| {
+                                                        let res = cx
+                                                            .background_executor()
+                                                            .spawn(async move {
+                                                                crate::daemon::send_request(
+                                                                    &sock,
+                                                                    &ControlRequest::TestProxyDns {
+                                                                        proxy_id: pid,
+                                                                        domain,
+                                                                    },
+                                                                )
+                                                            })
+                                                            .await;
+                                                        let result = match res {
+                                                            Ok(
+                                                                ControlResponse::ProxyTestResult {
+                                                                    success,
+                                                                    latency_ms,
+                                                                    error,
+                                                                },
+                                                            ) => (
+                                                                success,
+                                                                latency_ms,
+                                                                error.unwrap_or_default(),
+                                                            ),
+                                                            Ok(ControlResponse::Error(msg)) => {
+                                                                (false, 0, msg)
+                                                            }
+                                                            Err(e) => (false, 0, e.to_string()),
+                                                            _ => (
+                                                                false,
+                                                                0,
+                                                                "unexpected response".into(),
+                                                            ),
+                                                        };
+                                                        *dr.lock().unwrap() = Some(result);
+                                                        *dl.lock().unwrap() = false;
+                                                        if let Some(st) = sw.upgrade() {
+                                                            let _ =
+                                                                cx.update_entity(&st, |_, cx| {
+                                                                    cx.notify();
+                                                                });
+                                                        }
+                                                    })
+                                                    .detach();
+                                                },
+                                            ),
                                         ),
                                 )
                                 .child(dns_display),
@@ -2083,9 +2089,7 @@ impl SettingsApp {
         });
     }
 
-
-
-// ── Render ─────────────────────────────────────────────────────────────
+    // ── Render ─────────────────────────────────────────────────────────────
 }
 
 impl Render for SettingsApp {

@@ -12,7 +12,7 @@ sudo pacman -U logiguard-*.pkg.tar.zst
 
 Requirements: `base-devel` and the `makedepends` from the PKGBUILD (`rustup`, `clang`, `llvm`, …).
 
-The build installs a **nightly** Rust toolchain in an isolated directory, compiles the eBPF DNS tracker (`cargo xtask build-ebpf-release`), then builds the workspace.
+The build installs a single **stable** Rust toolchain (pinned to 1.96.1 via `rust-toolchain.toml`) in a build-only directory and uses it for everything: the workspace, `bpf-linker`, and the eBPF DNS tracker. The eBPF step's `-Z build-std=core` is unlocked on stable via `RUSTC_BOOTSTRAP=1`, so no nightly toolchain is needed.
 
 ## After install
 

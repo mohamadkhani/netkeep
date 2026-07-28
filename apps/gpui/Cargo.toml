@@ -5,16 +5,28 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "wayland", "x11"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+# GPUI from our GitHub fork of zed-industries/zed. The fork tracks upstream
+# main and carries the Wayland patch `Window::activate_with_token(&str)`
+# (xdg_activation_v1 with an externally-minted token — consumed by the ksni
+# tray) on the `logiguard/activate-with-token` branch. We pin to a rev so the
+# build is reproducible; bump the rev when syncing the fork forward.
+# Upstreaming plan: open a PR from mohamadkhani/zed:logiguard/activate-with-token
+# to zed-industries/zed (see discussion #61820). The patch itself lives as a
+# commit on that fork branch — re-export with `git format-patch` when opening the PR.
+# See docs/tray-window-focus-wayland.md.
+gpui = { git = "https://github.com/mohamadkhani/zed", rev = "c612da6503499b7242ce60e7aa893184d63043ec" }
+gpui_platform = { git = "https://github.com/mohamadkhani/zed", rev = "c612da6503499b7242ce60e7aa893184d63043ec", features = ["font-kit", "wayland", "x11"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "accb9616263b" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "accb9616263b" }
 anyhow = "1.0"
 core-types = { path = "../../crates/core-types" }
 control-api = { path = "../../crates/control-api" }
 serde_json = "1"
-tray-icon = "0.24.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# tray-icon/muda need GTK initialized on Linux before Menu::new / TrayIconBuilder.
-gtk = "0.18"
+# SNI system tray. Vendored fork (crates/ksni) adds the
+# ProvideXdgActivationToken D-Bus method so the GNOME AppIndicator extension
+# can hand us a compositor-minted xdg-activation token for authoritative
+# window raise. See docs/tray-window-focus-wayland.md.
+ksni = { path = "../../crates/ksni" }
+tokio = { version = "1", features = ["rt", "macros", "sync"] }

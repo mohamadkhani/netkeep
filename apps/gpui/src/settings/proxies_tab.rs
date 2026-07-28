@@ -229,8 +229,8 @@ impl TableDelegate for ProxiesDelegate {
                     )
                     // Delete
                     .child(
-                        action_btn(format!("px-del-{pid_del}"), "Del", colors::error())
-                            .on_click(move |_, _, cx| {
+                        action_btn(format!("px-del-{pid_del}"), "Del", colors::error()).on_click(
+                            move |_, _, cx| {
                                 let pid_req = pid_del.clone();
                                 let pid_cmp = pid_del.clone();
                                 let socket_path = sock_del.clone();
@@ -272,7 +272,8 @@ impl TableDelegate for ProxiesDelegate {
                                     }
                                 })
                                 .detach();
-                            }),
+                            },
+                        ),
                     )
                     .into_any_element()
             }

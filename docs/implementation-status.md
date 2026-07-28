@@ -332,9 +332,9 @@ Four improvements to the settings window applied to both `design/settings_window
 - **Files:** `apps/gpui/src/main.rs`.
 
 **Bug 19:** Settings window doesn't focus when "Settings…" is re-clicked from tray on GNOME/Wayland.
-- **Root cause:** GPUI's `activate_window()` requests an `xdg-activation` token from the compositor, but Mutter rejects it because the settings process has no recent user-interaction serial (the click happened in the tray process, a different Wayland surface). The activation is silently ignored.
-- **Fix:** The tray process (which has GTK initialized with the user's click serial) obtains an xdg-activation token via `GdkAppLaunchContext::startup_notify_id()` and sends it to the settings process via Unix socket. The settings process sets `XDG_ACTIVATION_TOKEN` and calls `activate_window()`. Even when Mutter rejects full activation, it uses the `app_id` to show an urgency/attention indicator in the taskbar. Settings window state is fully preserved.
-- **Files:** `apps/gpui/src/main.rs`.
+- **Root cause (definitive):** GNOME's AppIndicator shell extension mints the xdg-activation token **inside the compositor** and delivers it to the app via the SNI D-Bus method `ProvideXdgActivationToken` immediately before `Activate`. The previous `tray-icon`/libappindicator did **not** implement that method, so the authoritative token was never delivered; the app's own self-minted tokens were rejected by Mutter's `token_can_activate`, which only falls back to `set_demands_attention` (the clickable popup). Earlier root-cause notes attributing this to cross-process wl_display boundaries or app-minted `startup_notify_id` tokens were incorrect — an app cannot mint an authoritative token for raising its own background window; only the compositor can.
+- **Fix (2026-07-15, verified working):** Replaced `tray-icon`/libappindicator/GTK with a vendored, patched **ksni** (`crates/ksni/`) that implements `ProvideXdgActivationToken`. The tray stashes the delivered token and feeds it to GPUI's `Window::activate_with_token` (GitHub GPUI fork `mohamadkhani/zed`, rev `c612da65`). Tray + settings now run in one GPUI process; the `--settings` subprocess and the settings_ipc Unix socket were removed.
+- **Files:** `crates/ksni/`, `apps/gpui/src/tray.rs`, `apps/gpui/src/main.rs`. Details: [docs/tray-window-focus-wayland.md](tray-window-focus-wayland.md).
 
 ## Bug Fixes (routing, 2026-05-09)
 
@@ -584,7 +584,7 @@ Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 
 8. **Per-egress DNS in UI:** DNS servers are persisted and can be edited manually in SQLite, but GPUI DNS management views are not yet implemented.
 
-9. **libayatana-appindicator deprecation warning:** The system tray prints a startup warning (`libayatana-appindicator is deprecated. Please use libayatana-appindicator-glib in newly written code.`). This is cosmetic — the tray works correctly. Migration to the newer library or the `ksni` approach is blocked on upstream Rust crate stabilization.
+9. **libayatana-appindicator deprecation warning:** *Resolved (2026-07-15).* The system tray no longer uses libappindicator — it was replaced with a vendored, patched `ksni` (pure-Rust SNI over `zbus`), which also fixed the GNOME/Wayland tray→window focus issue (Bug 19) by implementing `ProvideXdgActivationToken`. No deprecation warning is printed and there is no GTK dependency on the tray path.
 
 10. **Fake DNS from throne/VPN:** When throne's TUN mode returns the same fake IP (e.g. `10.10.34.36`) for all blocked domains, the 1:1 `SniDnsCache` cannot distinguish them. The DNS forwarder (planned) resolves this by intercepting DNS queries and resolving through the correct egress before the app receives any IP.
 

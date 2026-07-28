@@ -4,7 +4,7 @@
 
 pkgname=logiguard
 pkgver=0.1.0
-pkgrel=2
+pkgrel=3
 pkgdesc='Linux desktop network flow authorization (daemon, CLI, GPUI tray)'
 arch=('x86_64')
 url='https://github.com/mohammadreza-khani/logiguard'
@@ -12,13 +12,12 @@ license=('Apache')
 depends=(
   'gcc-libs'
   'glibc'
-  'gtk3'
+  'gtk-update-icon-cache'  # post-install icon cache refresh (standalone pkg, not gtk3)
   'hicolor-icon-theme'
-  'libappindicator-gtk3'
   'libxkbcommon'
   'xdotool'
 )
-makedepends=('rustup' 'pkgconf' 'clang' 'llvm' 'rsync')
+makedepends=('pkgconf' 'clang' 'llvm' 'rsync')
 optdepends=(
   'vulkan-mesa-layers: GPU stack for GPUI on some setups'
   'systemd-resolved: disable stub listener if using LOGIGUARD_DNS_FORWARDER on port 53'
@@ -37,28 +36,30 @@ prepare() {
   rsync -a --delete \
     --exclude target \
     --exclude .git \
+    --exclude packaging/archlinux/src \
+    --exclude packaging/archlinux/pkg \
     "${_root}/" "${srcdir}/build/"
 
-  # Isolated toolchain for makepkg (nightly drives cargo; pinned 1.95.0 is minimal-only).
-  export RUSTUP_HOME="${srcdir}/.rustup"
+  # Isolated toolchain for makepkg. The single stable toolchain (pinned via
+  # rust-toolchain.toml = 1.96.1) builds everything: the workspace, bpf-linker,
+  # and the eBPF programs. The eBPF step uses -Z build-std=core (unstable)
+  # unlocked on stable via RUSTC_BOOTSTRAP=1 — no nightly toolchain required.
   export CARGO_HOME="${srcdir}/.cargo"
-  mkdir -p "${RUSTUP_HOME}" "${CARGO_HOME}"
+  mkdir -p "${CARGO_HOME}"
 
-  rustup toolchain install nightly --profile minimal --component rust-src
-  rustup target add bpfel-unknown-none --toolchain nightly
-  cargo +nightly install bpf-linker --root "${CARGO_HOME}" --locked 2>/dev/null \
-    || cargo +nightly install bpf-linker --root "${CARGO_HOME}"
+  cargo install bpf-linker --root "${CARGO_HOME}" --locked 2>/dev/null \
+    || cargo install bpf-linker --root "${CARGO_HOME}"
 }
 
 build() {
   cd "${srcdir}/build"
-  export RUSTUP_HOME="${srcdir}/.rustup"
   export CARGO_HOME="${srcdir}/.cargo"
   export PATH="${CARGO_HOME}/bin:${PATH}"
 
   # eBPF object must exist before dns-tracker embeds it via include_bytes!.
-  RUSTUP_TOOLCHAIN=nightly cargo xtask build-ebpf-release
-  RUSTUP_TOOLCHAIN=nightly cargo build --workspace --release --locked
+  # RUSTC_BOOTSTRAP=1 unlocks -Z build-std=core on the stable toolchain.
+  RUSTC_BOOTSTRAP=1 cargo xtask build-ebpf-release
+  cargo build --workspace --release --locked
 }
 
 package() {

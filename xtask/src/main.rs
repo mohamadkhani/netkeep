@@ -32,8 +32,13 @@ fn build_ebpf(release: bool) {
     let bins = ["dns-tracker-ebpf", "sock-tracker-ebpf"];
 
     for bin in &bins {
+        // eBPF targets `bpfel-unknown-none` (Tier 3) with `-Z build-std=core`.
+        // We build on the stable toolchain by setting RUSTC_BOOTSTRAP=1, which
+        // unlocks the unstable `-Z build-std` flag on stable — no nightly needed.
+        // `bpfel-unknown-none` has no prebuilt std artifacts, so build-std
+        // compiles core from source (requires the `rust-src` component).
         let mut cmd = Command::new("cargo");
-        cmd.arg("+nightly")
+        cmd.env("RUSTC_BOOTSTRAP", "1")
             .arg("build")
             .arg("--target")
             .arg("bpfel-unknown-none")
