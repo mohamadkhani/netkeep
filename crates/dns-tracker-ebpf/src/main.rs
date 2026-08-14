@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_probe_read_kernel},
+    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_kernel, gen::bpf_get_current_comm},
     macros::{kprobe, map},
     maps::{HashMap, PerCpuArray},
     programs::ProbeContext,
@@ -93,14 +93,21 @@ unsafe fn try_dns_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
     let event = &mut *event;
 
     event.pid = (bpf_get_current_pid_tgid() >> 32) as u32;
-    event.comm = bpf_get_current_comm().map_err(|_| ())?;
+    // Raw helper instead of aya's wrapper: the wrapper zero-inits a 16-byte
+    // stack buffer, which lowers to llvm.memset and bpf-linker >= 0.11
+    // rejects it. Writing directly into the per-CPU map value avoids that.
+    // SAFETY: event.comm is [u8; 16], passed with its exact size.
+    if unsafe { bpf_get_current_comm(event.comm.as_mut_ptr() as *mut _, 16) } != 0 {
+        return Err(());
+    }
 
     // arg1 = struct msghdr *msg
     let msg_ptr: *const u8 = ctx.arg::<*const u8>(1).ok_or(())?;
 
-    // Clear domain buffer.
+    // Clear domain buffer. Volatile writes: prevents LLVM from recognizing
+    // the loop as memset, which bpf-linker cannot lower on no_std eBPF.
     for b in event.domain.iter_mut() {
-        *b = 0;
+        unsafe { core::ptr::write_volatile(b, 0) };
     }
 
     // Parse DNS QNAME from first iovec's payload.

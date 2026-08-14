@@ -114,7 +114,7 @@ unsafe fn try_trace_tcp_state(ctx: &TracePointContext) -> Result<(), ()> {
         let sport: u16 = ctx.read_at(TP_OFF_SPORT).map_err(|_| ())?;
 
         let mut key = SockKey {
-            src_ip: [0u8; 16],
+            src_ip: zeroed_ip16(),
             src_port: sport,
             protocol: IPPROTO_TCP as u8,
             _pad: 0,
@@ -157,7 +157,7 @@ unsafe fn try_trace_tcp_state(ctx: &TracePointContext) -> Result<(), ()> {
         let sport: u16 = ctx.read_at(TP_OFF_SPORT).map_err(|_| ())?;
 
         let mut key = SockKey {
-            src_ip: [0u8; 16],
+            src_ip: zeroed_ip16(),
             src_port: sport,
             protocol: IPPROTO_TCP as u8,
             _pad: 0,
@@ -220,7 +220,7 @@ unsafe fn try_sock_udp_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
         bpf_probe_read_kernel(sk_ptr.add(SKC_NUM_OFF) as *const u16).map_err(|_| ())?;
 
     let mut key = SockKey {
-        src_ip: [0u8; 16],
+        src_ip: zeroed_ip16(),
         src_port,
         protocol: IPPROTO_UDP as u8,
         _pad: 0,
@@ -284,7 +284,7 @@ unsafe fn try_sock_udp_unhash(ctx: &ProbeContext) -> Result<(), ()> {
         bpf_probe_read_kernel(sk_ptr.add(SKC_NUM_OFF) as *const u16).map_err(|_| ())?;
 
     let mut key = SockKey {
-        src_ip: [0u8; 16],
+        src_ip: zeroed_ip16(),
         src_port,
         protocol: IPPROTO_UDP as u8,
         _pad: 0,
@@ -308,6 +308,21 @@ unsafe fn try_sock_udp_unhash(ctx: &ProbeContext) -> Result<(), ()> {
 
     let _ = SOCK_EVENTS.remove(&key);
     Ok(())
+}
+
+/// Build a zeroed 16-byte IP array via volatile writes: a plain `[0u8; 16]`
+/// literal lowers to llvm.memset, which bpf-linker >= 0.11 rejects on the
+/// no_std eBPF target.
+#[inline(always)]
+fn zeroed_ip16() -> [u8; 16] {
+    let mut buf = core::mem::MaybeUninit::<[u8; 16]>::uninit();
+    // SAFETY: we initialize every byte below before reading.
+    let p = buf.as_mut_ptr() as *mut u8;
+    for i in 0..16 {
+        unsafe { core::ptr::write_volatile(p.add(i), 0) };
+    }
+    // SAFETY: [u8; 16] has no invalid bit patterns and all bytes are set.
+    unsafe { buf.assume_init() }
 }
 
 #[panic_handler]

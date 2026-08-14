@@ -47,8 +47,11 @@ prepare() {
   export CARGO_HOME="${srcdir}/.cargo"
   mkdir -p "${CARGO_HOME}"
 
-  cargo install bpf-linker --root "${CARGO_HOME}" --locked 2>/dev/null \
-    || cargo install bpf-linker --root "${CARGO_HOME}"
+  # bpf-linker 0.11 regressed: it rejects code that lowers to `memset`
+  # libcalls ("A call to built-in function 'memset' is not supported"),
+  # where 0.10.x inline-compiles them. Pin until upstream fixes it.
+  cargo install bpf-linker --version 0.10.4 --root "${CARGO_HOME}" --locked 2>/dev/null \
+    || cargo install bpf-linker --version 0.10.4 --root "${CARGO_HOME}"
 }
 
 build() {
