@@ -1251,6 +1251,11 @@ fn main() {
                 }
                 Ok(mut processor) => {
                     println!("nfqueue processor running on queue {queue_num}");
+                    // Interception is live: reflect it in Health so clients
+                    // (e.g. the tray's startup sync) see the enabled state.
+                    if let Ok(mut svc) = service.lock() {
+                        svc.set_nfqueue_state(true, Some(queue_num));
+                    }
                     let bs_for_nfqueue = Arc::clone(&bs);
                     let route_mark_base_for_nfqueue = route_mark_base;
                     let pr_for_nfqueue = proxy_redirects_for_recovery.clone();

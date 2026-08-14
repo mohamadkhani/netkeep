@@ -108,6 +108,14 @@ impl<R: Repository> ControlService<R> {
         }
     }
 
+    /// Report the actual interception state. The daemon calls this after the
+    /// NFQUEUE processor starts (LOGIGUARD_NFQUEUE set) so Health reflects
+    /// reality for clients like the tray, instead of the default `false`.
+    pub fn set_nfqueue_state(&mut self, enabled: bool, nfqueue_num: Option<u16>) {
+        self.nfqueue_enabled.store(enabled, Ordering::Relaxed);
+        self.nfqueue_num = nfqueue_num;
+    }
+
     /// Set the function used to install/retrieve fwmarks for route targets.
     /// Must be called before the NFQUEUE processor starts.
     pub fn set_route_mark_fn(&mut self, f: impl Fn(&RouteTarget) -> Option<u32> + Send + 'static) {
