@@ -464,6 +464,7 @@ impl SettingsApp {
                         process_exe: None,
                         destination,
                         egress_id,
+                        position: 0,
                     };
                     let to_send = rule.clone();
                     let sock_c = sock.clone();
@@ -491,7 +492,17 @@ impl SettingsApp {
                                             }
                                             s.status = Some("Rule updated.".into());
                                         } else {
-                                            s.rules.push(rule);
+                                            // The daemon seeds the rule's
+                                            // position via the rank ladder;
+                                            // re-fetch so the table shows the
+                                            // real evaluation order instead of
+                                            // a naive append.
+                                            let weak = st.downgrade();
+                                            let sock = s.socket_path.clone();
+                                            cx.spawn(async move |_this, cx| {
+                                                fetch_and_apply(weak, &sock, cx).await;
+                                            })
+                                            .detach();
                                             s.status = Some("Rule added.".into());
                                         }
                                         s.load_generation = s.load_generation.saturating_add(1);

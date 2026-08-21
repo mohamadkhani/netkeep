@@ -45,7 +45,7 @@ impl RulesDelegate {
                 Column::new("duration", "Duration").width(px(80.)),
                 Column::new("action", "Action").width(px(80.)),
                 Column::new("route", "Route").width(px(90.)),
-                Column::new("controls", "").width(px(150.)).resizable(false),
+                Column::new("controls", "").width(px(215.)).resizable(false),
             ],
         }
     }
@@ -71,7 +71,7 @@ impl TableDelegate for RulesDelegate {
         _window: &mut Window,
         _cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let Some(rule) = self.rules.get(row_ix) else {
+        let Some(rule) = self.rules.get(row_ix).cloned() else {
             return h_flex().into_any_element();
         };
 
@@ -181,8 +181,16 @@ impl TableDelegate for RulesDelegate {
                     })
                     .into_any_element()
             }
-            // Controls column — toggle + delete
+            // Controls column — reorder + toggle + delete
             6 => {
+                // --- Move up / move down (position reorder) ---
+                let n_rules = self.rules.len();
+                let sock_up = self.socket_path.clone();
+                let sw_up = self.state_weak.clone();
+                let id_up = rule.id.clone();
+                let sock_down = self.socket_path.clone();
+                let sw_down = self.state_weak.clone();
+                let id_down = rule.id.clone();
                 let id_toggle = rule.id.clone();
                 let id_del = rule.id.clone();
                 let rule_toggle = rule.clone();
@@ -191,9 +199,63 @@ impl TableDelegate for RulesDelegate {
                 let state_toggle = self.state_weak.clone();
                 let sock_del = self.socket_path.clone();
                 let state_del = self.state_weak.clone();
-
+                let mk_move = |delta: i32,
+                               sock: String,
+                               sw: WeakEntity<SettingsState>,
+                               rid: String| {
+                    let new_index =
+                        ((row_ix as i32 + delta).max(0) as usize).min(n_rules - 1) as u32;
+                    action_btn(
+                        if delta < 0 {
+                            format!("rule-up-{rid}")
+                        } else {
+                            format!("rule-down-{rid}")
+                        },
+                        if delta < 0 { "▲" } else { "▼" },
+                        colors::muted(),
+                    )
+                    .on_click(move |_, _, cx| {
+                        let sock = sock.clone();
+                        let sw = sw.clone();
+                        let rid_click = rid.clone();
+                        let rid_keep = rid.clone();
+                        cx.spawn(async move |cx| {
+                            let _ = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    daemon::send_request(
+                                        &sock,
+                                        &ControlRequest::MoveRule {
+                                            id: rid_click,
+                                            new_index,
+                                        },
+                                    )
+                                })
+                                .await;
+                            // Optimistic local swap to reflect the new order.
+                            if let Some(st) = sw.upgrade() {
+                                let _ = cx.update_entity(&st, |s, cx| {
+                                    if (new_index as usize) < s.rules.len() {
+                                        let mut rules = s.rules.clone();
+                                        if let Some(cur) =
+                                            rules.iter().position(|r| r.id == rid_keep)
+                                        {
+                                            let rule = rules.remove(cur);
+                                            rules.insert(new_index as usize, rule);
+                                            s.rules = rules;
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .detach();
+                    })
+                };
                 h_flex()
                     .gap(px(6.))
+                    .child(mk_move(-1, sock_up, sw_up, id_up))
+                    .child(mk_move(1, sock_down, sw_down, id_down))
                     .child(
                         action_btn(
                             format!("rule-en-{id_toggle}"),

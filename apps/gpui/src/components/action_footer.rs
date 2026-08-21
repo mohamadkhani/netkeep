@@ -711,6 +711,7 @@ fn allow_button(
                             process_exe: proc_exe,
                             destination: dest,
                             egress_id: eid,
+                            position: 0,
                         };
                         let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
                             .unwrap_or_else(|_| SOCKET_PATH.to_string());
@@ -807,6 +808,7 @@ fn deny_button(
                             process_exe: proc_exe,
                             destination: dest,
                             egress_id: None,
+                            position: 0,
                         };
                         let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
                             .unwrap_or_else(|_| SOCKET_PATH.to_string());

@@ -11,6 +11,13 @@ pub enum ControlRequest {
     DeleteRule {
         id: String,
     },
+    /// Move a rule to a new position in the evaluation order (0 = evaluated
+    /// first / highest precedence). Rules between old and new positions
+    /// shift accordingly.
+    MoveRule {
+        id: String,
+        new_index: u32,
+    },
     ListPending,
     ListFlows {
         limit: usize,
@@ -202,6 +209,7 @@ mod tests {
             process_exe: None,
             destination: DestinationMatcher::IpExact("1.1.1.1".to_string()),
             egress_id: None,
+            position: 0,
         }
     }
 

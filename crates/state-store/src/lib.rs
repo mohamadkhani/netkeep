@@ -12,7 +12,15 @@ use rusqlite::{params, Connection};
 
 pub trait RuleRepository {
     fn upsert_rule(&mut self, rule: Rule);
+    /// Insert a new rule at the given position, shifting existing rules at
+    /// or below that index down by one. The rule's `position` field is
+    /// overwritten with `index`. Existing rules keep their relative order.
+    fn insert_rule_at(&mut self, rule: Rule, index: u32);
+    /// Move a rule to a new position, shifting the rules between the old
+    /// and new positions. Returns false if the rule does not exist.
+    fn move_rule(&mut self, id: &str, new_index: u32) -> bool;
     fn get_rule(&self, id: &str) -> Option<Rule>;
+    /// Rules ordered by position (evaluation order) — first match wins.
     fn list_rules(&self) -> Vec<Rule>;
     fn delete_rule(&mut self, id: &str) -> bool;
     /// Remove all rules with `duration == UntilRestart`. Called at daemon startup.
@@ -96,21 +104,67 @@ impl RuleRepository for InMemoryRuleRepository {
         self.rules.insert(rule.id.clone(), rule);
     }
 
+    fn insert_rule_at(&mut self, mut rule: Rule, index: u32) {
+        let mut rules = self.ordered_rules();
+        // Clamp into the dense 0..n range.
+        let index = (index as usize).min(rules.len());
+        rule.position = index as u32;
+        rules.insert(index, rule);
+        self.write_dense(rules);
+    }
+
+    fn move_rule(&mut self, id: &str, new_index: u32) -> bool {
+        let mut rules = self.ordered_rules();
+        let Some(old_ix) = rules.iter().position(|r| r.id == id) else {
+            return false;
+        };
+        let new_ix = (new_index as usize).min(rules.len() - 1);
+        let rule = rules.remove(old_ix);
+        rules.insert(new_ix, rule);
+        self.write_dense(rules);
+        true
+    }
+
     fn get_rule(&self, id: &str) -> Option<Rule> {
         self.rules.get(id).cloned()
     }
 
     fn list_rules(&self) -> Vec<Rule> {
-        self.rules.values().cloned().collect()
+        self.ordered_rules()
     }
 
     fn delete_rule(&mut self, id: &str) -> bool {
-        self.rules.remove(id).is_some()
+        if self.rules.remove(id).is_some() {
+            let rules = self.ordered_rules();
+            self.write_dense(rules);
+            true
+        } else {
+            false
+        }
     }
 
     fn purge_session_rules(&mut self) {
         self.rules
             .retain(|_, v| v.duration == RuleDuration::Permanent);
+        let rules = self.ordered_rules();
+        self.write_dense(rules);
+    }
+}
+
+impl InMemoryRuleRepository {
+    fn ordered_rules(&self) -> Vec<Rule> {
+        let mut rules: Vec<Rule> = self.rules.values().cloned().collect();
+        rules.sort_by_key(|r| r.position);
+        rules
+    }
+
+    /// Rewrite the map so positions form a dense 0..n-1 sequence.
+    fn write_dense(&mut self, rules: Vec<Rule>) {
+        self.rules.clear();
+        for (ix, mut rule) in rules.into_iter().enumerate() {
+            rule.position = ix as u32;
+            self.rules.insert(rule.id.clone(), rule);
+        }
     }
 }
 
@@ -191,6 +245,10 @@ impl ProxyRepository for InMemoryRuleRepository {
 
 pub struct SqliteRuleRepository {
     conn: Connection,
+    /// True when the `position` column was created by this open — the
+    /// stored rules have meaningless default positions and need a one-time
+    /// backfill on first access.
+    position_added: bool,
 }
 
 impl SqliteRuleRepository {
@@ -207,7 +265,8 @@ impl SqliteRuleRepository {
                  destination_kind INTEGER NOT NULL,
                  destination_value TEXT NOT NULL,
                  egress_id TEXT NULL,
-                 process_exe TEXT NULL
+                 process_exe TEXT NULL,
+                 position INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE IF NOT EXISTS flow_events (
                  id TEXT PRIMARY KEY,
@@ -261,7 +320,21 @@ impl SqliteRuleRepository {
         // Migrations: add columns to existing DBs (ignore error if they already exist).
         let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN egress_id TEXT NULL;");
         let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN process_exe TEXT NULL;");
-        Ok(Self { conn })
+        let mut repo = Self {
+            conn,
+            position_added: false,
+        };
+        // Freshly created tables get real positions from inserts; only an
+        // ALTER on a pre-existing DB means a one-time backfill is needed.
+        let position_added = repo
+            .conn
+            .execute_batch("ALTER TABLE rules ADD COLUMN position INTEGER NOT NULL DEFAULT 0;")
+            .is_ok();
+        if position_added {
+            repo.position_added = true;
+            repo.normalize_positions_if_needed();
+        }
+        Ok(repo)
     }
 }
 
@@ -383,8 +456,8 @@ impl RuleRepository for SqliteRuleRepository {
     fn upsert_rule(&mut self, rule: Rule) {
         let (destination_kind, destination_value) = destination_to_parts(&rule.destination);
         let _ = self.conn.execute(
-            "INSERT INTO rules (id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO rules (id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                  enabled=excluded.enabled,
                  action=excluded.action,
@@ -393,7 +466,8 @@ impl RuleRepository for SqliteRuleRepository {
                  destination_kind=excluded.destination_kind,
                  destination_value=excluded.destination_value,
                  egress_id=excluded.egress_id,
-                 process_exe=excluded.process_exe;",
+                 process_exe=excluded.process_exe,
+                 position=excluded.position;",
             params![
                 rule.id,
                 if rule.enabled { 1i64 } else { 0i64 },
@@ -404,15 +478,52 @@ impl RuleRepository for SqliteRuleRepository {
                 destination_value,
                 rule.egress_id,
                 rule.process_exe,
+                rule.position as i64,
             ],
         );
+    }
+
+    fn insert_rule_at(&mut self, rule: Rule, index: u32) {
+        self.normalize_positions_if_needed();
+        let index = (index as i64).min(self.rule_count());
+        let _ = self.conn.execute(
+            "UPDATE rules SET position = position + 1 WHERE position >= ?1",
+            params![index],
+        );
+        let mut rule = rule;
+        rule.position = index as u32;
+        self.upsert_rule(rule);
+    }
+
+    fn move_rule(&mut self, id: &str, new_index: u32) -> bool {
+        self.normalize_positions_if_needed();
+        let mut rules = self.list_rules();
+        let Some(old_ix) = rules.iter().position(|r| r.id == id) else {
+            return false;
+        };
+        let new_ix = (new_index as usize).min(rules.len() - 1);
+        let rule = rules.remove(old_ix);
+        rules.insert(new_ix, rule);
+        let mut tx = match self.conn.transaction() {
+            Ok(tx) => tx,
+            Err(_) => return false,
+        };
+        for (ix, r) in rules.iter().enumerate() {
+            if r.position as usize != ix {
+                let _ = tx.execute(
+                    "UPDATE rules SET position = ?1 WHERE id = ?2",
+                    params![ix as i64, r.id],
+                );
+            }
+        }
+        tx.commit().is_ok()
     }
 
     fn get_rule(&self, id: &str) -> Option<Rule> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe
+                "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe, position
                  FROM rules WHERE id = ?1",
             )
             .ok()?;
@@ -431,12 +542,13 @@ impl RuleRepository for SqliteRuleRepository {
             process_exe: row.get(8).ok()?,
             destination,
             egress_id: row.get(7).ok()?,
+            position: row.get::<_, i64>(9).ok()?.max(0) as u32,
         })
     }
 
     fn list_rules(&self) -> Vec<Rule> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe FROM rules ORDER BY id",
+            "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe, position FROM rules ORDER BY position, id",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -470,6 +582,7 @@ impl RuleRepository for SqliteRuleRepository {
                 process_exe: row.get(8)?,
                 destination,
                 egress_id: row.get(7)?,
+                position: row.get::<_, i64>(9)?.max(0) as u32,
             })
         }) {
             Ok(m) => m,
@@ -479,10 +592,29 @@ impl RuleRepository for SqliteRuleRepository {
     }
 
     fn delete_rule(&mut self, id: &str) -> bool {
-        self.conn
+        let pos = self
+            .conn
+            .query_row(
+                "SELECT position FROM rules WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok();
+        let deleted = self
+            .conn
             .execute("DELETE FROM rules WHERE id = ?1", params![id])
             .map(|count| count > 0)
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if deleted {
+            if let Some(pos) = pos {
+                // Close the gap in the dense position sequence.
+                let _ = self.conn.execute(
+                    "UPDATE rules SET position = position - 1 WHERE position > ?1",
+                    params![pos],
+                );
+            }
+        }
+        deleted
     }
 
     fn purge_session_rules(&mut self) {
@@ -490,6 +622,49 @@ impl RuleRepository for SqliteRuleRepository {
             "DELETE FROM rules WHERE duration = ?1",
             params![duration_to_i64(RuleDuration::UntilRestart)],
         );
+        self.redensify_positions();
+    }
+}
+
+impl SqliteRuleRepository {
+    fn rule_count(&self) -> i64 {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM rules", [], |row| row.get(0))
+            .unwrap_or(0)
+    }
+
+    /// One-time backfill for DBs created before the `position` column
+    /// existed: order by the legacy specificity semantics (rank desc, then
+    /// id) and assign dense positions 0..n-1.
+    fn normalize_positions_if_needed(&mut self) {
+        if !self.position_added {
+            return;
+        }
+        self.position_added = false;
+        self.redensify_positions();
+    }
+
+    /// Sort rules by the legacy evaluation order and rewrite dense positions.
+    fn redensify_positions(&mut self) {
+        let mut rules = self.list_rules();
+        rules.sort_by(|a, b| {
+            policy_engine::priority_rank(a)
+                .cmp(&policy_engine::priority_rank(b))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let mut tx = match self.conn.transaction() {
+            Ok(tx) => tx,
+            Err(_) => return,
+        };
+        for (ix, r) in rules.iter().enumerate() {
+            if r.position as usize != ix {
+                let _ = tx.execute(
+                    "UPDATE rules SET position = ?1 WHERE id = ?2",
+                    params![ix as i64, r.id],
+                );
+            }
+        }
+        let _ = tx.commit();
     }
 }
 
@@ -917,6 +1092,7 @@ mod tests {
             process_exe: None,
             destination: DestinationMatcher::DomainExact("example.com".to_string()),
             egress_id: None,
+            position: 0,
         }
     }
 
@@ -955,6 +1131,40 @@ mod tests {
     }
 
     // --- InMemory ---
+
+    #[test]
+    fn insert_move_delete_keep_positions_dense() {
+        let mut repo = InMemoryRuleRepository::default();
+        repo.insert_rule_at(mk_rule("a"), 0);
+        repo.insert_rule_at(mk_rule("b"), 0); // b above a
+        repo.insert_rule_at(mk_rule("c"), 1); // between b and a
+        let ids: Vec<(String, u32)> = repo
+            .list_rules()
+            .into_iter()
+            .map(|r| (r.id, r.position))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("b".to_string(), 0),
+                ("c".to_string(), 1),
+                ("a".to_string(), 2)
+            ]
+        );
+
+        assert!(repo.move_rule("a", 0));
+        let ids: Vec<String> = repo.list_rules().into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+        // Dense after move.
+        let positions: Vec<u32> = repo.list_rules().into_iter().map(|r| r.position).collect();
+        assert_eq!(positions, vec![0, 1, 2]);
+
+        assert!(repo.delete_rule("b"));
+        let ids: Vec<String> = repo.list_rules().into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec!["a", "c"]);
+        let positions: Vec<u32> = repo.list_rules().into_iter().map(|r| r.position).collect();
+        assert_eq!(positions, vec![0, 1]);
+    }
 
     #[test]
     fn insert_and_get_rule() {
@@ -1026,6 +1236,44 @@ mod tests {
         assert_eq!(repo.get_rule("r1"), Some(rule));
         assert!(repo.delete_rule("r1"));
         assert_eq!(repo.get_rule("r1"), None);
+    }
+
+    #[test]
+    fn sqlite_insert_move_delete_keep_positions_dense() {
+        let file = NamedTempFile::new().expect("must create temp file");
+        let path = file.path().to_string_lossy().to_string();
+        let mut repo = SqliteRuleRepository::open(&path).expect("sqlite open");
+        repo.insert_rule_at(mk_rule("a"), 0);
+        repo.insert_rule_at(mk_rule("b"), 0);
+        repo.insert_rule_at(mk_rule("c"), 1);
+        let ids: Vec<String> = repo.list_rules().into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec!["b", "c", "a"]);
+
+        assert!(repo.move_rule("a", 0));
+        let ids: Vec<(String, u32)> = repo
+            .list_rules()
+            .into_iter()
+            .map(|r| (r.id, r.position))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("a".to_string(), 0),
+                ("b".to_string(), 1),
+                ("c".to_string(), 2)
+            ]
+        );
+
+        assert!(repo.delete_rule("b"));
+        let ids: Vec<(String, u32)> = repo
+            .list_rules()
+            .into_iter()
+            .map(|r| (r.id, r.position))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![("a".to_string(), 0), ("c".to_string(), 1)]
+        );
     }
 
     #[test]

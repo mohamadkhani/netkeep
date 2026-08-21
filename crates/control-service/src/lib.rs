@@ -1,9 +1,9 @@
 use control_api::{validate_request, ControlRequest, ControlResponse, PushNotification};
-use core_types::{Egress, FlowContext, FlowEvent, FlowState, RouteTarget, RuleAction};
+use core_types::{Egress, FlowContext, FlowEvent, FlowState, RouteTarget, Rule, RuleAction};
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
 use metrics::{counter, histogram};
-use policy_engine::{resolve_action, ResolvedRule};
+use policy_engine::{resolve_action, seed_position, ResolvedRule};
 use state_store::Repository;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -300,6 +300,7 @@ impl<R: Repository> ControlService<R> {
             ControlRequest::UpsertProxy(_) => "upsert_proxy",
             ControlRequest::DeleteProxy { .. } => "delete_proxy",
             ControlRequest::ListProxies => "list_proxies",
+        ControlRequest::MoveRule { .. } => "move_rule",
             ControlRequest::TestProxyHttp { .. } => "test_proxy_http",
             ControlRequest::TestProxyDns { .. } => "test_proxy_dns",
         };
@@ -308,14 +309,20 @@ impl<R: Repository> ControlService<R> {
 
         let response = match request {
             ControlRequest::AddRule(rule) => {
-                self.repo.upsert_rule(rule);
+                self.add_rule(rule);
                 self.sweep_pending();
                 ControlResponse::Ok
             }
             ControlRequest::ListRules => {
-                let mut rules = self.repo.list_rules();
-                rules.sort_by(|a, b| a.id.cmp(&b.id));
-                ControlResponse::RuleList(rules)
+                // list_rules returns position order (evaluation order).
+                ControlResponse::RuleList(self.repo.list_rules())
+            }
+            ControlRequest::MoveRule { id, new_index } => {
+                if self.repo.move_rule(&id, new_index) {
+                    ControlResponse::Ok
+                } else {
+                    ControlResponse::Error(format!("unknown rule: {id}"))
+                }
             }
             ControlRequest::DeleteRule { id } => {
                 if self.repo.delete_rule(&id) {
@@ -442,7 +449,7 @@ impl<R: Repository> ControlService<R> {
                 // already in the queue that the new rule covers are auto-resolved
                 // without showing additional dialogs.
                 let egress_id = rule.egress_id.clone();
-                self.repo.upsert_rule(rule);
+                self.add_rule(rule);
                 self.sweep_pending();
                 if let Some(chosen) =
                     self.decision_engine
@@ -600,6 +607,19 @@ impl<R: Repository> ControlService<R> {
         histogram!("logiguard.control.request.duration", "type" => request_type)
             .record(handle_start.elapsed().as_secs_f64());
         response
+    }
+
+    /// Persist a new rule at its ladder-seeded position. Existing rules of
+    /// lower rank shift down; the caller gets first-match-wins ordering for
+    /// free. Updates to an existing id keep their position.
+    fn add_rule(&mut self, rule: Rule) {
+        let existing = self.repo.list_rules();
+        if existing.iter().any(|r| r.id == rule.id) {
+            self.repo.upsert_rule(rule);
+        } else {
+            let index = seed_position(&rule, &existing);
+            self.repo.insert_rule_at(rule, index);
+        }
     }
 
     /// Re-evaluate all pending decisions against the current rule set.
@@ -763,6 +783,7 @@ mod tests {
             process_exe: None,
             destination: DestinationMatcher::DomainExact("example.com".to_string()),
             egress_id: None,
+            position: 0,
         }
     }
 
@@ -808,6 +829,31 @@ mod tests {
         let list = service.handle(ControlRequest::ListRules);
         match list {
             ControlResponse::RuleList(rules) => assert_eq!(rules.len(), 1),
+            _ => panic!("expected rule list"),
+        }
+    }
+
+    /// A CIDR rule added after a process-only rule must be seeded ABOVE it
+    /// (rank 2 > rank 1) — the user-reported ordering expectation.
+    #[test]
+    fn cidr_rule_seeded_above_process_only_rule() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+
+        let mut chrome = mk_rule("chrome-allow");
+        chrome.process_name = Some("chromium".to_string());
+        chrome.destination = DestinationMatcher::Any;
+        let _ = service.handle(ControlRequest::AddRule(chrome));
+
+        let mut cidr = mk_rule("lan-cidr");
+        cidr.process_name = None;
+        cidr.destination = DestinationMatcher::Cidr("192.168.7.0/24".to_string());
+        let _ = service.handle(ControlRequest::AddRule(cidr));
+
+        match service.handle(ControlRequest::ListRules) {
+            ControlResponse::RuleList(rules) => {
+                let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
+                assert_eq!(ids, vec!["lan-cidr", "chrome-allow"]);
+            }
             _ => panic!("expected rule list"),
         }
     }

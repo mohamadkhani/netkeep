@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 core-types = { path = "../core-types" }
+policy-engine = { path = "../policy-engine" }
 rusqlite = "0.32"
 serde_json = "1"
 

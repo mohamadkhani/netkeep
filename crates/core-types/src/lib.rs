@@ -53,6 +53,14 @@ pub struct Rule {
     /// used at enforcement time; if the egress or all its targets are
     /// unavailable the packet is denied (fail-close).
     pub egress_id: Option<String>,
+    /// Dense ordering index — lower position is evaluated first and the
+    /// first matching rule wins (firewall-style). Positions are unique and
+    /// form a contiguous 0..n-1 sequence over all rules; the policy engine
+    /// never computes them, it only reads them. New rules get their initial
+    /// slot from `policy_engine::priority_rank` at insertion time; users
+    /// reorder via the GUI table.
+    #[serde(default)]
+    pub position: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

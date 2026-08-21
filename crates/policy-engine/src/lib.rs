@@ -36,13 +36,43 @@ fn destination_matches(rule: &Rule, flow: &FlowContext) -> bool {
     match &rule.destination {
         DestinationMatcher::Any => true,
         DestinationMatcher::IpExact(ip) => flow.destination_ip == *ip,
-        DestinationMatcher::Cidr(prefix) => flow.destination_ip.starts_with(prefix),
+        DestinationMatcher::Cidr(prefix) => cidr_contains(prefix, &flow.destination_ip),
         DestinationMatcher::DomainExact(domain) => flow.destination_domain.as_ref() == Some(domain),
         DestinationMatcher::DomainWildcard(pattern) => flow
             .destination_domain
             .as_ref()
             .map(|h| wildcard_matches(pattern, h))
             .unwrap_or(false),
+    }
+}
+
+/// True when `ip` falls inside the network described by `prefix`.
+///
+/// Accepts real CIDR notation (`"10.0.0.0/8"` — the form the GPUI dialog,
+/// settings form, and CLI all persist). Falls back to a literal string
+/// prefix (`"10.0.0."`) for rules stored by older versions or imported
+/// from foreign schemas. Unparsable prefixes match nothing rather than
+/// everything.
+fn cidr_contains(prefix: &str, ip: &str) -> bool {
+    if let Some((net_str, len_str)) = prefix.split_once('/') {
+        let (Ok(net), Ok(len), Ok(addr)) = (
+            net_str.parse::<std::net::Ipv4Addr>(),
+            len_str.parse::<u32>(),
+            ip.parse::<std::net::Ipv4Addr>(),
+        ) else {
+            return false;
+        };
+        if len > 32 {
+            return false;
+        }
+        let mask: u32 = if len == 0 {
+            0
+        } else {
+            u32::MAX << (32 - len)
+        };
+        (u32::from(net) & mask) == (u32::from(addr) & mask)
+    } else {
+        ip.starts_with(prefix)
     }
 }
 
@@ -69,42 +99,56 @@ fn process_matches(rule: &Rule, flow: &FlowContext) -> bool {
     }
 }
 
-fn specificity(rule: &Rule) -> u8 {
-    let base = match rule.destination {
-        DestinationMatcher::Any => 1,
-        DestinationMatcher::IpExact(_) | DestinationMatcher::DomainExact(_) => 3,
-        DestinationMatcher::Cidr(_) | DestinationMatcher::DomainWildcard(_) => 2,
-    };
-    if rule.process_name.is_some() {
-        base + 2
-    } else {
-        base
+/// Insertion comparator — the default placement ladder for new rules.
+/// Higher rank = inserted higher in the rule list (evaluated earlier).
+/// This is ONLY used when seeding a new rule's `position` alongside
+/// existing rules; evaluation itself is purely first-match-wins over the
+/// stored position order.
+///
+/// Ladder (top to bottom):
+///   process + ip > process + domain > process + wildcard > process + cidr
+///   > ip > domain > wildcard > cidr > process + any > any
+pub fn priority_rank(rule: &Rule) -> u8 {
+    match (&rule.process_name, &rule.destination) {
+        (Some(_), DestinationMatcher::IpExact(_)) => 9,
+        (Some(_), DestinationMatcher::DomainExact(_)) => 8,
+        (Some(_), DestinationMatcher::DomainWildcard(_)) => 7,
+        (Some(_), DestinationMatcher::Cidr(_)) => 6,
+        (None, DestinationMatcher::IpExact(_)) => 5,
+        (None, DestinationMatcher::DomainExact(_)) => 4,
+        (None, DestinationMatcher::DomainWildcard(_)) => 3,
+        (None, DestinationMatcher::Cidr(_)) => 2,
+        (Some(_), DestinationMatcher::Any) => 1,
+        (None, DestinationMatcher::Any) => 0,
     }
 }
 
-fn action_rank(action: &RuleAction) -> u8 {
-    match action {
-        RuleAction::Deny => 3,
-        RuleAction::Allow | RuleAction::Route => 2,
-        RuleAction::Ask => 1,
-    }
+/// Compute the position a new rule should occupy within `existing`
+/// (position-sorted): below all rules of higher-or-equal rank, at the
+/// bottom of its own rank's block.
+pub fn seed_position(new_rule: &Rule, existing: &[Rule]) -> u32 {
+    let new_rank = priority_rank(new_rule);
+    // Count rules that should sit above the new rule.
+    let above = existing
+        .iter()
+        .filter(|r| priority_rank(r) > new_rank)
+        .count();
+    above as u32
 }
 
 pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule> {
     let start = std::time::Instant::now();
     counter!("logiguard.policy.evaluations").increment(1);
 
-    let result = rules
-        .iter()
-        .filter(|r| r.enabled)
-        .filter(|r| process_matches(r, flow) && destination_matches(r, flow))
-        .max_by(|a, b| {
-            (specificity(a), action_rank(&a.action), &a.id).cmp(&(
-                specificity(b),
-                action_rank(&b.action),
-                &b.id,
-            ))
-        })
+    // First-match-wins over position order. Callers pass rules sorted by
+    // position (state-store returns them ordered); as a safety net we also
+    // tolerate unsorted input by sorting a copy.
+    let mut sorted: Vec<&Rule> = rules.iter().filter(|r| r.enabled).collect();
+    sorted.sort_by_key(|r| r.position);
+
+    let result = sorted
+        .into_iter()
+        .find(|r| process_matches(r, flow) && destination_matches(r, flow))
         .map(|r| ResolvedRule {
             rule_id: r.id.clone(),
             action: r.action.clone(),
@@ -151,6 +195,7 @@ mod tests {
             process_exe: None,
             destination,
             egress_id: None,
+            position: 0,
         }
     }
 
@@ -351,13 +396,19 @@ mod tests {
             None,
             DestinationMatcher::DomainWildcard("*.example.com".to_string()),
         );
-        let specific = mk_rule(
+        let mut specific = mk_rule(
             "specific",
             RuleAction::Deny,
             Some("firefox"),
             DestinationMatcher::DomainWildcard("*.example.com".to_string()),
         );
-        let resolved = resolve_action(&[general, specific], &flow).expect("must resolve");
+        let mut rules = vec![general];
+        let idx = seed_position(&specific, &rules) as usize;
+        rules.insert(idx, specific);
+        for (ix, r) in rules.iter_mut().enumerate() {
+            r.position = ix as u32;
+        }
+        let resolved = resolve_action(&rules, &flow).expect("must resolve");
         assert_eq!(resolved.rule_id, "specific");
         assert_eq!(resolved.action, RuleAction::Deny);
     }
@@ -377,18 +428,22 @@ mod tests {
             direction: FlowDirection::Outbound,
             device_label: None,
         };
-        let allow = mk_rule(
+        let mut allow = mk_rule(
             "allow",
             RuleAction::Allow,
             None,
             DestinationMatcher::DomainExact("example.com".to_string()),
         );
-        let deny = mk_rule(
+        // Seeded order puts a Deny above an Allow of equal rank only via
+        // explicit position; here we place deny first deliberately.
+        let mut deny = mk_rule(
             "deny",
             RuleAction::Deny,
             None,
             DestinationMatcher::DomainExact("example.com".to_string()),
         );
+        allow.position = 1;
+        deny.position = 0;
         let resolved = resolve_action(&[allow, deny], &flow).expect("must resolve");
         assert_eq!(resolved.rule_id, "deny");
     }
@@ -523,8 +578,131 @@ mod tests {
             DestinationMatcher::DomainExact("www.digikala.com".to_string()),
         );
         wifi.egress_id = Some("eg-wifi-wlp0".into());
+        // Equal rank: wifi was created later, so it seeds below tun — but the
+        // user dragged it above. Position order decides.
+        wifi.position = 0;
+        tun.position = 1;
         let resolved = resolve_action(&[tun, wifi], &flow).expect("must resolve");
         assert_eq!(resolved.rule_id, "demo-digikala-wifi");
         assert_eq!(resolved.egress_id, Some("eg-wifi-wlp0".into()));
+    }
+
+    /// The user-reported regression: a CIDR rule without a process must not
+    /// be shadowed by a process-only rule. With seeded positions the CIDR
+    /// rule (rank 2) sits above the process+any rule (rank 1).
+    #[test]
+    fn cidr_rule_beats_process_only_rule_when_seeded() {
+        // Simulate state-store insertion: cidr first, then chrome seeded
+        // against the existing list.
+        let cidr = mk_rule(
+            "lan-cidr",
+            RuleAction::Deny,
+            None,
+            DestinationMatcher::Cidr("10.0.0.0/8".to_string()),
+        );
+        let chrome = mk_rule(
+            "chrome-allow",
+            RuleAction::Allow,
+            Some("chrome"),
+            DestinationMatcher::Any,
+        );
+        let mut rules: Vec<Rule> = vec![cidr];
+        let idx = seed_position(&chrome, &rules) as usize;
+        rules.insert(idx, chrome);
+        for (ix, r) in rules.iter_mut().enumerate() {
+            r.position = ix as u32;
+        }
+        assert!(rules[0].id == "lan-cidr");
+
+        let flow = FlowContext {
+            process_name: Some("chrome".to_string()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "192.168.1.2".to_string(),
+            source_port: 54321,
+            destination_ip: "10.2.3.4".to_string(),
+            destination_port: 443,
+            destination_domain: None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+        };
+        let resolved =
+            resolve_action(&rules, &flow).expect("must resolve");
+        assert_eq!(resolved.rule_id, "lan-cidr");
+        assert_eq!(resolved.action, RuleAction::Deny);
+    }
+
+    /// WYSIWYG: the first matching rule in position order wins, even if a
+    /// later rule is "more specific". User reorder is authoritative.
+    #[test]
+    fn user_reordered_allow_above_deny_wins() {
+        let mut allow = mk_rule(
+            "allow-any",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::Any,
+        );
+        allow.position = 0;
+        let mut deny = mk_rule(
+            "deny-firefox",
+            RuleAction::Deny,
+            Some("firefox"),
+            DestinationMatcher::DomainExact("evil.example.com".to_string()),
+        );
+        deny.position = 1;
+        let flow = FlowContext {
+            process_name: Some("firefox".to_string()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "10.0.0.1".to_string(),
+            source_port: 54321,
+            destination_ip: "9.9.9.9".to_string(),
+            destination_port: 443,
+            destination_domain: Some("evil.example.com".to_string()),
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+        };
+        let resolved = resolve_action(&[allow, deny], &flow).expect("must resolve");
+        assert_eq!(resolved.rule_id, "allow-any");
+    }
+
+    #[test]
+    fn seed_position_orders_by_rank() {
+        // Insert in "worst-first" creation order; the ladder must reorder them.
+        let ip = mk_rule(
+            "r-ip",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::IpExact("1.2.3.4".to_string()),
+        );
+        let proc_any = mk_rule(
+            "r-proc",
+            RuleAction::Allow,
+            Some("chrome"),
+            DestinationMatcher::Any,
+        );
+        let cidr = mk_rule(
+            "r-cidr",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::Cidr("10.0.0.0/8".to_string()),
+        );
+        let proc_dom = mk_rule(
+            "r-pdom",
+            RuleAction::Allow,
+            Some("curl"),
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+
+        let mut rules: Vec<Rule> = Vec::new();
+        for rule in [ip, proc_any, cidr, proc_dom] {
+            let idx = seed_position(&rule, &rules) as usize;
+            rules.insert(idx, rule);
+        }
+
+        let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["r-pdom", "r-ip", "r-cidr", "r-proc"]);
     }
 }

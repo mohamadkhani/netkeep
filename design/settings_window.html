@@ -154,6 +154,9 @@
                             <div class="col-span-1 font-label-caps text-[10px] text-on-surface-variant">STATUS</div>
                             <div class="col-span-2 font-label-caps text-[10px] text-on-surface-variant text-right">ACTIONS</div>
                         </div>
+                        <!-- NOTE: rows are in evaluation order (top = evaluated
+                             first = highest precedence, first-match-wins).
+                             Reorder with the arrow buttons in ACTIONS. -->
                         
                         <!-- Table Rows -->
                         <div class="divide-y divide-outline-variant">
@@ -166,7 +169,8 @@
                                 <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px] bg-surface-variant px-1.5 py-0.5 rounded border border-outline-variant">0.0.0.0/0:22</div>
                                 <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">ACTIVE</span></div>
                                 <div class="col-span-2 flex justify-end gap-1">
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">edit</button>
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant/50 p-1 rounded cursor-default" title="Top rule — cannot move up" disabled>keyboard_arrow_up</button>
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">keyboard_arrow_down</button>
                                     <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">power_settings_new</button>
                                     <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-error p-1 rounded hover:bg-error/10 transition-colors">delete</button>
                                 </div>
@@ -181,7 +185,8 @@
                                 <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px] bg-surface-variant px-1.5 py-0.5 rounded border border-outline-variant">192.168.1.1:53</div>
                                 <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30">ACTIVE</span></div>
                                 <div class="col-span-2 flex justify-end gap-1">
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">edit</button>
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">keyboard_arrow_up</button>
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">keyboard_arrow_down</button>
                                     <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">power_settings_new</button>
                                     <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-error p-1 rounded hover:bg-error/10 transition-colors">delete</button>
                                 </div>
@@ -196,7 +201,8 @@
                                 <div class="col-span-2 font-data-mono text-data-mono text-on-surface text-[12px] bg-surface-variant px-1.5 py-0.5 rounded border border-outline-variant">0.0.0.0/0:80</div>
                                 <div class="col-span-1"><span class="font-label-caps text-[10px] px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant border border-outline-variant">INACTIVE</span></div>
                                 <div class="col-span-2 flex justify-end gap-1">
-                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">edit</button>
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">keyboard_arrow_up</button>
+                                    <button class="material-symbols-outlined text-[16px] text-on-surface-variant/50 p-1 rounded cursor-default" title="Bottom rule — cannot move down" disabled>keyboard_arrow_down</button>
                                     <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-primary p-1 rounded hover:bg-surface-variant transition-colors">power_settings_new</button>
                                     <button class="material-symbols-outlined text-[16px] text-on-surface-variant hover:text-error p-1 rounded hover:bg-error/10 transition-colors">delete</button>
                                 </div>

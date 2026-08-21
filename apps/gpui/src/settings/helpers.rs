@@ -40,6 +40,7 @@ pub async fn fetch_and_apply(
         ) => {
             let merged = daemon::merge_egress_availability(egresses);
             let _ = cx.update_entity(&entity, |s: &mut SettingsState, cx| {
+                // Daemon returns position order (evaluation order).
                 s.rules = rules;
                 s.egresses = merged;
                 s.proxies = proxies;
