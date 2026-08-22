@@ -46,6 +46,11 @@ struct CachedEntry {
     name: String,
     exe: Option<String>,
     app_name: Option<String>,
+    /// PID the entry was resolved for. Used to detect port reuse: when the
+    /// eBPF tracker reports a different PID than the cached entry's, the
+    /// entry is stale (the kernel recycled the ephemeral port to another
+    /// process) and must not be served.
+    pid: Option<u32>,
     inserted_at: Instant,
 }
 
@@ -144,10 +149,27 @@ impl ProcessResolver for ProcProcessResolver {
         };
         let now = Instant::now();
 
-        // Cache fast path
+        // eBPF tracker first (when available): it is authoritative — it
+        // captured the PID at socket-creation time. Consulting the cache
+        // before it would hide port reuse (kernel recycling an ephemeral
+        // port to a different process within the cache TTL).
+        let tracked_pid = if let Some(ref tracker) = self.sock_tracker {
+            tracker.lookup_pid(ip, src_port, protocol)
+        } else {
+            None
+        };
+
+        // Cache fast path. When the tracker reported a PID, the cached entry
+        // is only valid if it was resolved for that same PID.
         if let Ok(cache) = self.cache.lock() {
             if let Some(entry) = cache.get(&key) {
-                if now.duration_since(entry.inserted_at) < CACHE_TTL {
+                let pid_matches = match (tracked_pid.clone(), entry.pid) {
+                    (Some(tracked), Some(cached)) => tracked.pid == cached,
+                    // No tracker (or tracker has no entry for this socket):
+                    // fall back to the old TTL-only behaviour.
+                    _ => true,
+                };
+                if pid_matches && now.duration_since(entry.inserted_at) < CACHE_TTL {
                     counter!("logiguard.proc.resolver.cache.hits").increment(1);
                     histogram!("logiguard.proc.resolver.resolve.duration")
                         .record(resolve_start.elapsed().as_secs_f64());
@@ -157,12 +179,19 @@ impl ProcessResolver for ProcProcessResolver {
                         app_name: entry.app_name.clone(),
                     });
                 }
+                counter!("logiguard.proc.resolver.cache.stale_pid").increment(1);
             }
         }
 
         counter!("logiguard.proc.resolver.cache.misses").increment(1);
 
-        let pid = self.find_pid(ip, src_port, protocol)?;
+        let pid = match tracked_pid {
+            Some(ref tracked) => {
+                counter!("logiguard.proc.resolver.ebpf.hits").increment(1);
+                tracked.pid
+            }
+            None => self.find_pid(ip, src_port, protocol)?,
+        };
 
         // Read exe: full path first, fall back to comm.
         let exe_path = read_exe_path(pid);
@@ -222,6 +251,7 @@ impl ProcessResolver for ProcProcessResolver {
                     name: info.name.clone(),
                     exe: info.exe.clone(),
                     app_name: info.app_name.clone(),
+                    pid: Some(pid),
                     inserted_at: now,
                 },
             );
@@ -807,6 +837,7 @@ mod tests {
         resolver.cache.lock().unwrap().insert(
             key,
             CachedEntry {
+                pid: None,
                 name: "curl".to_string(),
                 exe: None,
                 app_name: None,
@@ -834,6 +865,7 @@ mod tests {
             key,
             CachedEntry {
                 name: "curl".to_string(),
+                pid: None,
                 exe: None,
                 app_name: None,
                 inserted_at: Instant::now(),
@@ -847,6 +879,82 @@ mod tests {
         assert!(resolver
             .resolve("10.20.30.40", 65000, TransportProtocol::Udp)
             .is_none());
+    }
+
+    /// Fake tracker simulating eBPF map contents: the caller mutates the
+    /// reported PID between lookups to simulate port reuse by another process.
+    struct PortReuseTracker {
+        pid: std::sync::atomic::AtomicU32,
+    }
+
+    impl crate::SocketTracker for PortReuseTracker {
+        fn lookup_pid(
+            &self,
+            _src_ip: IpAddr,
+            _src_port: u16,
+            _protocol: TransportProtocol,
+        ) -> Option<crate::TrackedProcess> {
+            Some(crate::TrackedProcess {
+                pid: self.pid.load(std::sync::atomic::Ordering::SeqCst),
+                uid: 0,
+            })
+        }
+    }
+
+    /// Reproduces the misattribution bug: the kernel recycles an ephemeral
+    /// port across processes (old socket closed → new socket from another
+    /// process binds the same port). The eBPF map correctly reports the NEW
+    /// pid, but the userspace cache still holds the OLD process's name and is
+    /// consulted first — so a YouTube request from chromium gets attributed
+    /// to whatever process owned the port 60 s ago.
+    #[test]
+    fn port_reuse_does_not_serve_stale_cached_process() {
+        use std::process::{Command, Stdio};
+
+        // Two long-lived children with distinct exe basenames.
+        let mut first = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let mut second = Command::new("tail")
+            .args(["-f", "/dev/null"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn tail");
+
+        let tracker = PortReuseTracker {
+            pid: std::sync::atomic::AtomicU32::new(first.id()),
+        };
+        let tracker: Arc<PortReuseTracker> = Arc::new(tracker);
+        let resolver =
+            ProcProcessResolver::with_sock_tracker(Arc::clone(&tracker) as Arc<dyn crate::SocketTracker>);
+
+        let ip = "10.20.30.40";
+        let first_name = resolver
+            .resolve(ip, 54321, TransportProtocol::Tcp)
+            .map(|p| p.name);
+        assert_eq!(first_name.as_deref(), Some("sleep"));
+
+        // Same (ip, port, protocol): the eBPF map now points at `tail`.
+        tracker
+            .pid
+            .store(second.id(), std::sync::atomic::Ordering::SeqCst);
+        let second_name = resolver
+            .resolve(ip, 54321, TransportProtocol::Tcp)
+            .map(|p| p.name);
+        assert_eq!(
+            second_name.as_deref(),
+            Some("tail"),
+            "port reused by another process must not be served from the stale cache"
+        );
+
+        let _ = first.kill();
+        let _ = second.kill();
+        let _ = first.wait();
+        let _ = second.wait();
     }
 
     #[test]
@@ -865,6 +973,7 @@ mod tests {
             CachedEntry {
                 name: "curl".to_string(),
                 exe: None,
+                pid: None,
                 app_name: None,
                 inserted_at: stale,
             },
