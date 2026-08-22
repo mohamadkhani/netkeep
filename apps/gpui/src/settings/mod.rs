@@ -6,7 +6,9 @@
 mod egress_tab;
 mod helpers;
 mod proxies_tab;
+mod rules_filter;
 mod rules_tab;
+mod rules_toolbar;
 
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -21,6 +23,8 @@ use gpui::{
     IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 use gpui_component::input::{Input, InputState};
+use gpui_component::label::Label;
+use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::table::{TableEvent, TableState};
 use gpui_component::TitleBar;
@@ -36,6 +40,36 @@ use rules_tab::RulesDelegate;
 
 // Re-export helpers needed by main.rs (refresh action).
 pub use helpers::fetch_and_apply;
+
+// ── Facet label → filter value mappers ─────────────────────────────────
+
+fn apply_action(label: &str, f: &mut rules_filter::RulesFilter) {
+    use rules_filter::ActionFilter;
+    f.action = match label {
+        "Allow" => Some(ActionFilter::Allow),
+        "Deny" => Some(ActionFilter::Deny),
+        "Ask" => Some(ActionFilter::Ask),
+        "Route" => Some(ActionFilter::Route),
+        _ => None,
+    };
+}
+
+fn apply_duration(label: &str, f: &mut rules_filter::RulesFilter) {
+    use rules_filter::DurationFilter;
+    f.duration = match label {
+        "Forever" => Some(DurationFilter::Permanent),
+        "Session" => Some(DurationFilter::UntilRestart),
+        _ => None,
+    };
+}
+
+fn apply_status(label: &str, f: &mut rules_filter::RulesFilter) {
+    f.status = match label {
+        "Enabled" => Some(true),
+        "Disabled" => Some(false),
+        _ => None,
+    };
+}
 
 // ── Tab enum ───────────────────────────────────────────────────────────
 
@@ -63,6 +97,9 @@ pub struct SettingsState {
     pub proxy_edit_request: Option<ProxyConfig>,
     /// Set by double-clicking a rule row; drained by SettingsApp observer.
     pub rule_edit_request: Option<Rule>,
+
+    /// Rules table filter state — survives tab switches, resets on restart.
+    pub rules_filter: rules_filter::RulesFilter,
     /// Set by Test button in proxy table rows; drained by SettingsApp observer.
     pub proxy_test_request: Option<ProxyConfig>,
     /// Set by Test button in egress table rows; drained by SettingsApp observer.
@@ -73,6 +110,7 @@ impl SettingsState {
     pub fn new(socket_path: String) -> Self {
         Self {
             rules: Vec::new(),
+rules_filter: rules_filter::RulesFilter::default(),
             egresses: Vec::new(),
             proxies: Vec::new(),
             status: None,
@@ -92,6 +130,11 @@ impl SettingsState {
 
 pub struct SettingsApp {
     state: Entity<SettingsState>,
+    rules_search_input: Entity<InputState>,
+    rules_facets: rules_toolbar::FacetSelects,
+    /// Egress (id, name) snapshot the Route select was last built from;
+    /// items are only rebuilt when this changes.
+    route_items_key: Vec<(String, String)>,
     rules_table: Entity<TableState<RulesDelegate>>,
     egress_table: Entity<TableState<EgressDelegate>>,
     proxy_table: Entity<TableState<ProxiesDelegate>>,
@@ -102,6 +145,83 @@ impl SettingsApp {
     pub fn new(state: Entity<SettingsState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let socket_path = state.read(cx).socket_path.clone();
         let weak = state.downgrade();
+
+        // Search input for the rules filter toolbar.
+        let rules_search_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search process, destination, ID…")
+        });
+        // Live filtering on every keystroke → mirror text into filter state.
+        let mut subscriptions = Vec::new();
+        subscriptions.push(cx.subscribe_in(
+            &rules_search_input,
+            window,
+            |this, _, event: &gpui_component::input::InputEvent, _, cx| {
+                if let gpui_component::input::InputEvent::Change = event {
+                    let text = this.rules_search_input.read(cx).value().to_string();
+                    let _ = cx.update_entity(&this.state, |s, cx| {
+                        s.rules_filter.search = text;
+                        cx.notify();
+                    });
+                }
+            },
+        ));
+
+        // Facet selects. Items are plain strings; index 0 is always "Any".
+        // Option labels are stable across all tabs; the Route list is
+        // rebuilt on state sync (egress names can change).
+        let facet_items = |options: &[&str]| options.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let rules_facets = rules_toolbar::FacetSelects {
+            action: cx.new(|cx| SelectState::new(facet_items(&["Any", "Allow", "Deny", "Ask", "Route"]), None, window, cx)),
+            duration: cx.new(|cx| SelectState::new(facet_items(&["Any", "Forever", "Session"]), None, window, cx)),
+            status: cx.new(|cx| SelectState::new(facet_items(&["Any", "Enabled", "Disabled"]), None, window, cx)),
+            route: cx.new(|cx| SelectState::new(vec!["Any".into()], None, window, cx)),
+        };
+        // Confirm → apply to filter state. Confirm carries the selected
+        // label; we map label → filter value. Route labels are dynamic
+        // (egress names), so its handler resolves the egress by name.
+        for (select, apply) in [
+            (
+                &rules_facets.action,
+                apply_action as fn(&str, &mut rules_filter::RulesFilter),
+            ),
+            (&rules_facets.duration, apply_duration),
+            (&rules_facets.status, apply_status),
+        ] {
+            subscriptions.push(cx.subscribe_in(
+                select,
+                window,
+                move |this, _, event: &SelectEvent<Vec<String>>, _, cx| {
+                    if let SelectEvent::Confirm(Some(label)) = event {
+                        let label = label.clone();
+                        let _ = cx.update_entity(&this.state, |s, cx| {
+                            apply(&label, &mut s.rules_filter);
+                            cx.notify();
+                        });
+                    }
+                },
+            ));
+        }
+        subscriptions.push(cx.subscribe_in(
+            &rules_facets.route,
+            window,
+            |this, _, event: &SelectEvent<Vec<String>>, _, cx| {
+                if let SelectEvent::Confirm(Some(label)) = event {
+                    let label = label.clone();
+                    let _ = cx.update_entity(&this.state, |s, cx| {
+                        s.rules_filter.route = match label.as_str() {
+                            "Any" => None,
+                            "Unrouted" => Some(rules_filter::RouteFilter::Unrouted),
+                            name => s
+                                .egresses
+                                .iter()
+                                .find(|e| e.name == name)
+                                .map(|e| rules_filter::RouteFilter::Egress(e.id.clone())),
+                        };
+                        cx.notify();
+                    });
+                }
+            },
+        ));
 
         // Create table delegates
         let rules_table = cx.new(|cx| {
@@ -129,7 +249,6 @@ impl SettingsApp {
         });
 
         // Subscribe to table events (double-click opens dialog)
-        let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(&rules_table, window, Self::on_rules_table_event));
         subscriptions.push(cx.subscribe_in(&egress_table, window, Self::on_egress_table_event));
         subscriptions.push(cx.subscribe_in(&proxy_table, window, Self::on_proxy_table_event));
@@ -138,6 +257,7 @@ impl SettingsApp {
         // Note: do NOT call cx.notify() when clearing request fields — that would re-trigger this observer.
         cx.observe_in(&state, window, |this, _, window, cx| {
             this.sync_tables(cx);
+            cx.notify();
 
             // Drain rule edit request → open pre-filled rule form.
             let rule_edit = this.state.read(cx).rule_edit_request.clone();
@@ -218,6 +338,9 @@ impl SettingsApp {
 
         Self {
             state,
+            rules_search_input,
+            rules_facets,
+            route_items_key: Vec::new(),
             rules_table,
             egress_table,
             proxy_table,
@@ -228,7 +351,7 @@ impl SettingsApp {
     /// Sync table delegate data from the shared state entity.
     fn sync_tables(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
-        let rules = state.rules.clone();
+        let rules = state.rules_filter.apply(&state.rules);
         let egresses = state.egresses.clone();
         let proxies = state.proxies.clone();
         let weak = self.state.downgrade();
@@ -262,8 +385,9 @@ impl SettingsApp {
         cx: &mut Context<Self>,
     ) {
         if let TableEvent::DoubleClickedRow(row_ix) = event {
-            let rules = &self.state.read(cx).rules;
-            if let Some(rule) = rules.get(*row_ix) {
+            // The table renders the *filtered* view — index it, not raw state.
+            let filtered = self.state.read(cx).rules_filter.apply(&self.state.read(cx).rules);
+            if let Some(rule) = filtered.get(*row_ix) {
                 let rule = rule.clone();
                 self.open_rule_form_dialog(Some(rule), window, cx);
             }
@@ -2096,10 +2220,14 @@ impl Render for SettingsApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_tables(cx);
 
-        let state = self.state.read(cx);
-        let status = state.status.clone();
-        let socket_path = state.socket_path.clone();
-        let active_tab = state.active_tab;
+        let (status, socket_path, active_tab) = {
+            let state = self.state.read(cx);
+            (
+                state.status.clone(),
+                state.socket_path.clone(),
+                state.active_tab,
+            )
+        };
 
         let weak = self.state.downgrade();
         let weak_refresh = weak.clone();
@@ -2130,10 +2258,131 @@ impl Render for SettingsApp {
 
         // Table content for the active tab
         let table_content = match active_tab {
-            SettingsTab::Rules => gpui_component::table::DataTable::new(&self.rules_table)
-                .stripe(true)
-                .bordered(true)
-                .into_any_element(),
+            SettingsTab::Rules => {
+                let (filter, egresses_snapshot): (
+                    rules_filter::RulesFilter,
+                    Vec<Egress>,
+                ) = {
+                    let s = self.state.read(cx);
+                    (s.rules_filter.clone(), s.egresses.clone())
+                };
+                let egress_names: Vec<String> =
+                    egresses_snapshot.iter().map(|e| e.name.clone()).collect();
+                let (shown, total) = {
+                    let t = &self.state.read(cx).rules;
+                    let s = self.state.read(cx).rules_filter.apply(t).len();
+                    (s, t.len())
+                };
+                // Rebuild Route select items only when the egress list
+                // actually changes. Selection is NOT touched during render —
+                // the SelectState owns it; CLEAR resets it explicitly.
+                {
+                    let egress_key: Vec<(String, String)> = egresses_snapshot
+                        .iter()
+                        .map(|e| (e.id.clone(), e.name.clone()))
+                        .collect();
+                    if self.route_items_key != egress_key {
+                        let route_items: Vec<String> = std::iter::once("Any".to_string())
+                            .chain(std::iter::once("Unrouted".to_string()))
+                            .chain(egress_names.into_iter())
+                            .collect();
+                        self.rules_facets.route.update(cx, |st, cx| {
+                            st.set_items(route_items, window, cx);
+                        });
+                        self.route_items_key = egress_key;
+                    }
+                }
+
+                // CLEAR resets filter state; the selects and search input
+                // are re-synced on the next render via the reconciliation
+                // above + explicit resets here.
+                let state_entity = self.state.clone();
+                let search_input = self.rules_search_input.clone();
+                let facets = self.rules_facets.clone();
+                let on_clear = Rc::new(
+                    move |window: &mut gpui::Window, cx: &mut gpui::App| {
+                        let _ = state_entity.update(cx, |s, cx| {
+                            s.rules_filter.clear();
+                            cx.notify();
+                        });
+                        search_input.update(cx, |input, cx| {
+                            input.set_value("", window, cx);
+                        });
+                        for st in [&facets.action, &facets.duration, &facets.status, &facets.route]
+                        {
+                            st.update(cx, |st, cx| {
+                                st.set_selected_index(None, window, cx);
+                            });
+                        }
+                    },
+                );
+
+                let toolbar = rules_toolbar::RulesToolbar {
+                    filter: &filter,
+                    search_input: &self.rules_search_input,
+                    facets: &self.rules_facets,
+                    shown,
+                    total,
+                    on_clear,
+                }
+                .render();
+
+                let table = gpui_component::table::DataTable::new(&self.rules_table)
+                    .stripe(true)
+                    .bordered(true);
+
+                let inner = if shown == 0 && filter.is_active() {
+                    // Empty state — filters match nothing
+                    v_flex()
+                        .id("rules-empty")
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(8.))
+                        .py(px(40.))
+                        .child(
+                            Label::new("No rules match your filters")
+                                .text_size(px(12.))
+                                .text_color(colors::muted()),
+                        )
+                        .child(
+                            div()
+                                .id("rules-empty-clear")
+                                .flex()
+                                .items_center()
+                                .px(px(10.))
+                                .py(px(4.))
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(colors::primary())
+                                .text_color(colors::primary())
+                                .text_size(px(10.))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .cursor_pointer()
+                                .child("CLEAR FILTERS")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let _ = cx.update_entity(&this.state, |s, cx| {
+                                        s.rules_filter.clear();
+                                        cx.notify();
+                                    });
+                                    this.rules_search_input.update(cx, |input, cx| {
+                                        input.set_value("", window, cx);
+                                    });
+                                })),
+                        )
+                        .into_any_element()
+                } else {
+                    table.into_any_element()
+                };
+
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap(px(6.))
+                    .child(toolbar)
+                    .child(inner)
+                    .into_any_element()
+            }
             SettingsTab::Egress => gpui_component::table::DataTable::new(&self.egress_table)
                 .stripe(true)
                 .bordered(true)
