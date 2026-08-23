@@ -35,7 +35,7 @@ pub enum DestinationMatcher {
     Any,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
     pub id: String,
     pub enabled: bool,
@@ -53,6 +53,33 @@ pub struct Rule {
     /// used at enforcement time; if the egress or all its targets are
     /// unavailable the packet is denied (fail-close).
     pub egress_id: Option<String>,
+    /// Ordinal precedence; higher = evaluated first when multiple rules match.
+    /// Seeded at creation from the built-in restriction ladder
+    /// (`policy_engine::seed_priority`) and refined by user reordering via
+    /// midpoint insertion. Never shown or entered as a number in the UI.
+    /// See the priority ladder (fractional rule priority).
+    #[serde(default = "default_priority")]
+    pub priority: f64,
+}
+
+fn default_priority() -> f64 {
+    1.0
+}
+
+/// Creation-time choice for process-only rules (destination = `Any`).
+///
+/// A `process + Any` rule has no destination restriction, so the ladder
+/// can't rank it by destination specificity. Instead the creator picks one
+/// of two slots: `High` (base 7, the common case — "this process matters")
+/// or `Low` (base 2, "background/telemetry process"). Rules created via the
+/// plain `AddRule` request default to `High`. See the priority ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ProcessPriority {
+    /// Ladder base 7 — "this process matters" (default for plain `AddRule`).
+    #[default]
+    High,
+    /// Ladder base 2 — "background/telemetry process".
+    Low,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

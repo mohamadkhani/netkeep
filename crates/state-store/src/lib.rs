@@ -15,6 +15,12 @@ pub trait RuleRepository {
     fn get_rule(&self, id: &str) -> Option<Rule>;
     fn list_rules(&self) -> Vec<Rule>;
     fn delete_rule(&mut self, id: &str) -> bool;
+    /// Monotonic creation sequence for ladder seeding.
+    fn next_creation_seq(&self) -> i64;
+    /// Directly set a rule's fractional priority (midpoint reorder).
+    fn set_rule_priority(&mut self, id: &str, priority: f64) -> bool;
+    /// Rewrite all priorities to evenly spaced values, preserving order.
+    fn rebalance_priorities(&mut self) -> Option<usize>;
     /// Remove all rules with `duration == UntilRestart`. Called at daemon startup.
     fn purge_session_rules(&mut self);
 }
@@ -89,10 +95,15 @@ pub struct InMemoryRuleRepository {
     pending: HashMap<String, PendingDecision>,
     egresses: HashMap<String, Egress>,
     proxies: HashMap<String, ProxyConfig>,
+    /// Mirrors SQLite's rowid: monotonic across inserts, never decremented.
+    creation_seq: i64,
 }
 
 impl RuleRepository for InMemoryRuleRepository {
     fn upsert_rule(&mut self, rule: Rule) {
+        if !self.rules.contains_key(&rule.id) {
+            self.creation_seq += 1;
+        }
         self.rules.insert(rule.id.clone(), rule);
     }
 
@@ -101,11 +112,44 @@ impl RuleRepository for InMemoryRuleRepository {
     }
 
     fn list_rules(&self) -> Vec<Rule> {
-        self.rules.values().cloned().collect()
+        // Evaluation order: highest priority first. Ties broken by
+        // id so the order is deterministic — HashMap iteration is not.
+        let mut rules: Vec<Rule> = self.rules.values().cloned().collect();
+        rules.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        rules
     }
 
     fn delete_rule(&mut self, id: &str) -> bool {
         self.rules.remove(id).is_some()
+    }
+
+    fn next_creation_seq(&self) -> i64 {
+        self.creation_seq + 1
+    }
+
+    fn set_rule_priority(&mut self, id: &str, priority: f64) -> bool {
+        match self.rules.get_mut(id) {
+            Some(rule) => {
+                rule.priority = priority;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn rebalance_priorities(&mut self) -> Option<usize> {
+        let ordered: Vec<String> = self.list_rules().into_iter().map(|r| r.id).collect();
+        for (i, id) in ordered.iter().enumerate() {
+            if let Some(rule) = self.rules.get_mut(id) {
+                rule.priority = 1000.0 - i as f64;
+            }
+        }
+        Some(ordered.len())
     }
 
     fn purge_session_rules(&mut self) {
@@ -207,7 +251,8 @@ impl SqliteRuleRepository {
                  destination_kind INTEGER NOT NULL,
                  destination_value TEXT NOT NULL,
                  egress_id TEXT NULL,
-                 process_exe TEXT NULL
+                 process_exe TEXT NULL,
+                 priority REAL NOT NULL DEFAULT 1.0
              );
              CREATE TABLE IF NOT EXISTS flow_events (
                  id TEXT PRIMARY KEY,
@@ -261,7 +306,26 @@ impl SqliteRuleRepository {
         // Migrations: add columns to existing DBs (ignore error if they already exist).
         let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN egress_id TEXT NULL;");
         let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN process_exe TEXT NULL;");
-        Ok(Self { conn })
+        let _ = conn.execute_batch(
+            "ALTER TABLE rules ADD COLUMN priority REAL NOT NULL DEFAULT 1.0;",
+        );
+        // One-time backfill: rules from pre-priority DBs carry the
+        // column default 1.0; re-seed them from the hardcoded restriction
+        // ladder. Guarded by PRAGMA user_version so it runs exactly once —
+        // not on every open (a legitimately seeded first catch-all rule is
+        // also exactly 1.0, so the value alone can't be the marker).
+        const PRIORITY_MIGRATION_VERSION: i64 = 2;
+        let current_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+        let repo = Self { conn };
+        if current_version < PRIORITY_MIGRATION_VERSION {
+            repo.backfill_priorities();
+            let _ = repo
+                .conn
+                .pragma_update(None, "user_version", PRIORITY_MIGRATION_VERSION);
+        }
+        Ok(repo)
     }
 }
 
@@ -379,12 +443,112 @@ fn i64_to_state(v: i64) -> Option<FlowState> {
 
 // --- RuleRepository impl ---
 
+impl SqliteRuleRepository {
+    /// One-time migration: re-seed every existing rule's priority
+    /// from the hardcoded restriction ladder. Recency fractions come from the
+    /// row's `rowid` so creation order is preserved within a combo class.
+    fn backfill_priorities(&self) {
+        let rules = self.list_rules_internal();
+        for rule in rules {
+            let rowid: i64 = match self.conn.query_row(
+                "SELECT rowid FROM rules WHERE id = ?1",
+                params![rule.id],
+                |row| row.get(0),
+            ) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let priority =
+                policy_engine::seed_priority(&rule, rowid, core_types::ProcessPriority::High);
+            let _ = self.conn.execute(
+                "UPDATE rules SET priority = ?1 WHERE id = ?2",
+                params![priority, rule.id],
+            );
+        }
+    }
+
+    /// Monotonic creation sequence for `seed_priority` recency fractions.
+    /// SQLite rowids are monotonically assigned for INSERTs (reused ids after
+    /// deletes are not decremented here because we take the current max).
+    fn max_rowid(&self) -> i64 {
+        self.conn
+            .query_row("SELECT COALESCE(MAX(rowid), 0) FROM rules", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0)
+    }
+
+    /// All rules ordered by descending priority (evaluation order).
+    pub fn list_rules_by_priority(&self) -> Vec<Rule> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe, priority
+             FROM rules ORDER BY priority DESC, rowid ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let mapped = stmt.query_map([], map_rule_row);
+        match mapped {
+            Ok(m) => m.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn list_rules_internal(&self) -> Vec<Rule> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe, priority
+             FROM rules ORDER BY rowid ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let mapped = stmt.query_map([], map_rule_row);
+        match mapped {
+            Ok(m) => m.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+fn map_rule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Rule> {
+    let action = i64_to_action(row.get::<_, i64>(2)?).ok_or(rusqlite::Error::InvalidColumnType(
+        2,
+        "action".to_string(),
+        rusqlite::types::Type::Integer,
+    ))?;
+    let duration = i64_to_duration(row.get::<_, i64>(3)?).ok_or(
+        rusqlite::Error::InvalidColumnType(
+            3,
+            "duration".to_string(),
+            rusqlite::types::Type::Integer,
+        ),
+    )?;
+    let destination =
+        parts_to_destination(row.get::<_, i64>(5)?, row.get::<_, String>(6)?)
+            .ok_or(rusqlite::Error::InvalidColumnType(
+                5,
+                "destination_kind".to_string(),
+                rusqlite::types::Type::Integer,
+            ))?;
+    Ok(Rule {
+        id: row.get(0)?,
+        enabled: row.get::<_, i64>(1)? != 0,
+        action,
+        duration,
+        process_name: row.get(4)?,
+        process_exe: row.get(8)?,
+        destination,
+        egress_id: row.get(7)?,
+        priority: row.get::<_, f64>(9)?,
+    })
+}
+
 impl RuleRepository for SqliteRuleRepository {
     fn upsert_rule(&mut self, rule: Rule) {
         let (destination_kind, destination_value) = destination_to_parts(&rule.destination);
         let _ = self.conn.execute(
-            "INSERT INTO rules (id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO rules (id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe, priority)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                  enabled=excluded.enabled,
                  action=excluded.action,
@@ -393,7 +557,8 @@ impl RuleRepository for SqliteRuleRepository {
                  destination_kind=excluded.destination_kind,
                  destination_value=excluded.destination_value,
                  egress_id=excluded.egress_id,
-                 process_exe=excluded.process_exe;",
+                 process_exe=excluded.process_exe,
+                 priority=excluded.priority;",
             params![
                 rule.id,
                 if rule.enabled { 1i64 } else { 0i64 },
@@ -404,6 +569,7 @@ impl RuleRepository for SqliteRuleRepository {
                 destination_value,
                 rule.egress_id,
                 rule.process_exe,
+                rule.priority,
             ],
         );
     }
@@ -412,7 +578,7 @@ impl RuleRepository for SqliteRuleRepository {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe
+                "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe, priority
                  FROM rules WHERE id = ?1",
             )
             .ok()?;
@@ -431,51 +597,13 @@ impl RuleRepository for SqliteRuleRepository {
             process_exe: row.get(8).ok()?,
             destination,
             egress_id: row.get(7).ok()?,
+            priority: row.get(9).ok()?,
         })
     }
 
     fn list_rules(&self) -> Vec<Rule> {
-        let mut stmt = match self.conn.prepare(
-            "SELECT id, enabled, action, duration, process_name, destination_kind, destination_value, egress_id, process_exe FROM rules ORDER BY id",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let mapped = match stmt.query_map([], |row| {
-            let action =
-                i64_to_action(row.get::<_, i64>(2)?).ok_or(rusqlite::Error::InvalidColumnType(
-                    2,
-                    "action".to_string(),
-                    rusqlite::types::Type::Integer,
-                ))?;
-            let duration = i64_to_duration(row.get::<_, i64>(3)?).ok_or(
-                rusqlite::Error::InvalidColumnType(
-                    3,
-                    "duration".to_string(),
-                    rusqlite::types::Type::Integer,
-                ),
-            )?;
-            let destination = parts_to_destination(row.get::<_, i64>(5)?, row.get::<_, String>(6)?)
-                .ok_or(rusqlite::Error::InvalidColumnType(
-                    5,
-                    "destination_kind".to_string(),
-                    rusqlite::types::Type::Integer,
-                ))?;
-            Ok(Rule {
-                id: row.get(0)?,
-                enabled: row.get::<_, i64>(1)? != 0,
-                action,
-                duration,
-                process_name: row.get(4)?,
-                process_exe: row.get(8)?,
-                destination,
-                egress_id: row.get(7)?,
-            })
-        }) {
-            Ok(m) => m,
-            Err(_) => return Vec::new(),
-        };
-        mapped.filter_map(Result::ok).collect()
+        // Evaluation order: highest priority first.
+        self.list_rules_by_priority()
     }
 
     fn delete_rule(&mut self, id: &str) -> bool {
@@ -483,6 +611,44 @@ impl RuleRepository for SqliteRuleRepository {
             .execute("DELETE FROM rules WHERE id = ?1", params![id])
             .map(|count| count > 0)
             .unwrap_or(false)
+    }
+
+    fn next_creation_seq(&self) -> i64 {
+        self.max_rowid() + 1
+    }
+
+    fn set_rule_priority(&mut self, id: &str, priority: f64) -> bool {
+        self.conn
+            .execute(
+                "UPDATE rules SET priority = ?1 WHERE id = ?2",
+                params![priority, id],
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
+    /// Rewrite all priorities to evenly spaced values preserving current
+    /// order (the priority ladder precision-exhaustion recovery). Single transaction.
+    /// Returns the number of rules rebalanced, or None on failure.
+    fn rebalance_priorities(&mut self) -> Option<usize> {
+        let ordered = self.list_rules_by_priority();
+        let n = ordered.len();
+        if n == 0 {
+            return Some(0);
+        }
+        let tx = self.conn.transaction().ok()?;
+        for (i, rule) in ordered.iter().enumerate() {
+            // Top rule gets 1000.0, stepping down by 1.0 — plenty of room
+            // above the ladder's 12.x for future midpoint inserts.
+            let priority = 1000.0 - i as f64;
+            tx.execute(
+                "UPDATE rules SET priority = ?1 WHERE id = ?2",
+                params![priority, rule.id],
+            )
+            .ok()?;
+        }
+        tx.commit().ok()?;
+        Some(n)
     }
 
     fn purge_session_rules(&mut self) {
@@ -917,6 +1083,7 @@ mod tests {
             process_exe: None,
             destination: DestinationMatcher::DomainExact("example.com".to_string()),
             egress_id: None,
+            priority: 5.0,
         }
     }
 

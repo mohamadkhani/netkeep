@@ -90,3 +90,23 @@ pub fn teal_border() -> gpui::Hsla {
 pub fn orange() -> gpui::Hsla {
     gpui::rgb(0xf97316).into() // fire icon orange
 }
+
+/// Color for a rule's restriction level (the priority ladder priority ladder).
+///
+/// The input is the rule's stored fractional priority; only its integer part
+/// matters — that's the combo base from the hardcoded ladder (1 = catch-all
+/// `Any`, up to 12 = `process + ip`, most restricted). The color answers
+/// "how restrictive is this rule," independent of where the user dragged it.
+///
+/// Ramp: most-restricted (12) is warm red, least-restricted (1) is cool teal.
+/// Discrete buckets (one hue per ladder rung) keep the meaning stable and
+/// avoid muddy mid-gradient blends where rules cluster at the extremes.
+pub fn priority_color(priority: f64) -> gpui::Hsla {
+    // Clamp the rung to the ladder's range [1, 12].
+    let rung = priority.floor().clamp(1.0, 12.0);
+    // t = 0.0 for the catch-all (rung 1), 1.0 for the most restricted (rung 12).
+    let t = (rung - 1.0) / 11.0;
+    // Hue sweeps from teal (174°) at the bottom to red (4°) at the top.
+    let hue = 174.0 - t * 170.0;
+    gpui::hsla((hue / 360.0) as f32, 0.72, 0.55, 1.0)
+}

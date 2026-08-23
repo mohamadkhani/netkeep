@@ -121,14 +121,19 @@ pub struct SettingsApp {
 
 ### RulesDelegate
 
-**Columns:** ID (140px) | Action (80px) | Destination (160px) | Route (100px) | Controls (150px, not resizable)
+**Columns:** ID (90px) | Process (110px) | Destination (180px) | Action (80px) | Duration (80px) | Route (90px) | Priority (56px, not resizable) | Controls (190px, not resizable)
+
+Rows are shown in daemon-returned order (priority-descending); do not re-sort client-side. See [`docs/architecture.md`](architecture.md) → policy-engine for the ladder.
 
 **Cell rendering:**
-- Col 0: Green/red dot (enabled/disabled) + rule ID
-- Col 1: Color-coded action badge (Allow=green, Deny=red, Ask=amber, Route=teal)
-- Col 2: Destination value (domain, IP, CIDR)
-- Col 3: Route target summary
-- Col 4: Toggle button + Delete button (with async daemon call)
+- ID: green/red dot (enabled/disabled) + short rule id
+- Process: process name or "—" when unconstrained
+- Destination: destination value (domain, IP, CIDR, wildcard, or "any")
+- Action: color-coded badge (Allow=green, Deny=red, Ask=amber, Route=teal)
+- Duration: PERM / SESSION badge
+- Route: egress display name or "—"
+- Priority: a 4px color strip encoding the rule's restriction level (teal=least restricted → red=most restricted); no number is shown. The color reflects the ladder rung, not the dragged position, so it stays truthful after reorder.
+- Controls: Enable/Disable · Delete · ↑/↓ (reorder via `MoveRule`, which re-fetches the table)
 
 ### EgressDelegate
 
@@ -318,6 +323,11 @@ fn open_proxy_form_dialog(
 ```
 
 **Pattern for egress form** (`open_egress_form_dialog`) is identical — fields differ (Name, Color, Targets CSV, DNS CSV). The `parse_targets_csv` helper converts the targets text field into `Vec<RouteTarget>`.
+
+**Rule form** (`open_rule_form_dialog`) adds one conditional field: a **PROCESS PRIORITY** HIGH/LOW selector, shown only when destination type is `Any` (a `process + Any` rule). This is the ladder slot choice — `High` (base 7) or `Low` (base 2). The selector is hidden for every other destination, since those are ranked by destination specificity and the choice does not apply.
+
+- On **create**, the form sends `AddRuleWithProcessPriority` for `process + Any` rules and plain `AddRule` otherwise.
+- On **edit**, the initial tier is inferred from the stored priority (`>= 7.0` → High, else Low) since `Rule` persists only the float, not the enum. Flipping the tier re-seeds the priority; leaving it unchanged carries the stored priority over (so a process-name typo fix does not disturb a manual reorder position). The form still sends `priority: 0.0` — the daemon owns priority assignment; see the [`control-api`](architecture.md#control-api) notes.
 
 ### `parse_targets_csv` — Egress Targets Field
 

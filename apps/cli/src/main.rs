@@ -120,6 +120,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                     process_exe: None,
                     destination,
                     egress_id,
+                        priority: 0.0,
                 }),
                 output_mode,
             ))

@@ -711,6 +711,7 @@ fn allow_button(
                             process_exe: proc_exe,
                             destination: dest,
                             egress_id: eid,
+                            priority: 0.0,
                         };
                         let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
                             .unwrap_or_else(|_| SOCKET_PATH.to_string());
@@ -807,6 +808,9 @@ fn deny_button(
                             process_exe: proc_exe,
                             destination: dest,
                             egress_id: None,
+                            // Daemon re-seeds priority at AddRule time from
+                            // the restriction ladder; this value is ignored.
+                            priority: 0.0,
                         };
                         let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
                             .unwrap_or_else(|_| SOCKET_PATH.to_string());

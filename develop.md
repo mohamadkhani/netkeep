@@ -147,9 +147,8 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 
 ### Rule Resolution
 
-- Action precedence: `Deny > Allow > Ask`; `Allow` and `Route` share action rank
-- Specificity (high → low): process+exact > process+wildcard > exact > wildcard > global
-- Tie-break: lexicographically greater `rule.id` wins
+- Precedence: `rule.priority` descending (restriction ladder, seeded at creation; manual reorder via `MoveRule` midpoint insertion) — see [`docs/architecture.md`](docs/architecture.md) → policy-engine
+- Tie-break: action rank (`Deny > Allow/Route > Ask`), then lexicographically greater `rule.id`
 - Wildcard: `*.example.com` matches subdomains only; apex must be explicit
 
 ## 3) Implementation Phases

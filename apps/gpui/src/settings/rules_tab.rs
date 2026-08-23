@@ -14,7 +14,7 @@ use crate::colors;
 use crate::components::{action_btn, badge, dest_text};
 use crate::daemon;
 
-use super::SettingsState;
+use super::{fetch_and_apply, SettingsState};
 
 // ── Delegate ───────────────────────────────────────────────────────────
 
@@ -42,10 +42,11 @@ impl RulesDelegate {
                 Column::new("id", "ID").width(px(90.)),
                 Column::new("process", "Process").width(px(110.)),
                 Column::new("destination", "Destination").width(px(180.)),
-                Column::new("duration", "Duration").width(px(80.)),
                 Column::new("action", "Action").width(px(80.)),
+                Column::new("duration", "Duration").width(px(80.)),
                 Column::new("route", "Route").width(px(90.)),
-                Column::new("controls", "").width(px(150.)).resizable(false),
+                Column::new("priority", "Priority").width(px(56.)).resizable(false),
+                Column::new("controls", "").width(px(190.)).resizable(false),
             ],
         }
     }
@@ -181,8 +182,27 @@ impl TableDelegate for RulesDelegate {
                     })
                     .into_any_element()
             }
-            // Controls column — toggle + delete
-            6 => {
+            // Priority column — restriction-level color strip.
+            // The strip answers "how restrictive is this rule," independent of
+            // where the user dragged it. No number is shown by design.
+            6 => h_flex()
+                .h_full()
+                .items_center()
+                .child(
+                    h_flex()
+                        .w(px(4.))
+                        .h(px(16.))
+                        .rounded(px(2.))
+                        .bg(if dimmed {
+                            colors::muted()
+                        } else {
+                            colors::priority_color(rule.priority)
+                        }),
+                )
+                .into_any_element(),
+
+            // Controls column — toggle + delete + reorder
+            7 => {
                 let id_toggle = rule.id.clone();
                 let id_del = rule.id.clone();
                 let rule_toggle = rule.clone();
@@ -191,6 +211,34 @@ impl TableDelegate for RulesDelegate {
                 let state_toggle = self.state_weak.clone();
                 let sock_del = self.socket_path.clone();
                 let state_del = self.state_weak.clone();
+
+                // Reorder neighbors come from the delegate's current (filtered,
+                // priority-descending) view. Moving within a filtered view is
+                // still well-defined: the rule is placed between its visible
+                // neighbors.
+                //
+                // Daemon semantics (control-service `move_rule`): `before_id`
+                // is the upper neighbor (rule lands below it), `after_id` the
+                // lower neighbor (rule lands above it). So:
+                //   move up   → land between above_above and above
+                //   move down → land between below and below_below
+                let above = row_ix
+                    .checked_sub(1)
+                    .and_then(|i| self.rules.get(i))
+                    .map(|r| r.id.clone());
+                let above_above = row_ix
+                    .checked_sub(2)
+                    .and_then(|i| self.rules.get(i))
+                    .map(|r| r.id.clone());
+                let below = self.rules.get(row_ix + 1).map(|r| r.id.clone());
+                let below_below = self.rules.get(row_ix + 2).map(|r| r.id.clone());
+
+                let sock_up = self.socket_path.clone();
+                let state_up = self.state_weak.clone();
+                let id_up = rule.id.clone();
+                let sock_down = self.socket_path.clone();
+                let state_down = self.state_weak.clone();
+                let id_down = rule.id.clone();
 
                 h_flex()
                     .gap(px(6.))
@@ -257,6 +305,80 @@ impl TableDelegate for RulesDelegate {
                                             cx.notify();
                                         });
                                     }
+                                })
+                                .detach();
+                            }),
+                    )
+                    .child(
+                        action_btn(format!("rule-up-{id_up}"), "↑", colors::muted())
+                            .on_click(move |_, _, cx| {
+                                // Already at the top — nothing to do.
+                                let Some(above_id) = above.clone() else {
+                                    return;
+                                };
+                                let rid = id_up.clone();
+                                let sock = sock_up.clone();
+                                let sw = state_up.clone();
+                                // Land between above_above and above. When
+                                // above_above is None this becomes (None, Some)
+                                // → daemon places the rule at the top.
+                                let before = above_above.clone();
+                                let after = Some(above_id);
+                                let sock_send = sock.clone();
+                                cx.spawn(async move |cx| {
+                                    let _ = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            daemon::send_request(
+                                                &sock_send,
+                                                &ControlRequest::MoveRule {
+                                                    id: rid,
+                                                    before_id: before,
+                                                    after_id: after,
+                                                },
+                                            )
+                                        })
+                                        .await;
+                                    // The new priority is computed daemon-side;
+                                    // re-fetch so the table re-sorts correctly.
+                                    fetch_and_apply(sw, &sock, cx).await;
+                                })
+                                .detach();
+                            }),
+                    )
+                    .child(
+                        action_btn(format!("rule-down-{id_down}"), "↓", colors::muted())
+                            .on_click(move |_, _, cx| {
+                                // Already at the bottom — nothing to do.
+                                let Some(below_id) = below.clone() else {
+                                    return;
+                                };
+                                let rid = id_down.clone();
+                                let sock = sock_down.clone();
+                                let sw = state_down.clone();
+                                // Land between below and below_below. When
+                                // below_below is None this becomes (Some, None)
+                                // → daemon places the rule at the bottom.
+                                let before = Some(below_id);
+                                let after = below_below.clone();
+                                let sock_send = sock.clone();
+                                cx.spawn(async move |cx| {
+                                    let _ = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            daemon::send_request(
+                                                &sock_send,
+                                                &ControlRequest::MoveRule {
+                                                    id: rid,
+                                                    before_id: before,
+                                                    after_id: after,
+                                                },
+                                            )
+                                        })
+                                        .await;
+                                    // The new priority is computed daemon-side;
+                                    // re-fetch so the table re-sorts correctly.
+                                    fetch_and_apply(sw, &sock, cx).await;
                                 })
                                 .detach();
                             }),

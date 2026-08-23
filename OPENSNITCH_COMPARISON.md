@@ -73,7 +73,7 @@ OpenSnitch is a mature, battle-tested application firewall (13.6k GitHub stars, 
 | **Rule Storage** | JSON files | SQLite database |
 | **Protocol (Daemon↔UI)** | gRPC | Unix socket JSON-RPC |
 | **Default Timeout** | 30 seconds (fixed) | 100s (configurable per protocol) |
-| **Rule Precedence** | Alphabetical by name | Specificity-based (process+IP > wildcard) |
+| **Rule Precedence** | Alphabetical by name | Priority ladder (restriction-based, user-reorderable) |
 | **Pending Queue Cap** | Unlimited | 100 items (configurable) |
 | **UI Framework** | PyQt5 (Python) | GPUI native (Rust) |
 | **Learning Mode** | Yes (documented workflow) | Not implemented |
@@ -147,14 +147,9 @@ enum DestinationMatcher {
 ```
 
 **Matching Logic:**
-1. Specificity precedence (highest to lowest):
-   - process + exact IP/domain
-   - process + wildcard/CIDR
-   - exact IP/domain only
-   - wildcard/CIDR only
-   - global/default
+1. Priority precedence (highest to lowest): each rule carries a `priority: f64` seeded from a restriction ladder at creation — more restricted combos rank higher (process+exact IP > process+exact domain > process+wildcard > process+CIDR > process+Any > exact IP > exact domain > wildcard > CIDR > global). Users can reorder rules manually.
 
-2. Action precedence (same specificity): Deny > Allow > Ask
+2. Action precedence (same priority): Deny > Allow > Ask
 
 3. Wildcard semantics: `*.example.com` ≠ `example.com` (prevents apex spoofing)
 
@@ -486,7 +481,7 @@ OpenSnitch: Thread pools + Python GIL (doesn't scale beyond single machine)
 - **Latency:** Varies (GC pauses, lock contention)
 
 ### LogiGuard
-- **Rule matching:** O(n) linear scan, specificity precedence (faster in practice: early match)
+- **Rule matching:** O(n) linear scan, priority-descending precedence (faster in practice: early match)
 - **UI responsiveness:** Native Rust, no GIL
 - **Memory footprint:** ~5MB total (daemon + UI)
 - **Latency:** Predictable, deterministic (<1ms decision)
@@ -601,8 +596,8 @@ return DEFAULT_DENY
 **LogiGuard:**
 ```rust
 let rules = repo.list_enabled();
-// Sort by specificity (built into matcher)
-for rule in rules.iter().rev() {  // Most specific first
+// Already sorted by priority DESC (built into matcher)
+for rule in rules.iter() {  // Highest priority first
   if matcher::matches(&rule, &flow) {
     return rule.action;
   }

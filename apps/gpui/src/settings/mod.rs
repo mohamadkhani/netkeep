@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{
-    DestinationMatcher, Egress, ProxyAuth, ProxyConfig, ProxyProtocol, Rule, RuleAction,
-    RuleDuration,
+    DestinationMatcher, Egress, ProcessPriority, ProxyAuth, ProxyConfig, ProxyProtocol, Rule,
+    RuleAction, RuleDuration,
 };
 use gpui::{
     div, prelude::FluentBuilder as _, px, AppContext as _, Context, Entity, InteractiveElement,
@@ -430,6 +430,22 @@ impl SettingsApp {
             .as_ref()
             .and_then(|r| r.egress_id.clone())
             .unwrap_or_default();
+        // For an existing process+Any rule, infer the tier from its stored
+        // priority (base 7 = High, base 2 = Low). New rules default to High.
+        let init_proc_priority = existing
+            .as_ref()
+            .filter(|r| {
+                matches!(r.destination, DestinationMatcher::Any)
+                    && (r.process_name.is_some() || r.process_exe.is_some())
+            })
+            .map(|r| {
+                if r.priority >= 7.0 {
+                    ProcessPriority::High
+                } else {
+                    ProcessPriority::Low
+                }
+            })
+            .unwrap_or(ProcessPriority::High);
 
         let process_input = cx.new(|cx| {
             let mut s = InputState::new(window, cx);
@@ -458,12 +474,15 @@ impl SettingsApp {
         let selected_duration: Arc<Mutex<RuleDuration>> = Arc::new(Mutex::new(init_duration));
         let selected_dest_type: Arc<Mutex<String>> =
             Arc::new(Mutex::new(init_dest_type.to_string()));
+        let selected_proc_priority: Arc<Mutex<ProcessPriority>> =
+            Arc::new(Mutex::new(init_proc_priority));
 
         let proc_c = process_input.clone();
         let dest_c = dest_input.clone();
         let action_c = selected_action.clone();
         let dur_c = selected_duration.clone();
         let dtype_c = selected_dest_type.clone();
+        let pprio_c = selected_proc_priority.clone();
 
         let hdr_icon = if is_edit { "✏" } else { "⊕" };
         let hdr_title = if is_edit { "EDIT RULE" } else { "ADD RULE" };
@@ -473,6 +492,7 @@ impl SettingsApp {
             let cur_action = action_c.lock().unwrap().clone();
             let cur_duration = dur_c.lock().unwrap().clone();
             let cur_dtype = dtype_c.lock().unwrap().clone();
+            let cur_pprio = pprio_c.lock().unwrap().clone();
 
             // Action button colors
             let (ac_allow, ac_deny, ac_ask, ac_route) = match cur_action {
@@ -524,6 +544,17 @@ impl SettingsApp {
             );
 
             let show_dest_input = cur_dtype != "any";
+            // Process priority selector is only relevant for process+Any rules
+            //: a rule matching by process with no destination
+            // constraint has no specificity to rank by, so the user picks a
+            // High/Low slot. Hidden whenever a destination is set, since the
+            // ladder ranks those by destination specificity regardless.
+            let show_proc_priority = cur_dtype == "any";
+            // Priority button colors
+            let (pc_high, pc_low) = match cur_pprio {
+                ProcessPriority::High => (colors::primary(), colors::muted()),
+                ProcessPriority::Low => (colors::muted(), colors::orange()),
+            };
 
             // Clones for on_ok
             let proc_i = proc_c.clone();
@@ -532,6 +563,7 @@ impl SettingsApp {
             let action_ok = action_c.clone();
             let dur_ok = dur_c.clone();
             let dtype_ok = dtype_c.clone();
+            let pprio_ok = selected_proc_priority.clone();
             let state_w = state_weak.clone();
             let sock = socket_path.clone();
             let eid = existing_id.clone();
@@ -543,6 +575,7 @@ impl SettingsApp {
                 let action_ok = action_ok;
                 let dur_ok = dur_ok;
                 let dtype_ok = dtype_ok;
+                let pprio_ok = pprio_ok;
                 let state_w = state_w;
                 let sock = sock;
                 let eid = eid;
@@ -579,6 +612,10 @@ impl SettingsApp {
                     let id = eid
                         .clone()
                         .unwrap_or_else(|| format!("ui-{}", crate::daemon::unix_now()));
+                    // Decide whether this is a process+Any rule *before* moving
+                    // the fields into the Rule struct.
+                    let is_proc_any = matches!(destination, DestinationMatcher::Any)
+                        && process_name.is_some();
                     let rule = Rule {
                         id,
                         enabled: true,
@@ -588,19 +625,30 @@ impl SettingsApp {
                         process_exe: None,
                         destination,
                         egress_id,
+                            priority: 0.0,
                     };
                     let to_send = rule.clone();
                     let sock_c = sock.clone();
                     let state_wc = state_w.clone();
                     let editing = eid.is_some();
+                    // For process+Any rules, send the chosen ProcessPriority so
+                    // the daemon seeds the correct ladder slot.
+                    // Other combos are ranked by destination specificity, so
+                    // plain AddRule (which seeds High) is fine.
+                    let proc_prio = pprio_ok.lock().unwrap().clone();
                     cx.spawn(async move |cx| {
                         let res = cx
                             .background_executor()
                             .spawn(async move {
-                                crate::daemon::send_request(
-                                    &sock_c,
-                                    &ControlRequest::AddRule(to_send),
-                                )
+                                let req = if is_proc_any {
+                                    ControlRequest::AddRuleWithProcessPriority {
+                                        rule: to_send,
+                                        process_priority: proc_prio,
+                                    }
+                                } else {
+                                    ControlRequest::AddRule(to_send)
+                                };
+                                crate::daemon::send_request(&sock_c, &req)
                             })
                             .await;
                         if let Some(st) = state_wc.upgrade() {
@@ -652,6 +700,8 @@ impl SettingsApp {
             let dt_dom = selected_dest_type.clone();
             let dt_wild = selected_dest_type.clone();
             let dt_any = selected_dest_type.clone();
+            let pp_high = selected_proc_priority.clone();
+            let pp_low = selected_proc_priority.clone();
 
             dialog
                 .p(px(0.))
@@ -696,6 +746,26 @@ impl SettingsApp {
                                 .child(field_label("PROCESS  (leave empty to match all)"))
                                 .child(Input::new(&proc_c)),
                         )
+                        // Process priority — only for process+Any rules.
+                        // A process rule with no destination has no specificity to
+                        // rank by, so the user picks a High/Low slot.
+                        .when(show_proc_priority, |el| {
+                            el.child(
+                                v_flex().gap(px(4.)).child(
+                                    field_label("PROCESS PRIORITY  (where this process rule ranks)"),
+                                )
+                                .child(
+                                    h_flex().gap(px(8.)).child(
+                                        proto_btn("HIGH", pc_high, pc_high, move |_, _, _| {
+                                            *pp_high.lock().unwrap() = ProcessPriority::High;
+                                        }),
+                                    )
+                                    .child(proto_btn("LOW", pc_low, pc_low, move |_, _, _| {
+                                        *pp_low.lock().unwrap() = ProcessPriority::Low;
+                                    })),
+                                ),
+                            )
+                        })
                         // Action
                         .child(
                             v_flex().gap(px(4.)).child(field_label("ACTION")).child(

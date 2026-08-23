@@ -1,15 +1,33 @@
 use core_types::{
-    Egress, FlowContext, FlowEvent, PendingDecision, ProxyConfig, RouteTarget, Rule, RuleAction,
-    TransportProtocol,
+    Egress, FlowContext, FlowEvent, PendingDecision, ProcessPriority, ProxyConfig, RouteTarget,
+    Rule, RuleAction, TransportProtocol,
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ControlRequest {
     AddRule(Rule),
+    /// Add a rule with an explicit process-priority tier for process-only
+    /// rules (the priority ladder ladder bases 7/8/2). The daemon seeds the rule's
+    /// fractional priority from the restriction ladder; the client never
+    /// supplies a priority float.
+    AddRuleWithProcessPriority {
+        rule: Rule,
+        process_priority: ProcessPriority,
+    },
     ListRules,
     DeleteRule {
         id: String,
+    },
+    /// Reorder a rule by position. The daemon computes the new
+    /// priority via midpoint insertion between `before_id` (rule above) and
+    /// `after_id` (rule below); both `None` means move to the very bottom,
+    /// both present must be adjacent in evaluation order is NOT required —
+    /// the midpoint of the two named rules is used regardless.
+    MoveRule {
+        id: String,
+        before_id: Option<String>,
+        after_id: Option<String>,
     },
     ListPending,
     ListFlows {
@@ -69,7 +87,7 @@ pub enum ControlRequest {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ControlResponse {
     Ok,
     RuleList(Vec<Rule>),
@@ -130,7 +148,7 @@ pub enum ControlResponse {
 }
 
 // NEW: Push notifications sent from daemon to subscribers
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PushNotification {
     PendingCreated {
         decision: PendingDecision,
@@ -148,6 +166,18 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
     match req {
         ControlRequest::DeleteRule { id } if id.trim().is_empty() => {
             Err("rule id cannot be empty".to_string())
+        }
+        ControlRequest::MoveRule { id, .. } if id.trim().is_empty() => {
+            Err("rule id cannot be empty".to_string())
+        }
+        ControlRequest::MoveRule {
+            id,
+            before_id,
+            after_id,
+        } if before_id.as_deref() == Some(id.as_str())
+            || after_id.as_deref() == Some(id.as_str()) =>
+        {
+            Err("rule cannot be moved relative to itself".to_string())
         }
         ControlRequest::ResolvePending { pending_id, .. } if pending_id.trim().is_empty() => {
             Err("pending id cannot be empty".to_string())
@@ -202,6 +232,7 @@ mod tests {
             process_exe: None,
             destination: DestinationMatcher::IpExact("1.1.1.1".to_string()),
             egress_id: None,
+            priority: 5.0,
         }
     }
 

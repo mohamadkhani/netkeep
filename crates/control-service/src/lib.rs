@@ -1,9 +1,9 @@
 use control_api::{validate_request, ControlRequest, ControlResponse, PushNotification};
-use core_types::{Egress, FlowContext, FlowEvent, FlowState, RouteTarget, RuleAction};
+use core_types::{Egress, FlowContext, FlowEvent, FlowState, ProcessPriority, RouteTarget, Rule, RuleAction};
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
 use metrics::{counter, histogram};
-use policy_engine::{resolve_action, ResolvedRule};
+use policy_engine::{resolve_action, seed_priority, ResolvedRule};
 use state_store::Repository;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -281,6 +281,8 @@ impl<R: Repository> ControlService<R> {
 
         let request_type = match &request {
             ControlRequest::AddRule(_) => "add_rule",
+ControlRequest::AddRuleWithProcessPriority { .. } => "add_rule",
+ControlRequest::MoveRule { .. } => "move_rule",
             ControlRequest::ListRules => "list_rules",
             ControlRequest::DeleteRule { .. } => "delete_rule",
             ControlRequest::ListPending => "list_pending",
@@ -308,14 +310,28 @@ impl<R: Repository> ControlService<R> {
 
         let response = match request {
             ControlRequest::AddRule(rule) => {
-                self.repo.upsert_rule(rule);
+                self.add_rule_with_seeded_priority(rule, ProcessPriority::High);
                 self.sweep_pending();
                 ControlResponse::Ok
             }
+            ControlRequest::AddRuleWithProcessPriority {
+                rule,
+                process_priority,
+            } => {
+                self.add_rule_with_seeded_priority(rule, process_priority);
+                self.sweep_pending();
+                ControlResponse::Ok
+            }
+            ControlRequest::MoveRule {
+                id,
+                before_id,
+                after_id,
+            } => self.move_rule(&id, before_id.as_deref(), after_id.as_deref()),
             ControlRequest::ListRules => {
-                let mut rules = self.repo.list_rules();
-                rules.sort_by(|a, b| a.id.cmp(&b.id));
-                ControlResponse::RuleList(rules)
+                // Preserve the repository's priority-descending order
+                // — it is the actual evaluation order, and both the settings
+                // table and `logiguard rules list` present rules in it.
+                ControlResponse::RuleList(self.repo.list_rules())
             }
             ControlRequest::DeleteRule { id } => {
                 if self.repo.delete_rule(&id) {
@@ -442,7 +458,7 @@ impl<R: Repository> ControlService<R> {
                 // already in the queue that the new rule covers are auto-resolved
                 // without showing additional dialogs.
                 let egress_id = rule.egress_id.clone();
-                self.repo.upsert_rule(rule);
+                self.add_rule_with_seeded_priority(rule, ProcessPriority::High);
                 self.sweep_pending();
                 if let Some(chosen) =
                     self.decision_engine
@@ -635,6 +651,104 @@ impl<R: Repository> ControlService<R> {
             }
         }
     }
+
+    /// Install a rule with its priority seeded from the restriction ladder
+    ///.
+    ///
+    /// - New rule: seed from the ladder using `process_priority`.
+    /// - Existing rule, tier unchanged: carry over the stored priority so the
+    ///   edit (e.g. fixing a process name) doesn't disturb a manual
+    ///   drag-reorder position. Callers send `priority: 0.0`, so the carry-over
+    ///   must be explicit or the edit would drop the rule to the bottom.
+    /// - Existing rule, tier changed: re-seed from the new tier's base with a
+    ///   fresh creation-seq fraction. This discards the prior manual position —
+    ///   intended, since the user explicitly asked for a different slot.
+    ///
+    /// Reordering within a tier is `MoveRule`'s job, not edit's.
+    fn add_rule_with_seeded_priority(&mut self, mut rule: Rule, process_priority: ProcessPriority) {
+        let existing = self.repo.get_rule(&rule.id);
+        match existing {
+            Some(prior) => {
+                let was_high = prior.priority >= 7.0;
+                let tier_changed = match process_priority {
+                    ProcessPriority::High => !was_high,
+                    ProcessPriority::Low => was_high,
+                };
+                if tier_changed {
+                    let seq = self.repo.next_creation_seq();
+                    rule.priority = seed_priority(&rule, seq, process_priority);
+                } else {
+                    rule.priority = prior.priority;
+                }
+                self.repo.upsert_rule(rule);
+            }
+            None => {
+                let seq = self.repo.next_creation_seq();
+                rule.priority = seed_priority(&rule, seq, process_priority);
+                self.repo.upsert_rule(rule);
+            }
+        }
+    }
+
+    /// Reorder a rule via midpoint insertion. `before_id` is the
+    /// rule that should sit above the moved rule afterwards, `after_id` the
+    /// one below. Both `None` → move to the very bottom.
+    fn move_rule(&mut self, id: &str, before_id: Option<&str>, after_id: Option<&str>) -> ControlResponse {
+        let ordered = self.repo.list_rules(); // priority-descending
+        if !ordered.iter().any(|r| r.id == id) {
+            return ControlResponse::Error("rule not found".to_string());
+        }
+        for other in [before_id, after_id].into_iter().flatten() {
+            if !ordered.iter().any(|r| r.id == other) {
+                return ControlResponse::Error(format!("neighbor rule not found: {other}"));
+            }
+        }
+        let priority_of = |rid: &str| -> f64 {
+            ordered
+                .iter()
+                .find(|r| r.id == rid)
+                .map(|r| r.priority)
+                .unwrap_or(0.0)
+        };
+        let new_priority = match (before_id, after_id) {
+            // Explicit neighbors: midpoint between them.
+            (Some(before), Some(after)) => {
+                let p = (priority_of(before) + priority_of(after)) / 2.0;
+                if p == priority_of(before) || p == priority_of(after) || !p.is_finite() {
+                    // Precision exhausted — rebalance and retry once.
+                    if self.repo.rebalance_priorities().is_none() {
+                        return ControlResponse::Error("priority rebalance failed".to_string());
+                    }
+                    let ordered = self.repo.list_rules();
+                    let get = |rid: &str| {
+                        ordered
+                            .iter()
+                            .find(|r| r.id == rid)
+                            .map(|r| r.priority)
+                            .unwrap_or(0.0)
+                    };
+                    (get(before) + get(after)) / 2.0
+                } else {
+                    p
+                }
+            }
+            // Top of the table (only "after" given → above `after`, i.e. new top).
+            (None, Some(_)) => {
+                let top = ordered.first().map(|r| r.priority).unwrap_or(1.0);
+                top + 1.0
+            }
+            // Bottom (before given or both None).
+            _ => {
+                let bottom = ordered.last().map(|r| r.priority).unwrap_or(1.0);
+                (bottom - 1.0).max(0.0001)
+            }
+        };
+        if self.repo.set_rule_priority(id, new_priority) {
+            ControlResponse::Ok
+        } else {
+            ControlResponse::Error("rule not found".to_string())
+        }
+    }
 }
 
 /// Walk an egress's target list and return the first one that is currently
@@ -745,8 +859,8 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
 mod tests {
     use control_api::{ControlRequest, ControlResponse};
     use core_types::{
-        DestinationMatcher, FlowContext, FlowDirection, Rule, RuleAction, RuleDuration,
-        TransportProtocol,
+        DestinationMatcher, FlowContext, FlowDirection, ProcessPriority, Rule, RuleAction,
+        RuleDuration, TransportProtocol,
     };
     use state_store::InMemoryRuleRepository;
 
@@ -763,6 +877,7 @@ mod tests {
             process_exe: None,
             destination: DestinationMatcher::DomainExact("example.com".to_string()),
             egress_id: None,
+            priority: 5.0,
         }
     }
 
@@ -780,6 +895,137 @@ mod tests {
             direction: FlowDirection::Outbound,
             device_label: None,
         }
+    }
+
+    #[test]
+    fn list_rules_returns_priority_descending_not_id_order() {
+        // Regression: ListRules used to re-sort by id, which discarded the
+        // repository's priority ordering and made the settings table appear
+        // unsorted.
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+
+        // Insert so that id order and priority order disagree: "a" is the
+        // lowest priority, "z" the highest.
+        for (id, priority) in [("a", 1.0), ("m", 7.0), ("z", 12.0)] {
+            let mut rule = mk_rule(id);
+            rule.priority = priority;
+            assert_eq!(service.handle(ControlRequest::AddRule(rule)), ControlResponse::Ok);
+        }
+
+        match service.handle(ControlRequest::ListRules) {
+            ControlResponse::RuleList(rules) => {
+                let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
+                assert_eq!(ids, vec!["z", "m", "a"], "expected priority-descending order");
+            }
+            other => panic!("expected rule list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn editing_a_rule_preserves_its_priority() {
+        // Regression: the GPUI edit form sends `priority: 0.0` (it has no
+        // priority field), and upsert_rule writes every column. Without an
+        // explicit carry-over the edit would slam the rule to the bottom of
+        // the ladder (the priority ladder — reordering is MoveRule's job, not edit's).
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+
+        let mut rule = mk_rule("keep-me");
+        rule.destination = DestinationMatcher::DomainExact("example.com".into());
+        rule.process_name = Some("firefox".into());
+        assert_eq!(service.handle(ControlRequest::AddRule(rule)), ControlResponse::Ok);
+
+        let seeded = match service.handle(ControlRequest::ListRules) {
+            ControlResponse::RuleList(rules) => rules[0].priority,
+            other => panic!("expected rule list, got {other:?}"),
+        };
+        assert!(seeded >= 11.0, "process+domain should seed base 11, got {seeded}");
+
+        // Edit the same id, sending priority 0.0 exactly as the UI does.
+        let mut edited = mk_rule("keep-me");
+        edited.destination = DestinationMatcher::DomainExact("example.com".into());
+        edited.process_name = Some("firefox".into());
+        edited.action = RuleAction::Deny;
+        edited.priority = 0.0;
+        assert_eq!(service.handle(ControlRequest::AddRule(edited)), ControlResponse::Ok);
+
+        match service.handle(ControlRequest::ListRules) {
+            ControlResponse::RuleList(rules) => {
+                assert_eq!(rules.len(), 1);
+                assert_eq!(rules[0].action, RuleAction::Deny, "edit should apply");
+                assert_eq!(
+                    rules[0].priority, seeded,
+                    "edit must preserve the stored priority, not reset it to 0.0"
+                );
+            }
+            other => panic!("expected rule list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn editing_process_any_rule_with_flipped_tier_re_seeds_priority() {
+        // the priority ladder: changing HIGH/LOW on an existing process+Any rule must
+        // re-seed its priority to the new tier's base. Leaving the tier
+        // alone must preserve the stored (possibly drag-reordered) priority.
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+
+        // Create a process+Any rule as High (base 7).
+        let mut rule = mk_rule("flip");
+        rule.destination = DestinationMatcher::Any;
+        rule.process_name = Some("firefox".into());
+        assert_eq!(
+            service.handle(ControlRequest::AddRuleWithProcessPriority {
+                rule,
+                process_priority: ProcessPriority::High,
+            }),
+            ControlResponse::Ok
+        );
+        let high_priority = match service.handle(ControlRequest::ListRules) {
+            ControlResponse::RuleList(r) => r[0].priority,
+            other => panic!("{other:?}"),
+        };
+        assert!((7.0..8.0).contains(&high_priority), "High seeds base 7, got {high_priority}");
+
+        // Edit with the SAME tier → priority carried over (simulate a typo fix).
+        let mut edited_same = mk_rule("flip");
+        edited_same.destination = DestinationMatcher::Any;
+        edited_same.process_name = Some("firefox-edited".into());
+        edited_same.priority = 0.0;
+        assert_eq!(
+            service.handle(ControlRequest::AddRuleWithProcessPriority {
+                rule: edited_same,
+                process_priority: ProcessPriority::High,
+            }),
+            ControlResponse::Ok
+        );
+        assert_eq!(
+            match service.handle(ControlRequest::ListRules) {
+                ControlResponse::RuleList(r) => r[0].priority,
+                other => panic!("{other:?}"),
+            },
+            high_priority,
+            "unchanged tier must preserve stored priority"
+        );
+
+        // Edit with the FLIPPED tier (High → Low) → re-seed to base 2.
+        let mut edited_flip = mk_rule("flip");
+        edited_flip.destination = DestinationMatcher::Any;
+        edited_flip.process_name = Some("firefox".into());
+        edited_flip.priority = 0.0;
+        assert_eq!(
+            service.handle(ControlRequest::AddRuleWithProcessPriority {
+                rule: edited_flip,
+                process_priority: ProcessPriority::Low,
+            }),
+            ControlResponse::Ok
+        );
+        let low_priority = match service.handle(ControlRequest::ListRules) {
+            ControlResponse::RuleList(r) => r[0].priority,
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            (2.0..3.0).contains(&low_priority),
+            "flipped to Low must re-seed base 2, got {low_priority}"
+        );
     }
 
     #[test]

@@ -108,7 +108,7 @@ logiguard/
 Shared data models, no dependencies on other crates.
 
 **Key Types:**
-- `Rule` — policy rule with action, scope, duration
+- `Rule` — policy rule with action, scope, duration, and `priority: f64` (evaluation order; daemon-assigned, see [`policy-engine`](#policy-engine))
 - `FlowContext` — network flow metadata (process, IPs, domain, protocol, direction, port)
 - `PendingDecision` — user decision queue item
 - `FlowEvent` — audit log entry
@@ -119,7 +119,8 @@ Shared data models, no dependencies on other crates.
 - `ProxyAuth` — {None, Basic{username, password}, Shadowsocks{method, password}}
 - `Egress` — named route entity with an ordered list of `RouteTarget`s; the first available target is used at enforcement time. Bound to a `Rule` via `Rule.egress_id`.
 - `RuleDuration` — {UntilRestart, Permanent}
-- `DestinationMatcher` — {IpExact, Cidr, DomainExact, DomainWildcard}
+- `DestinationMatcher` — {IpExact, Cidr, DomainExact, DomainWildcard, Any} — `Any` matches every destination and is only meaningful alongside a process constraint
+- `ProcessPriority` — {High, Low} — creation-time ladder slot for `process + Any` rules (bases 7 / 2); defaults to `High`
 - `TransportProtocol` — {Tcp, Udp, Quic, Other}
 
 **Serialization:** All types derive `Serialize`/`Deserialize` for JSON RPC.
@@ -130,15 +131,36 @@ Rule matching and precedence logic.
 
 **Key Functions:**
 - `resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule>` — pick best matching enabled rule
-- Specificity ranking: process + exact IP > process + wildcard > exact IP > wildcard > global
-- Action precedence: Deny > Allow > Ask (`Allow` and `Route` share action rank **2**). If two rules tie on both specificity and action rank, **greater** `rule.id` wins.
-- Tie-break: when specificity **and** action rank are equal, lexicographically greater `rule.id` wins (deterministic; avoids ambiguous SQLite row order)
+- `priority_base(rule, process_priority) -> f64` — built-in restriction ladder base for a rule's combo class
+- `seed_priority(rule, creation_seq, process_priority) -> f64` — `base + recency fraction` for a new rule
+- Precedence: **`rule.priority` descending** is the primary key. Ties break on action rank (Deny > Allow/Route > Ask), then lexicographically greater `rule.id`.
 - Wildcard matching: `*.example.com` matches subdomains, not apex
+
+**Priority ladder:** every rule carries a single `priority: f64`. New rules are seeded from a built-in ladder keyed on `(destination matcher, has process)` — more restricted combos sit higher:
+
+| Base | Combo | Base | Combo |
+|-----:|-------|-----:|-------|
+| 12 | process + exact IP | 6 | exact IP |
+| 11 | process + exact domain | 5 | exact domain |
+| 10 | process + wildcard | 4 | wildcard |
+| 9 | process + CIDR | 3 | CIDR |
+| 7 | process + Any (`High`) | 2 | process + Any (`Low`) |
+| | | 1 | Any (global) |
+
+Deliberate orderings: **wildcard > CIDR** on both axes (a domain wildcard constrains intent more tightly than an IP range), and **IP > domain** (IP match is deterministic; domain match depends on resolution).
+
+`process + Any` has no destination specificity to rank by, so it splits into two creator-chosen slots — `High` (7) or `Low` (2) — via `ProcessPriority`. Plain `AddRule` seeds `High`.
+
+**Recency fraction:** `seed_priority` adds a fraction derived from a monotonic `creation_seq` (SQLite `rowid`), kept strictly inside `(base, base + 1)` so it can never leak into a neighboring combo's range. Newer rules in the same combo class outrank older ones — newest intent wins. The `% 999` wrap reorders after 999 same-combo rules (accepted tradeoff).
+
+**Manual reordering:** the float priority allows near-unlimited midpoint insertion, so `MoveRule` can place a rule between any two neighbors without renumbering. See [`control-api`](#control-api) and the reorder rules under *Key Design Decisions*.
 
 **Traits:**
 - `RuleRepository` — mock-friendly interface for rule lookups
 
-**Tests:** Exact match, CIDR, domain, wildcard, precedence, deny vs allow, overlapping Route tie-break, disabled rules, unknown-process fallback against specific destinations (with safety negatives for `Any` / `Cidr` / `Wildcard`).
+**Tests:** Exact match, CIDR, domain, wildcard, precedence, deny vs allow, overlapping Route tie-break, disabled rules, ladder base per combo, seed-fraction containment, priority-descending resolution, and unknown-process fallback against specific destinations (with safety negatives for `Any` / `Cidr` / `Wildcard`).
+
+**Unknown-process fallback in `process_matches`:** when the rule pins `process_name=Some(P)` but the live flow has `process_name=None` (proc attribution lost the `/proc` race), the rule still matches **only if** the rule's destination is `IpExact` or `DomainExact`. Broad destinations (`Any`, `Cidr`, `DomainWildcard`) still require a strict process match so a wildcard "allow X" rule cannot be silently piggy-backed on by an unattributed packet. Rationale and tests in [`docs/process-attribution-races.md`](process-attribution-races.md).
 
 **Unknown-process fallback in `process_matches`:** when the rule pins `process_name=Some(P)` but the live flow has `process_name=None` (proc attribution lost the `/proc` race), the rule still matches **only if** the rule's destination is `IpExact` or `DomainExact`. Broad destinations (`Any`, `Cidr`, `DomainWildcard`) still require a strict process match so a wildcard "allow X" rule cannot be silently piggy-backed on by an unattributed packet. Rationale and tests in [`docs/process-attribution-races.md`](process-attribution-races.md).
 
@@ -221,14 +243,16 @@ nftables programming and NFQUEUE packet handling.
 SQLite-backed persistence.
 
 **Key Repositories:**
-- `RuleRepository` — CRUD rules, `purge_session_rules()` on startup
+- `RuleRepository` — CRUD rules, `purge_session_rules()` on startup, plus priority support: `next_creation_seq()` for ladder seeding, `set_rule_priority()` for midpoint reorder, `rebalance_priorities()` to rewrite all priorities to evenly spaced values when float precision runs out
 - `FlowRepository` — append flow events, list with limit
 - `PendingRepository` — create/delete pending decisions, restore on startup
 - `EgressRepository` — CRUD egresses, targets, and per-egress DNS servers
 
+**Rule ordering:** `list_rules()` returns `ORDER BY priority DESC, rowid ASC` — evaluation order, already sorted. Callers must **not** re-sort (an earlier `ListRules` bug re-sorted by `id` and discarded this ordering; see the regression test in `control-service`).
+
 **Schema:**
 
-- `rules` table — id, enabled, action, duration, process_name, destination, egress_id, created_at, updated_at
+- `rules` table — id, enabled, action, duration, process_name, destination, egress_id, **priority**, created_at, updated_at
 - `flow_events` table — id, process_name, device_label, destination_ip, destination_domain, protocol, state, timestamp_secs
 - `pending_decisions` table — id, flow_id, created_at, deadline_at, default_action
 - `egresses` table — id, name, color, is_system_default
@@ -245,8 +269,10 @@ Unix socket protocol schema (JSON-RPC style).
 **Requests:**
 ```
 AddRule(Rule)
+AddRuleWithProcessPriority { rule, process_priority }  ← explicit High/Low slot for process+Any
 ListRules
 DeleteRule { id }
+MoveRule { id, before_id, after_id }                   ← reorder via midpoint insertion
 ListPending
 ListFlows { limit }
 RegisterUnknownFlow { flow, now_secs }
@@ -287,6 +313,15 @@ Error(String)
 ```
 
 **Transport:** JSON lines (newline-delimited JSON) over Unix socket.
+
+**Priority is daemon-owned.** Clients never supply a meaningful `rule.priority` — they send `0.0` and the daemon assigns it:
+
+- **New rule** → seeded from the restriction ladder via `seed_priority`.
+- **Existing rule, same tier** → stored priority is **carried over**, so editing an unrelated field (a process name typo) never disturbs a manual reorder position.
+- **Existing rule, `ProcessPriority` flipped** → re-seeded at the new tier's base with a fresh recency fraction. This intentionally discards a prior manual position, since the user explicitly asked for a different slot.
+- **`MoveRule`** → midpoint between the two named neighbors; `before_id: None` means top, `after_id: None` means bottom.
+
+Because clients send `0.0`, the carry-over on edit must be explicit in `ControlService` — a plain pass-through would write `0.0` and drop the rule below every other rule.
 
 ## Data Flow
 
@@ -428,6 +463,14 @@ Planned (Phase 2 onward):
     Seeding is skipped entirely once any user egress is present, so it never overwrites user configuration. The DB path defaults to `~/.config/logiguard/logiguard.db`, resolved from `$HOME` at runtime (Rust does not expand shell tildes); the parent directory is created automatically.
 
     **Gotcha:** if the daemon is first started while a VPN is up, `ip route get 8.8.8.8` returns the VPN tun device, so the seeded "LAN" egress ends up pointing at the VPN interface, not the actual physical NIC. The user then picks "Route via LAN" and gets the VPN. Fix is the user's: delete and recreate the egress (or edit its targets via the per-target list editor in Settings) once the VPN is down. A future enhancement could prefer `/sys/class/net/<iface>/type == 1` (ethernet) over `65534` (tun) when seeding the LAN row.
+
+16. **Rule priority: built-in ladder + fractional reorder:** Evaluation order is a single `priority: f64` per rule, not a computed specificity score. New rules are seeded from a built-in 13-slot restriction ladder (see [`policy-engine`](#policy-engine)) plus a recency fraction, so a more restricted rule outranks a broader one and — within the same combo class — the newer rule wins.
+
+    The ladder is deliberately fixed and not user-tunable: it is tuned, and exposing 13 adjustable bases would complicate the UI for a knob almost no user would understand or want. Users reorder by dragging individual rules instead, which is the concrete operation they actually mean.
+
+    A float (rather than an integer rank) makes manual reordering cheap: `MoveRule` inserts at the **midpoint** between the two neighbors, touching one row instead of renumbering the table. Precision is finite, so `rebalance_priorities()` rewrites all priorities to evenly spaced values when midpoints get too tight.
+
+    **Client contract:** clients never compute priority — they send `0.0`. The daemon seeds new rules, carries priority over on edit, and re-seeds only when a `process + Any` rule's `ProcessPriority` tier is flipped. See the [`control-api`](#control-api) notes.
 
 ## Systemd Integration
 
