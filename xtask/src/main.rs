@@ -39,6 +39,12 @@ fn build_ebpf(release: bool) {
         // compiles core from source (requires the `rust-src` component).
         let mut cmd = Command::new("cargo");
         cmd.env("RUSTC_BOOTSTRAP", "1")
+            // `dns-tracker` embeds these objects via `include_bytes!` at a path
+            // hardcoded relative to the eBPF crate, so pin the target dir here.
+            // Otherwise an ambient CARGO_TARGET_DIR (set by the Arch PKGBUILD,
+            // or by a user's global cargo config) would redirect the output and
+            // `dns-tracker` would fail to find it.
+            .env("CARGO_TARGET_DIR", ebpf_dir.join("target"))
             .arg("build")
             .arg("--target")
             .arg("bpfel-unknown-none")

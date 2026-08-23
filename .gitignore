@@ -12,6 +12,7 @@ crates/dns-tracker-ebpf/target/
 # Arch Linux (makepkg) — run from packaging/archlinux/
 packaging/archlinux/pkg/
 packaging/archlinux/src/
+packaging/archlinux/.cargo-target/
 packaging/archlinux/*.pkg.tar.*
 packaging/archlinux/*.log
 

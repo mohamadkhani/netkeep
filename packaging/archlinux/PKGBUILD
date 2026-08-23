@@ -1,6 +1,15 @@
 # Maintainer: build from a clean clone of the LogiGuard repository.
 # Run `makepkg -sf` from this directory (`packaging/archlinux`); the build
 # uses the repository root at ../../ relative to this PKGBUILD.
+#
+# Build caching: cargo artifacts go to `${startdir}/.cargo-target`, which
+# survives `makepkg -C` (cleanbuild) because it lives outside `${srcdir}`.
+# `rsync -a` in prepare() preserves mtimes, so unchanged crates stay cached and
+# only edited ones rebuild. Note `-C` still wipes `${srcdir}/.cargo`, forcing a
+# bpf-linker rebuild — omit `-C` to keep that too.
+#
+# For plain dev iteration prefer `just dev-install` from the repo root: it
+# builds in-tree against the warm `target/` and skips packaging entirely.
 
 pkgname=logiguard
 pkgver=0.1.0
@@ -59,17 +68,26 @@ build() {
   export CARGO_HOME="${srcdir}/.cargo"
   export PATH="${CARGO_HOME}/bin:${PATH}"
 
+  # Persistent target dir outside ${srcdir} so cleanbuild (-C) doesn't wipe it.
+  # Keep it dedicated to this packaging build: sharing the repo's own target/
+  # would churn fingerprints, since we compile from ${srcdir}/build rather than
+  # the repo root, and each build would invalidate the other's cache.
+  export CARGO_TARGET_DIR="${startdir}/.cargo-target"
+
   # eBPF object must exist before dns-tracker embeds it via include_bytes!.
   # RUSTC_BOOTSTRAP=1 unlocks -Z build-std=core on the stable toolchain.
+  # xtask pins its own CARGO_TARGET_DIR internally (the include_bytes! path in
+  # dns-tracker hardcodes it), so CARGO_TARGET_DIR here doesn't affect it.
   RUSTC_BOOTSTRAP=1 cargo xtask build-ebpf-release
   cargo build --workspace --release --locked
 }
 
 package() {
   cd "${srcdir}/build"
-  install -Dm755 target/release/logiguard-daemon "${pkgdir}/usr/bin/logiguardd"
-  install -Dm755 target/release/logiguard-cli "${pkgdir}/usr/bin/logiguard-cli"
-  install -Dm755 target/release/logiguard-gpui "${pkgdir}/usr/bin/logiguard-gpui"
+  export CARGO_TARGET_DIR="${startdir}/.cargo-target"
+  install -Dm755 "${CARGO_TARGET_DIR}/release/logiguard-daemon" "${pkgdir}/usr/bin/logiguardd"
+  install -Dm755 "${CARGO_TARGET_DIR}/release/logiguard-cli" "${pkgdir}/usr/bin/logiguard-cli"
+  install -Dm755 "${CARGO_TARGET_DIR}/release/logiguard-gpui" "${pkgdir}/usr/bin/logiguard-gpui"
 
   install -Dm644 resources/linux/systemd/logiguardd.service \
     "${pkgdir}/usr/lib/systemd/system/logiguardd.service"
