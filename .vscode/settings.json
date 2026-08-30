@@ -1,0 +1,8 @@
+{
+  // rust-analyzer only discovers the root workspace by default; the eBPF crate
+  // is a standalone package (own [workspace] table) and must be linked explicitly.
+  "rust-analyzer.linkedProjects": [
+    "Cargo.toml",
+    "crates/dns-tracker-ebpf/Cargo.toml"
+  ]
+}

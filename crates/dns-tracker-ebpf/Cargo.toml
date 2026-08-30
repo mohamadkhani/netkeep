@@ -7,16 +7,21 @@ publish = false
 [workspace]
 
 [dependencies]
-aya-ebpf = "0.1"
-aya-log-ebpf = "0.1"
+aya-ebpf = "0.2.1"
+aya-log-ebpf = "0.2.0"
 
 [[bin]]
 name = "dns-tracker-ebpf"
 path = "src/main.rs"
+# Never built as a test: the test harness links std, which conflicts with the
+# crate's #[panic_handler] ("duplicate lang item `panic_impl`" under
+# `cargo check --all-targets`, i.e. rust-analyzer's default check command).
+test = false
 
 [[bin]]
 name = "sock-tracker-ebpf"
 path = "src/sock_tracker.rs"
+test = false
 
 [profile.dev]
 opt-level = 3

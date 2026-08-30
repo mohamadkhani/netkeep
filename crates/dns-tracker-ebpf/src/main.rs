@@ -1,8 +1,11 @@
-#![no_std]
+// `cfg` mirrors the panic handler below: for the real eBPF target the crate is
+// fully no_std, but host-target `cargo check` (rust-analyzer) links std, where
+// `no_std` + our panic handler would be a hard "duplicate lang item" error.
+#![cfg_attr(target_os = "none", no_std)]
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_kernel, gen::bpf_get_current_comm},
+    helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_probe_read_kernel},
     macros::{kprobe, map},
     maps::{HashMap, PerCpuArray},
     programs::ProbeContext,
@@ -96,8 +99,8 @@ unsafe fn try_dns_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
     // Raw helper instead of aya's wrapper: the wrapper zero-inits a 16-byte
     // stack buffer, which lowers to llvm.memset and bpf-linker >= 0.11
     // rejects it. Writing directly into the per-CPU map value avoids that.
-    // SAFETY: event.comm is [u8; 16], passed with its exact size.
-    if unsafe { bpf_get_current_comm(event.comm.as_mut_ptr() as *mut _, 16) } != 0 {
+    // SAFETY: event.comm is [u8; 16]; the helper writes at most 16 bytes.
+    if bpf_get_current_comm().is_err() {
         return Err(());
     }
 
@@ -189,6 +192,10 @@ unsafe fn parse_qname(ptr: *const u8, out: &mut [u8; 256]) -> Result<(), ()> {
     Ok(())
 }
 
+// Host-target `cargo check` (rust-analyzer) links std, which already provides
+// `panic_impl`; providing ours too is a hard "duplicate lang item" error there.
+// Only define it for the actual eBPF target, where it is required.
+#[cfg(target_os = "none")]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}

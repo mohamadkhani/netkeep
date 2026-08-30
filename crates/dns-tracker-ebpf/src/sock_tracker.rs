@@ -1,4 +1,8 @@
-#![no_std]
+// `cfg` mirrors the panic handler below: for the real eBPF target the crate is
+// fully no_std, but host-target `cargo check --all-targets` (rust-analyzer)
+// also builds each bin in test mode, where std provides `panic_impl` and ours
+// would be a hard "duplicate lang item" error.
+#![cfg_attr(target_os = "none", no_std)]
 #![no_main]
 
 use aya_ebpf::{
@@ -325,6 +329,9 @@ fn zeroed_ip16() -> [u8; 16] {
     unsafe { buf.assume_init() }
 }
 
+// Host-target test-mode builds (rust-analyzer) link std's panic_impl; only
+// define ours for the actual eBPF target, where it is required.
+#[cfg(target_os = "none")]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
