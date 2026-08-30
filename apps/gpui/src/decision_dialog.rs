@@ -5,7 +5,8 @@
 //! bootstrap code in exactly one place.
 
 use gpui::{
-    px, size, App, AppContext as _, Entity, SharedString, Styled, WindowKind, WindowOptions,
+    px, size, App, AppContext as _, Entity, Focusable as _, SharedString, Styled, WindowKind,
+    WindowOptions,
 };
 use gpui_component::{Root, Theme, ThemeMode};
 
@@ -93,6 +94,8 @@ pub fn show_decision_dialog(item: PendingDecision, mut egresses: Vec<Egress>) {
                 },
                 |window, cx| {
                     let view = cx.new(|cx| DecisionApp::new(state, cx));
+                    // Focus the scrim so Esc dispatches to its key handler.
+                    window.focus(&view.read(cx).focus_handle(cx), cx);
                     let root = cx.new(|cx| Root::new(view, window, cx));
                     // `Root` paints the theme background by default; clear it
                     // so only the dialog card is visible over the desktop.

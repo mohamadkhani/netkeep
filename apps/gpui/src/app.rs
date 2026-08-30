@@ -1,6 +1,7 @@
 use gpui::{
-    div, ease_out_quint, px, Animation, AnimationExt, AppContext as _, Context, Entity,
-    IntoElement, ParentElement, Render, Styled, Window,
+    div, ease_out_quint, px, Animation, AnimationExt, App, AppContext as _, Context, Entity,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
+    StatefulInteractiveElement, Styled, WeakEntity, Window,
 };
 use gpui_component::{v_flex, Theme};
 
@@ -11,6 +12,41 @@ use crate::state::AppState;
 
 pub struct DecisionApp {
     pub state: Entity<AppState>,
+    /// Held by the scrim so key events (Esc) dispatch to it.
+    focus_handle: FocusHandle,
+}
+
+impl Focusable for DecisionApp {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+/// Dismiss the dialog without resolving the pending decision: mark the state
+/// closing (ignoring repeats / racing decision buttons) so the render loop
+/// plays the fade-out, then quit after the ~1s scrim fade-out. The daemon's
+/// deadline timeout resolves the pending as deny, exactly as if the user had
+/// never interacted with the prompt.
+pub fn dismiss(state: &WeakEntity<AppState>, cx: &mut App) {
+    let already_closing = state
+        .update(cx, |s, cx| {
+            let was = s.closing;
+            s.closing = true;
+            cx.notify();
+            was
+        })
+        .unwrap_or(true);
+    if already_closing {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        // Let the ~1s scrim fade-out finish, then quit.
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(1050))
+            .await;
+        std::process::exit(0);
+    })
+    .detach();
 }
 
 impl DecisionApp {
@@ -48,7 +84,10 @@ impl DecisionApp {
         })
         .detach();
 
-        Self { state }
+        Self {
+            state,
+            focus_handle: cx.focus_handle(),
+        }
     }
 }
 
@@ -81,8 +120,37 @@ impl Render for DecisionApp {
         // delayed fade also softens the compositor's window-open animation.
         // When a decision was submitted (closing), both fade out instead and
         // the process exits once the scrim has finished.
-        let scrim = div().absolute().inset_0().size_full().bg(colors::scrim());
+        let scrim = div()
+            .id("decision-scrim")
+            .track_focus(&self.focus_handle)
+            .absolute()
+            .inset_0()
+            .size_full()
+            .bg(colors::scrim())
+            // Clicking outside the card dismisses the prompt (fade-out, no
+            // resolution — the daemon deadline handles the deny). The card is
+            // a sibling painted on top, so its clicks never reach the scrim.
+            .on_click({
+                let state_weak = state_weak.clone();
+                move |_, _, cx| dismiss(&state_weak, cx)
+            })
+            .on_key_down({
+                let state_weak = state_weak.clone();
+                move |event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        dismiss(&state_weak, cx);
+                        cx.stop_propagation();
+                    }
+                }
+            });
         let card = v_flex()
+            .id("decision-card")
+            // Swallow clicks on the card itself: without this they fall
+            // through to the scrim's dismiss handler (gpui dispatches mouse
+            // listeners of every hitbox under the pointer). This fires after
+            // the footer buttons (dispatch is topmost-first), so Allow/Deny
+            // still work.
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .w(px(440.))
             .bg(colors::surface_container())
             .border_1()
