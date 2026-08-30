@@ -147,6 +147,7 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                     proc_allow,
                     proc_exe_allow,
                     is_too_broad,
+                    state_weak.clone(),
                 ))
                 .child(deny_button(
                     pid_deny,
@@ -156,6 +157,7 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                     proc_deny,
                     proc_exe_deny,
                     is_too_broad,
+                    state_weak.clone(),
                 )),
         )
         .into_any_element()
@@ -656,6 +658,7 @@ fn allow_button(
     rule_process_name: Option<String>,
     rule_process_exe: Option<String>,
     disabled: bool,
+    state: WeakEntity<AppState>,
 ) -> gpui::AnyElement {
     let is_default = selected_egress.is_system_default;
     let egress_id = if is_default {
@@ -686,6 +689,19 @@ fn allow_button(
         .when(!disabled, |el| {
             el.on_click({
                 move |_, _, cx| {
+                    // Mark closing synchronously: repeats are ignored and the
+                    // render loop switches to the fade-out animations.
+                    let already_closing = state
+                        .update(cx, |s, cx| {
+                            let was = s.closing;
+                            s.closing = true;
+                            cx.notify();
+                            was
+                        })
+                        .unwrap_or(true);
+                    if already_closing {
+                        return;
+                    }
                     let pid = pid.clone();
                     let mk_perm = make_permanent;
                     let eid = egress_id.clone();
@@ -728,6 +744,10 @@ fn allow_button(
                                 )
                             })
                             .await;
+                        // Let the ~1s scrim fade-out finish, then quit.
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1050))
+                            .await;
                         std::process::exit(0);
                     })
                     .detach();
@@ -766,6 +786,7 @@ fn deny_button(
     rule_process_name: Option<String>,
     rule_process_exe: Option<String>,
     disabled: bool,
+    state: WeakEntity<AppState>,
 ) -> gpui::AnyElement {
     div()
         .id("deny-btn")
@@ -789,6 +810,19 @@ fn deny_button(
         .when(!disabled, |el| {
             el.on_click({
                 move |_, _, cx| {
+                    // Mark closing synchronously: repeats are ignored and the
+                    // render loop switches to the fade-out animations.
+                    let already_closing = state
+                        .update(cx, |s, cx| {
+                            let was = s.closing;
+                            s.closing = true;
+                            cx.notify();
+                            was
+                        })
+                        .unwrap_or(true);
+                    if already_closing {
+                        return;
+                    }
                     let pid = pid.clone();
                     let mk_perm = make_permanent;
                     let dest = dest_matcher.clone();
@@ -826,6 +860,10 @@ fn deny_button(
                                     },
                                 )
                             })
+                            .await;
+                        // Let the ~1s scrim fade-out finish, then quit.
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1050))
                             .await;
                         std::process::exit(0);
                     })

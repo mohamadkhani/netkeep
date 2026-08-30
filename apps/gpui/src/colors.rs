@@ -28,6 +28,12 @@ pub fn surface_container_highest() -> gpui::Hsla {
     gpui::rgb(0x2a3548).into() // surface-container-highest / surface-variant
 }
 
+/// Dimming layer drawn behind the decision card inside the transparent
+/// overlay window. Pure black with an alpha channel (M3 scrim).
+pub fn scrim() -> gpui::Hsla {
+    gpui::hsla(0., 0., 0., 0.45)
+}
+
 #[allow(dead_code)]
 pub fn surface_bright() -> gpui::Hsla {
     gpui::rgb(0x2f3a4c).into() // surface-bright
