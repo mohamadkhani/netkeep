@@ -306,9 +306,8 @@ impl SqliteRuleRepository {
         // Migrations: add columns to existing DBs (ignore error if they already exist).
         let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN egress_id TEXT NULL;");
         let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN process_exe TEXT NULL;");
-        let _ = conn.execute_batch(
-            "ALTER TABLE rules ADD COLUMN priority REAL NOT NULL DEFAULT 1.0;",
-        );
+        let _ =
+            conn.execute_batch("ALTER TABLE rules ADD COLUMN priority REAL NOT NULL DEFAULT 1.0;");
         // One-time backfill: rules from pre-priority DBs carry the
         // column default 1.0; re-seed them from the hardcoded restriction
         // ladder. Guarded by PRAGMA user_version so it runs exactly once —
@@ -516,20 +515,19 @@ fn map_rule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Rule> {
         "action".to_string(),
         rusqlite::types::Type::Integer,
     ))?;
-    let duration = i64_to_duration(row.get::<_, i64>(3)?).ok_or(
-        rusqlite::Error::InvalidColumnType(
+    let duration =
+        i64_to_duration(row.get::<_, i64>(3)?).ok_or(rusqlite::Error::InvalidColumnType(
             3,
             "duration".to_string(),
             rusqlite::types::Type::Integer,
+        ))?;
+    let destination = parts_to_destination(row.get::<_, i64>(5)?, row.get::<_, String>(6)?).ok_or(
+        rusqlite::Error::InvalidColumnType(
+            5,
+            "destination_kind".to_string(),
+            rusqlite::types::Type::Integer,
         ),
     )?;
-    let destination =
-        parts_to_destination(row.get::<_, i64>(5)?, row.get::<_, String>(6)?)
-            .ok_or(rusqlite::Error::InvalidColumnType(
-                5,
-                "destination_kind".to_string(),
-                rusqlite::types::Type::Integer,
-            ))?;
     Ok(Rule {
         id: row.get(0)?,
         enabled: row.get::<_, i64>(1)? != 0,

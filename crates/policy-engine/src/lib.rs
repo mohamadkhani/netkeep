@@ -128,9 +128,7 @@ pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule
             a.priority
                 .partial_cmp(&b.priority)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    (action_rank(&a.action), &a.id).cmp(&(action_rank(&b.action), &b.id))
-                })
+                .then_with(|| (action_rank(&a.action), &a.id).cmp(&(action_rank(&b.action), &b.id)))
         })
         .map(|r| ResolvedRule {
             rule_id: r.id.clone(),
@@ -571,13 +569,33 @@ mod tests {
         // the priority ladder ladder. Asserts the full ordering, including the two
         // deliberate inversions: wildcard > cidr on both axes, and ip > domain.
         let cases = [
-            (Some("firefox"), DestinationMatcher::IpExact("1.1.1.1".into()), 12.0),
-            (Some("firefox"), DestinationMatcher::DomainExact("a.com".into()), 11.0),
-            (Some("firefox"), DestinationMatcher::DomainWildcard("*.a.com".into()), 10.0),
-            (Some("firefox"), DestinationMatcher::Cidr("10.0.0.0/8".into()), 9.0),
+            (
+                Some("firefox"),
+                DestinationMatcher::IpExact("1.1.1.1".into()),
+                12.0,
+            ),
+            (
+                Some("firefox"),
+                DestinationMatcher::DomainExact("a.com".into()),
+                11.0,
+            ),
+            (
+                Some("firefox"),
+                DestinationMatcher::DomainWildcard("*.a.com".into()),
+                10.0,
+            ),
+            (
+                Some("firefox"),
+                DestinationMatcher::Cidr("10.0.0.0/8".into()),
+                9.0,
+            ),
             (None, DestinationMatcher::IpExact("1.1.1.1".into()), 6.0),
             (None, DestinationMatcher::DomainExact("a.com".into()), 5.0),
-            (None, DestinationMatcher::DomainWildcard("*.a.com".into()), 4.0),
+            (
+                None,
+                DestinationMatcher::DomainWildcard("*.a.com".into()),
+                4.0,
+            ),
             (None, DestinationMatcher::Cidr("10.0.0.0/8".into()), 3.0),
             (None, DestinationMatcher::Any, 1.0),
         ];
@@ -588,7 +606,12 @@ mod tests {
         }
 
         // process + Any is the only combo whose base depends on the tier.
-        let any = mk_rule("x", RuleAction::Allow, Some("firefox"), DestinationMatcher::Any);
+        let any = mk_rule(
+            "x",
+            RuleAction::Allow,
+            Some("firefox"),
+            DestinationMatcher::Any,
+        );
         assert_eq!(priority_base(&any, ProcessPriority::High), 7.0);
         assert_eq!(priority_base(&any, ProcessPriority::Low), 2.0);
     }
@@ -617,24 +640,41 @@ mod tests {
         // Newer rules (higher seq) outrank older ones within a combo class.
         let older = seed_priority(&rule, 10, ProcessPriority::High);
         let newer = seed_priority(&rule, 11, ProcessPriority::High);
-        assert!(newer > older, "newer rule must outrank older: {newer} vs {older}");
+        assert!(
+            newer > older,
+            "newer rule must outrank older: {newer} vs {older}"
+        );
     }
 
     #[test]
     fn process_any_high_beats_low_and_below_process_destination() {
         // Two process+Any rules: High (base 7) must outrank Low (base 2).
-        let mut high = mk_rule("proc-high", RuleAction::Allow, Some("firefox"), DestinationMatcher::Any);
+        let mut high = mk_rule(
+            "proc-high",
+            RuleAction::Allow,
+            Some("firefox"),
+            DestinationMatcher::Any,
+        );
         high.priority = seed_priority(&high, 1, ProcessPriority::High);
-        let mut low = mk_rule("proc-low", RuleAction::Deny, Some("firefox"), DestinationMatcher::Any);
+        let mut low = mk_rule(
+            "proc-low",
+            RuleAction::Deny,
+            Some("firefox"),
+            DestinationMatcher::Any,
+        );
         low.priority = seed_priority(&low, 2, ProcessPriority::Low);
 
         let flow = FlowContext {
             process_name: Some("firefox".to_string()),
-            process_exe: None, app_name: None,
-            source_ip: "10.0.0.1".to_string(), source_port: 1,
-            destination_ip: "1.1.1.1".to_string(), destination_port: 443,
+            process_exe: None,
+            app_name: None,
+            source_ip: "10.0.0.1".to_string(),
+            source_port: 1,
+            destination_ip: "1.1.1.1".to_string(),
+            destination_port: 443,
             destination_domain: None,
-            protocol: TransportProtocol::Tcp, direction: FlowDirection::Outbound,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
             device_label: None,
         };
         // Low has the higher action_rank (Deny), but priority dominates.
@@ -647,18 +687,32 @@ mod tests {
         // A destination-only rule (ip, base 6) outranks process+Any High (7)?
         // No — base 7 > base 6, so process+Any High wins. This pins the
         // ladder ordering: process+Any High sits above ip/domain-only rules.
-        let mut proc_any = mk_rule("proc-any", RuleAction::Allow, Some("firefox"), DestinationMatcher::Any);
+        let mut proc_any = mk_rule(
+            "proc-any",
+            RuleAction::Allow,
+            Some("firefox"),
+            DestinationMatcher::Any,
+        );
         proc_any.priority = seed_priority(&proc_any, 1, ProcessPriority::High);
-        let mut ip_only = mk_rule("ip-only", RuleAction::Deny, None, DestinationMatcher::IpExact("1.1.1.1".to_string()));
+        let mut ip_only = mk_rule(
+            "ip-only",
+            RuleAction::Deny,
+            None,
+            DestinationMatcher::IpExact("1.1.1.1".to_string()),
+        );
         ip_only.priority = seed_priority(&ip_only, 2, ProcessPriority::High);
 
         let flow = FlowContext {
             process_name: Some("firefox".to_string()),
-            process_exe: None, app_name: None,
-            source_ip: "10.0.0.1".to_string(), source_port: 1,
-            destination_ip: "1.1.1.1".to_string(), destination_port: 443,
+            process_exe: None,
+            app_name: None,
+            source_ip: "10.0.0.1".to_string(),
+            source_port: 1,
+            destination_ip: "1.1.1.1".to_string(),
+            destination_port: 443,
             destination_domain: None,
-            protocol: TransportProtocol::Tcp, direction: FlowDirection::Outbound,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
             device_label: None,
         };
         let resolved = resolve_action(&[ip_only, proc_any], &flow).expect("must resolve");

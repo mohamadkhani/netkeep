@@ -1,5 +1,7 @@
 use control_api::{validate_request, ControlRequest, ControlResponse, PushNotification};
-use core_types::{Egress, FlowContext, FlowEvent, FlowState, ProcessPriority, RouteTarget, Rule, RuleAction};
+use core_types::{
+    Egress, FlowContext, FlowEvent, FlowState, ProcessPriority, RouteTarget, Rule, RuleAction,
+};
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
 use metrics::{counter, histogram};
@@ -281,8 +283,8 @@ impl<R: Repository> ControlService<R> {
 
         let request_type = match &request {
             ControlRequest::AddRule(_) => "add_rule",
-ControlRequest::AddRuleWithProcessPriority { .. } => "add_rule",
-ControlRequest::MoveRule { .. } => "move_rule",
+            ControlRequest::AddRuleWithProcessPriority { .. } => "add_rule",
+            ControlRequest::MoveRule { .. } => "move_rule",
             ControlRequest::ListRules => "list_rules",
             ControlRequest::DeleteRule { .. } => "delete_rule",
             ControlRequest::ListPending => "list_pending",
@@ -539,7 +541,8 @@ ControlRequest::MoveRule { .. } => "move_rule",
                 // egress targets column, so duplicates would be ambiguous.
                 let name = proxy.name.trim();
                 if name.is_empty() {
-                    let response = ControlResponse::Error("proxy name must not be empty".to_string());
+                    let response =
+                        ControlResponse::Error("proxy name must not be empty".to_string());
                     histogram!("logiguard.control.request.duration", "type" => request_type)
                         .record(handle_start.elapsed().as_secs_f64());
                     return response;
@@ -550,9 +553,8 @@ ControlRequest::MoveRule { .. } => "move_rule",
                     .iter()
                     .any(|p| p.id != proxy.id && p.name == proxy.name);
                 if name_taken {
-                    let response = ControlResponse::Error(format!(
-                        "proxy name '{name}' is already in use"
-                    ));
+                    let response =
+                        ControlResponse::Error(format!("proxy name '{name}' is already in use"));
                     histogram!("logiguard.control.request.duration", "type" => request_type)
                         .record(handle_start.elapsed().as_secs_f64());
                     return response;
@@ -693,7 +695,12 @@ ControlRequest::MoveRule { .. } => "move_rule",
     /// Reorder a rule via midpoint insertion. `before_id` is the
     /// rule that should sit above the moved rule afterwards, `after_id` the
     /// one below. Both `None` → move to the very bottom.
-    fn move_rule(&mut self, id: &str, before_id: Option<&str>, after_id: Option<&str>) -> ControlResponse {
+    fn move_rule(
+        &mut self,
+        id: &str,
+        before_id: Option<&str>,
+        after_id: Option<&str>,
+    ) -> ControlResponse {
         let ordered = self.repo.list_rules(); // priority-descending
         if !ordered.iter().any(|r| r.id == id) {
             return ControlResponse::Error("rule not found".to_string());
@@ -909,13 +916,20 @@ mod tests {
         for (id, priority) in [("a", 1.0), ("m", 7.0), ("z", 12.0)] {
             let mut rule = mk_rule(id);
             rule.priority = priority;
-            assert_eq!(service.handle(ControlRequest::AddRule(rule)), ControlResponse::Ok);
+            assert_eq!(
+                service.handle(ControlRequest::AddRule(rule)),
+                ControlResponse::Ok
+            );
         }
 
         match service.handle(ControlRequest::ListRules) {
             ControlResponse::RuleList(rules) => {
                 let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
-                assert_eq!(ids, vec!["z", "m", "a"], "expected priority-descending order");
+                assert_eq!(
+                    ids,
+                    vec!["z", "m", "a"],
+                    "expected priority-descending order"
+                );
             }
             other => panic!("expected rule list, got {other:?}"),
         }
@@ -932,13 +946,19 @@ mod tests {
         let mut rule = mk_rule("keep-me");
         rule.destination = DestinationMatcher::DomainExact("example.com".into());
         rule.process_name = Some("firefox".into());
-        assert_eq!(service.handle(ControlRequest::AddRule(rule)), ControlResponse::Ok);
+        assert_eq!(
+            service.handle(ControlRequest::AddRule(rule)),
+            ControlResponse::Ok
+        );
 
         let seeded = match service.handle(ControlRequest::ListRules) {
             ControlResponse::RuleList(rules) => rules[0].priority,
             other => panic!("expected rule list, got {other:?}"),
         };
-        assert!(seeded >= 11.0, "process+domain should seed base 11, got {seeded}");
+        assert!(
+            seeded >= 11.0,
+            "process+domain should seed base 11, got {seeded}"
+        );
 
         // Edit the same id, sending priority 0.0 exactly as the UI does.
         let mut edited = mk_rule("keep-me");
@@ -946,7 +966,10 @@ mod tests {
         edited.process_name = Some("firefox".into());
         edited.action = RuleAction::Deny;
         edited.priority = 0.0;
-        assert_eq!(service.handle(ControlRequest::AddRule(edited)), ControlResponse::Ok);
+        assert_eq!(
+            service.handle(ControlRequest::AddRule(edited)),
+            ControlResponse::Ok
+        );
 
         match service.handle(ControlRequest::ListRules) {
             ControlResponse::RuleList(rules) => {
@@ -983,7 +1006,10 @@ mod tests {
             ControlResponse::RuleList(r) => r[0].priority,
             other => panic!("{other:?}"),
         };
-        assert!((7.0..8.0).contains(&high_priority), "High seeds base 7, got {high_priority}");
+        assert!(
+            (7.0..8.0).contains(&high_priority),
+            "High seeds base 7, got {high_priority}"
+        );
 
         // Edit with the SAME tier → priority carried over (simulate a typo fix).
         let mut edited_same = mk_rule("flip");

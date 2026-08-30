@@ -101,7 +101,6 @@ impl<T: Tray> StatusNotifierItem<T> {
         Ok(())
     }
 
-
     async fn secondary_activate(
         &self,
         #[zbus(connection)] conn: &Connection,

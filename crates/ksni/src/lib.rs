@@ -88,8 +88,6 @@ pub trait Tray: Sized + Send + 'static {
     /// See: https://github.com/ubuntu/gnome-shell-extension-appindicator (appIndicator.js `provideActivationToken`)
     fn on_activation_token(&mut self, _token: String) {}
 
-
-
     /// Is to be considered a secondary and less important form of activation
     /// compared to Activate.
     /// This is typically a consequence of user input, such as mouse middle

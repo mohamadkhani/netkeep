@@ -535,8 +535,7 @@ pub fn test_http_connectivity(
     loop {
         stream.read_exact(&mut buf).map_err(ProxyClientError::Io)?;
         response.push(buf[0]);
-        if response.len() >= 4 && response[response.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
-        {
+        if response.len() >= 4 && response[response.len() - 4..] == [b'\r', b'\n', b'\r', b'\n'] {
             break;
         }
         if response.len() > 8192 {
@@ -604,12 +603,8 @@ pub fn test_dns_connectivity(
 
     // DNS over TCP: 2-byte length prefix
     let len_bytes = (query.len() as u16).to_be_bytes();
-    stream
-        .write_all(&len_bytes)
-        .map_err(ProxyClientError::Io)?;
-    stream
-        .write_all(&query)
-        .map_err(ProxyClientError::Io)?;
+    stream.write_all(&len_bytes).map_err(ProxyClientError::Io)?;
+    stream.write_all(&query).map_err(ProxyClientError::Io)?;
 
     // Read response length prefix — use a loop to handle partial reads
     let mut len_buf = [0u8; 2];
@@ -696,9 +691,7 @@ fn parse_test_url(url: &str) -> Result<(String, u16, bool), ProxyClientError> {
     };
 
     if rest.is_empty() {
-        return Err(ProxyClientError::Protocol(
-            "URL has no host".to_string(),
-        ));
+        return Err(ProxyClientError::Protocol("URL has no host".to_string()));
     }
 
     // Strip path/query/fragment
@@ -728,9 +721,9 @@ fn parse_test_url(url: &str) -> Result<(String, u16, bool), ProxyClientError> {
     if let Some(colon_pos) = host_port.rfind(':') {
         let host = &host_port[..colon_pos];
         let port_str = &host_port[colon_pos + 1..];
-        let port = port_str.parse::<u16>().map_err(|_| {
-            ProxyClientError::Protocol(format!("invalid port in URL: {port_str}"))
-        })?;
+        let port = port_str
+            .parse::<u16>()
+            .map_err(|_| ProxyClientError::Protocol(format!("invalid port in URL: {port_str}")))?;
         Ok((host.to_string(), port, scheme == "https"))
     } else {
         let port = if scheme == "https" { 443 } else { 80 };

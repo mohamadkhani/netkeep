@@ -138,10 +138,7 @@ impl Tray for LogiTray {
                 activate: Box::new(move |_this| {
                     // The host delivered the token (if it supports
                     // ProvideXdgActivationToken) just before this click.
-                    let token = token_for_manage
-                        .lock()
-                        .ok()
-                        .and_then(|mut g| g.take());
+                    let token = token_for_manage.lock().ok().and_then(|mut g| g.take());
                     let _ = tx_manage.send(TrayAction::Settings { token });
                 }),
                 ..Default::default()
@@ -359,4 +356,3 @@ pub fn spawn_tray(
 
     (action_rx, state_tx, stop_tx)
 }
-

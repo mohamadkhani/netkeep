@@ -9,12 +9,11 @@
 //! subscriptions; the entities are reconciled with the filter state on every
 //! state change so Clear / external resets stay in sync.
 
-
 use std::rc::Rc;
 
 use gpui::{
-    div, px, AnyElement, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled,
+    div, px, AnyElement, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled,
 };
 use gpui_component::h_flex;
 use gpui_component::input::{Input, InputState};
@@ -78,7 +77,6 @@ impl<'a> RulesToolbar<'a> {
             ))
             .child(facet(&self.facets.status, "filter-status", "Status", 104.))
             .child(facet(&self.facets.route, "filter-route", "Route", 120.));
-
 
         row = row.child(
             Label::new(format!("{} of {} rules", self.shown, self.total))

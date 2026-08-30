@@ -45,7 +45,9 @@ impl RulesDelegate {
                 Column::new("action", "Action").width(px(80.)),
                 Column::new("duration", "Duration").width(px(80.)),
                 Column::new("route", "Route").width(px(90.)),
-                Column::new("priority", "Priority").width(px(56.)).resizable(false),
+                Column::new("priority", "Priority")
+                    .width(px(56.))
+                    .resizable(false),
                 Column::new("controls", "").width(px(190.)).resizable(false),
             ],
         }
@@ -188,17 +190,11 @@ impl TableDelegate for RulesDelegate {
             6 => h_flex()
                 .h_full()
                 .items_center()
-                .child(
-                    h_flex()
-                        .w(px(4.))
-                        .h(px(16.))
-                        .rounded(px(2.))
-                        .bg(if dimmed {
-                            colors::muted()
-                        } else {
-                            colors::priority_color(rule.priority)
-                        }),
-                )
+                .child(h_flex().w(px(4.)).h(px(16.)).rounded(px(2.)).bg(if dimmed {
+                    colors::muted()
+                } else {
+                    colors::priority_color(rule.priority)
+                }))
                 .into_any_element(),
 
             // Controls column — toggle + delete + reorder
@@ -310,8 +306,8 @@ impl TableDelegate for RulesDelegate {
                             }),
                     )
                     .child(
-                        action_btn(format!("rule-up-{id_up}"), "↑", colors::muted())
-                            .on_click(move |_, _, cx| {
+                        action_btn(format!("rule-up-{id_up}"), "↑", colors::muted()).on_click(
+                            move |_, _, cx| {
                                 // Already at the top — nothing to do.
                                 let Some(above_id) = above.clone() else {
                                     return;
@@ -344,11 +340,12 @@ impl TableDelegate for RulesDelegate {
                                     fetch_and_apply(sw, &sock, cx).await;
                                 })
                                 .detach();
-                            }),
+                            },
+                        ),
                     )
                     .child(
-                        action_btn(format!("rule-down-{id_down}"), "↓", colors::muted())
-                            .on_click(move |_, _, cx| {
+                        action_btn(format!("rule-down-{id_down}"), "↓", colors::muted()).on_click(
+                            move |_, _, cx| {
                                 // Already at the bottom — nothing to do.
                                 let Some(below_id) = below.clone() else {
                                     return;
@@ -381,7 +378,8 @@ impl TableDelegate for RulesDelegate {
                                     fetch_and_apply(sw, &sock, cx).await;
                                 })
                                 .detach();
-                            }),
+                            },
+                        ),
                     )
                     .into_any_element()
             }

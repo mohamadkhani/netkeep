@@ -110,7 +110,7 @@ impl SettingsState {
     pub fn new(socket_path: String) -> Self {
         Self {
             rules: Vec::new(),
-rules_filter: rules_filter::RulesFilter::default(),
+            rules_filter: rules_filter::RulesFilter::default(),
             egresses: Vec::new(),
             proxies: Vec::new(),
             status: None,
@@ -147,9 +147,8 @@ impl SettingsApp {
         let weak = state.downgrade();
 
         // Search input for the rules filter toolbar.
-        let rules_search_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search process, destination, ID…")
-        });
+        let rules_search_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Search process, destination, ID…"));
         // Live filtering on every keystroke → mirror text into filter state.
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(
@@ -169,11 +168,33 @@ impl SettingsApp {
         // Facet selects. Items are plain strings; index 0 is always "Any".
         // Option labels are stable across all tabs; the Route list is
         // rebuilt on state sync (egress names can change).
-        let facet_items = |options: &[&str]| options.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let facet_items =
+            |options: &[&str]| options.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let rules_facets = rules_toolbar::FacetSelects {
-            action: cx.new(|cx| SelectState::new(facet_items(&["Any", "Allow", "Deny", "Ask", "Route"]), None, window, cx)),
-            duration: cx.new(|cx| SelectState::new(facet_items(&["Any", "Forever", "Session"]), None, window, cx)),
-            status: cx.new(|cx| SelectState::new(facet_items(&["Any", "Enabled", "Disabled"]), None, window, cx)),
+            action: cx.new(|cx| {
+                SelectState::new(
+                    facet_items(&["Any", "Allow", "Deny", "Ask", "Route"]),
+                    None,
+                    window,
+                    cx,
+                )
+            }),
+            duration: cx.new(|cx| {
+                SelectState::new(
+                    facet_items(&["Any", "Forever", "Session"]),
+                    None,
+                    window,
+                    cx,
+                )
+            }),
+            status: cx.new(|cx| {
+                SelectState::new(
+                    facet_items(&["Any", "Enabled", "Disabled"]),
+                    None,
+                    window,
+                    cx,
+                )
+            }),
             route: cx.new(|cx| SelectState::new(vec!["Any".into()], None, window, cx)),
         };
         // Confirm → apply to filter state. Confirm carries the selected
@@ -386,7 +407,11 @@ impl SettingsApp {
     ) {
         if let TableEvent::DoubleClickedRow(row_ix) = event {
             // The table renders the *filtered* view — index it, not raw state.
-            let filtered = self.state.read(cx).rules_filter.apply(&self.state.read(cx).rules);
+            let filtered = self
+                .state
+                .read(cx)
+                .rules_filter
+                .apply(&self.state.read(cx).rules);
             if let Some(rule) = filtered.get(*row_ix) {
                 let rule = rule.clone();
                 self.open_rule_form_dialog(Some(rule), window, cx);
@@ -614,8 +639,8 @@ impl SettingsApp {
                         .unwrap_or_else(|| format!("ui-{}", crate::daemon::unix_now()));
                     // Decide whether this is a process+Any rule *before* moving
                     // the fields into the Rule struct.
-                    let is_proc_any = matches!(destination, DestinationMatcher::Any)
-                        && process_name.is_some();
+                    let is_proc_any =
+                        matches!(destination, DestinationMatcher::Any) && process_name.is_some();
                     let rule = Rule {
                         id,
                         enabled: true,
@@ -625,7 +650,7 @@ impl SettingsApp {
                         process_exe: None,
                         destination,
                         egress_id,
-                            priority: 0.0,
+                        priority: 0.0,
                     };
                     let to_send = rule.clone();
                     let sock_c = sock.clone();
@@ -751,19 +776,32 @@ impl SettingsApp {
                         // rank by, so the user picks a High/Low slot.
                         .when(show_proc_priority, |el| {
                             el.child(
-                                v_flex().gap(px(4.)).child(
-                                    field_label("PROCESS PRIORITY  (where this process rule ranks)"),
-                                )
-                                .child(
-                                    h_flex().gap(px(8.)).child(
-                                        proto_btn("HIGH", pc_high, pc_high, move |_, _, _| {
-                                            *pp_high.lock().unwrap() = ProcessPriority::High;
-                                        }),
-                                    )
-                                    .child(proto_btn("LOW", pc_low, pc_low, move |_, _, _| {
-                                        *pp_low.lock().unwrap() = ProcessPriority::Low;
-                                    })),
-                                ),
+                                v_flex()
+                                    .gap(px(4.))
+                                    .child(field_label(
+                                        "PROCESS PRIORITY  (where this process rule ranks)",
+                                    ))
+                                    .child(
+                                        h_flex()
+                                            .gap(px(8.))
+                                            .child(proto_btn(
+                                                "HIGH",
+                                                pc_high,
+                                                pc_high,
+                                                move |_, _, _| {
+                                                    *pp_high.lock().unwrap() =
+                                                        ProcessPriority::High;
+                                                },
+                                            ))
+                                            .child(proto_btn(
+                                                "LOW",
+                                                pc_low,
+                                                pc_low,
+                                                move |_, _, _| {
+                                                    *pp_low.lock().unwrap() = ProcessPriority::Low;
+                                                },
+                                            )),
+                                    ),
                             )
                         })
                         // Action
@@ -2329,10 +2367,7 @@ impl Render for SettingsApp {
         // Table content for the active tab
         let table_content = match active_tab {
             SettingsTab::Rules => {
-                let (filter, egresses_snapshot): (
-                    rules_filter::RulesFilter,
-                    Vec<Egress>,
-                ) = {
+                let (filter, egresses_snapshot): (rules_filter::RulesFilter, Vec<Egress>) = {
                     let s = self.state.read(cx);
                     (s.rules_filter.clone(), s.egresses.clone())
                 };
@@ -2369,23 +2404,25 @@ impl Render for SettingsApp {
                 let state_entity = self.state.clone();
                 let search_input = self.rules_search_input.clone();
                 let facets = self.rules_facets.clone();
-                let on_clear = Rc::new(
-                    move |window: &mut gpui::Window, cx: &mut gpui::App| {
-                        let _ = state_entity.update(cx, |s, cx| {
-                            s.rules_filter.clear();
-                            cx.notify();
+                let on_clear = Rc::new(move |window: &mut gpui::Window, cx: &mut gpui::App| {
+                    let _ = state_entity.update(cx, |s, cx| {
+                        s.rules_filter.clear();
+                        cx.notify();
+                    });
+                    search_input.update(cx, |input, cx| {
+                        input.set_value("", window, cx);
+                    });
+                    for st in [
+                        &facets.action,
+                        &facets.duration,
+                        &facets.status,
+                        &facets.route,
+                    ] {
+                        st.update(cx, |st, cx| {
+                            st.set_selected_index(None, window, cx);
                         });
-                        search_input.update(cx, |input, cx| {
-                            input.set_value("", window, cx);
-                        });
-                        for st in [&facets.action, &facets.duration, &facets.status, &facets.route]
-                        {
-                            st.update(cx, |st, cx| {
-                                st.set_selected_index(None, window, cx);
-                            });
-                        }
-                    },
-                );
+                    }
+                });
 
                 let toolbar = rules_toolbar::RulesToolbar {
                     filter: &filter,

@@ -929,8 +929,9 @@ mod tests {
             pid: std::sync::atomic::AtomicU32::new(first.id()),
         };
         let tracker: Arc<PortReuseTracker> = Arc::new(tracker);
-        let resolver =
-            ProcProcessResolver::with_sock_tracker(Arc::clone(&tracker) as Arc<dyn crate::SocketTracker>);
+        let resolver = ProcProcessResolver::with_sock_tracker(
+            Arc::clone(&tracker) as Arc<dyn crate::SocketTracker>
+        );
 
         let ip = "10.20.30.40";
         let first_name = resolver
