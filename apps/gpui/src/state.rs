@@ -31,4 +31,7 @@ pub struct AppState {
     pub selected_egress_index: usize,
     pub process_scope: ProcessScope,
     pub dest_scope: DestScope,
+    /// Set when a decision was submitted (or the deadline expired): the UI
+    /// plays its close animation and the process exits once it finishes.
+    pub closing: bool,
 }
