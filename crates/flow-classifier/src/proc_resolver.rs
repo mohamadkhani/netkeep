@@ -92,6 +92,7 @@ impl ProcProcessResolver {
         if let Some(ref tracker) = self.sock_tracker {
             if let Some(tracked) = tracker.lookup_pid(ip, port, protocol) {
                 counter!("logiguard.proc.resolver.ebpf.hits").increment(1);
+                eprintln!("proc: key={ip}:{port} pid={} source=ebpf", tracked.pid);
                 return Some(tracked.pid);
             }
             counter!("logiguard.proc.resolver.ebpf.misses").increment(1);
@@ -101,11 +102,22 @@ impl ProcProcessResolver {
             .or_else(|| retry_find_socket(ip, port, protocol));
         if let Some((inode, uid)) = inode_uid {
             if let Some(pid) = find_pid_for_inode(inode, uid) {
+                eprintln!("proc: key={ip}:{port} pid={pid} inode={inode} source=sockdiag+procfds");
                 return Some(pid);
             }
+            eprintln!(
+                "proc: key={ip}:{port} inode={inode} uid={uid} found but no /proc/*/fd owner \
+                 (fork/exec gap?) — trying ss fallback"
+            );
             // Inode found but /proc/*/fd scan came up empty (fork/exec gap).
+        } else {
+            eprintln!("proc: key={ip}:{port} no inode via sock-diag — trying ss fallback");
         }
-        try_ss_fallback(ip, port, protocol)
+        let ss_pid = try_ss_fallback(ip, port, protocol);
+        if ss_pid.is_none() {
+            eprintln!("proc: key={ip}:{port} UNRESOLVED — all sources missed");
+        }
+        ss_pid
     }
 
     /// Look up the Arch Linux package that owns `exe_path` via `pacman -Qo`.

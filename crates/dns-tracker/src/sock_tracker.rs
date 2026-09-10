@@ -69,6 +69,9 @@ pub struct SockTracker {
     /// Handle to the SOCK_EVENTS BPF map. Protected by Mutex for thread safety
     /// (NFQUEUE processor calls lookup_pid from its run loop thread).
     sock_map: Mutex<HashMap<MapData, SockKey, SockInfo>>,
+    /// Fallback map keyed by (port, protocol) only — covers unconnected UDP
+    /// sockets whose source address is unknown at udp_sendmsg time.
+    port_map: Mutex<HashMap<MapData, PortKey, SockInfo>>,
 }
 
 impl SockTracker {
@@ -130,40 +133,105 @@ impl SockTracker {
              (tracepoint:sock:inet_sock_set_state, kprobe:udp_sendmsg, kprobe:udp_lib_unhash)"
         );
 
-        // Take ownership of the map so we can store it without borrowing Ebpf.
+        // Take ownership of the maps so we can store them without borrowing Ebpf.
         let sock_map: HashMap<MapData, SockKey, SockInfo> = HashMap::try_from(
             ebpf.take_map("SOCK_EVENTS")
                 .context("BPF map 'SOCK_EVENTS' not found")?,
         )
         .context("failed to create HashMap from SOCK_EVENTS")?;
+        let port_map: HashMap<MapData, PortKey, SockInfo> = HashMap::try_from(
+            ebpf.take_map("PORT_PIDS")
+                .context("BPF map 'PORT_PIDS' not found")?,
+        )
+        .context("failed to create HashMap from PORT_PIDS")?;
 
         Ok(Self {
             _ebpf: ebpf,
             sock_map: Mutex::new(sock_map),
+            port_map: Mutex::new(port_map),
         })
     }
 
     /// Look up the process that owns a socket by source IP, port, and protocol.
     ///
-    /// Returns `None` if the BPF map has no entry for this key (e.g., the
-    /// socket was created before the tracker was loaded, or the entry was
-    /// evicted).
+    /// Tries the full (ip, port, protocol) key first. On a miss, falls back
+    /// to the port-only map — unconnected UDP sockets record only that key
+    /// (their source address is unknown until route lookup, after the hook).
+    ///
+    /// Returns `None` if neither map has a fresh entry for the socket.
     pub fn lookup_pid(
         &self,
         src_ip: IpAddr,
         src_port: u16,
         protocol: TransportProtocol,
     ) -> Option<TrackedProcess> {
-        let key = build_sock_key(src_ip, src_port, protocol);
+        // Age gate: entries deliberately survive socket close (the resolver
+        // needs them after short-lived processes exit), so bound staleness —
+        // an old entry's PID may have been recycled to another process.
+        const MAX_ENTRY_AGE_SECS: u64 = 60;
+        let info = {
+            let key = build_sock_key(src_ip, src_port, protocol);
+            let map = self.sock_map.lock().ok()?;
+            map.get(&key, 0).ok()
+        }
+        .or_else(|| {
+            let port_key = build_port_key(src_port, protocol);
+            let map = self.port_map.lock().ok()?;
+            map.get(&port_key, 0).ok()
+        })?;
 
-        let map = self.sock_map.lock().ok()?;
-        let info = map.get(&key, 0).ok()?;
+        let boot_now_ns = boot_time_now_ns()?;
+        if boot_now_ns.saturating_sub(info.timestamp_ns) > MAX_ENTRY_AGE_SECS * 1_000_000_000 {
+            return None;
+        }
 
         Some(TrackedProcess {
             pid: info.pid,
             uid: info.uid,
         })
     }
+}
+
+/// Key for the port-only fallback map (must match the eBPF-side PortKey).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct PortKey {
+    /// Source port, host byte order.
+    pub src_port: u16,
+    /// IP protocol number: 6 = TCP, 17 = UDP.
+    pub protocol: u8,
+    pub _pad: u8,
+}
+
+// SAFETY: PortKey is a POD type — all bit patterns are valid.
+unsafe impl aya::Pod for PortKey {}
+
+fn build_port_key(src_port: u16, protocol: TransportProtocol) -> PortKey {
+    let proto_num = match protocol {
+        TransportProtocol::Tcp => 6u8,
+        TransportProtocol::Udp | TransportProtocol::Quic => 17u8,
+        TransportProtocol::Other => 0u8,
+    };
+    PortKey {
+        src_port,
+        protocol: proto_num,
+        _pad: 0,
+    }
+}
+
+/// Nanoseconds since boot (same clock as `bpf_ktime_get_ns`), via
+/// `clock_gettime(CLOCK_MONOTONIC)` — on Linux this is the same basis the
+/// BPF helper uses.
+fn boot_time_now_ns() -> Option<u64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: ts is a valid out-pointer for clock_gettime.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return None;
+    }
+    Some(ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64)
 }
 
 /// Implement the `flow_classifier::SocketTracker` trait so the eBPF tracker

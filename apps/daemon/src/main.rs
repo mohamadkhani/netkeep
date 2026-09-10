@@ -1221,8 +1221,11 @@ fn main() {
             Some(Arc::new(t))
         }
         Err(e) => {
+            // Print the FULL error chain — the kernel/verifier reason is nested
+            // in the anyhow source and "{e}" only shows the outermost context.
             eprintln!(
-                "sock-tracker: eBPF load failed ({e}); will use SOCK_DIAG + /proc fallback only"
+                "sock-tracker: eBPF load failed; will use SOCK_DIAG + /proc fallback only. \
+                 Full error chain: {e:#}"
             );
             None
         }

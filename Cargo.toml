@@ -15,6 +15,7 @@ members = [
   "apps/cli",
   "apps/gpui",
   "apps/emulator",
+  "e2e",
 ]
 resolver = "2"
 

@@ -10,8 +10,8 @@ flow-classifier = { path = "../flow-classifier" }
 proxy-client = { path = "../proxy-client" }
 state-store = { path = "../state-store" }
 
-aya = "0.13"
-aya-log = "0.2"
+aya = "0.14"
+aya-log = "0.3"
 anyhow = "1"
 libc = "0.2"
 socket2 = { version = "0.6", features = ["all"] }

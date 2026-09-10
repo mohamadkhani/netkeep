@@ -18,6 +18,13 @@ check:
 test:
   cargo test --workspace
 
+# Black-box e2e suite against the running daemon. Requires: daemon up
+# (`just run-daemon` or systemctl), CLI built (`cargo build -p logiguard-cli`).
+# The process-detection scenario additionally needs interception enabled
+# (LOGIGUARD_NFQUEUE set on the daemon) and self-skips otherwise.
+e2e:
+  cargo test -p e2e -- --test-threads 1 --ignored
+
 ci:
   just fmt-check
   just lint
