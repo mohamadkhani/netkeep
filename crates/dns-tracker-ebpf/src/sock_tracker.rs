@@ -6,7 +6,10 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns, bpf_probe_read_kernel},
+    helpers::{
+        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
+        bpf_probe_read_kernel,
+    },
     macros::{kprobe, map, tracepoint},
     maps::LruHashMap,
     programs::{ProbeContext, TracePointContext},
@@ -41,6 +44,11 @@ pub struct SockInfo {
     pub uid: u32,
     /// Timestamp (nanoseconds since boot) when the entry was created.
     pub timestamp_ns: u64,
+    /// Process comm (exe basename, kernel-truncated to 16 bytes) captured at
+    /// hook time. The process is guaranteed alive mid-syscall, so this
+    /// survives the exit race that makes /proc/<pid>/exe unreadable for
+    /// short-lived processes. NUL-padded.
+    pub comm: [u8; 16],
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +183,7 @@ unsafe fn try_trace_tcp_state(ctx: &TracePointContext) -> Result<(), ()> {
             pid: (pid_tgid >> 32) as u32,
             uid: uid_gid as u32,
             timestamp_ns: bpf_ktime_get_ns(),
+            comm: current_comm(),
         };
 
         let _ = SOCK_EVENTS.insert(&key, &info, 0);
@@ -238,6 +247,7 @@ unsafe fn try_sock_udp_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
         pid: (pid_tgid >> 32) as u32,
         uid: uid_gid as u32,
         timestamp_ns: bpf_ktime_get_ns(),
+        comm: current_comm(),
     };
 
     // Always record the port-only key — an in-flight ephemeral port uniquely
@@ -301,6 +311,18 @@ unsafe fn try_sock_udp_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
 pub fn sock_udp_unhash(ctx: ProbeContext) -> u32 {
     let _ = ctx;
     0
+}
+
+/// Capture the current process comm (16 bytes, NUL-padded) at hook time.
+/// Guaranteed to be the connecting/sending process — the hook fires inside
+/// its syscall. On helper failure, returns NULs (the resolver then relies on
+/// /proc for the name, as before).
+#[inline(always)]
+fn current_comm() -> [u8; 16] {
+    match bpf_get_current_comm() {
+        Ok(comm) => comm,
+        Err(_) => [0u8; 16],
+    }
 }
 
 /// Build a zeroed 16-byte IP array via volatile writes: a plain `[0u8; 16]`

@@ -66,7 +66,7 @@ impl DnsTracker {
             src_port,
             _pad: 0,
         };
-        if let Some(event) = map.get(&key, 0).ok() {
+        if let Ok(event) = map.get(&key, 0) {
             return Some(DnsQueryInfo {
                 pid: event.pid,
                 comm: null_terminated_str(&event.comm).to_string(),

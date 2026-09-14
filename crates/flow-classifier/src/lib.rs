@@ -438,4 +438,7 @@ pub trait SocketTracker: Send + Sync {
 pub struct TrackedProcess {
     pub pid: u32,
     pub uid: u32,
+    /// Process comm captured at eBPF hook time — survives the exit race
+    /// that empties /proc/<pid>/exe for short-lived processes.
+    pub comm: String,
 }

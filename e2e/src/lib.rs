@@ -112,15 +112,20 @@ pub fn require_daemon() {
 static PROBE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// Unique probe process name per run (used as the copied binary's basename —
-/// the resolver reads `/proc/<pid>/exe` basename, so this IS the attributed
-/// name under test).
+/// the resolver reads `/proc/<pid>/exe` basename, and the eBPF hook-time
+/// comm, so this IS the attributed name under test). Kept ≤15 chars: the
+/// kernel truncates comm to 15 + NUL, and the census matches the comm when
+/// the process exits before the /proc read.
 pub fn next_process() -> String {
     let n = PROBE_SEQ.fetch_add(1, Ordering::Relaxed);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    format!("e2e-probe-{now}-{n}")
+    // Kernel comm is 16 bytes (15 chars + NUL), so keep the probe name short
+    // enough that the eBPF hook-time comm equals this name exactly — the
+    // census matches against the truncated comm when /proc lost the race.
+    format!("ep-{:x}-{n}", now % 0x1000000)
 }
 
 /// Unique `e2e-`-prefixed rule id so test artifacts are greppable in the

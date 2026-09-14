@@ -49,6 +49,10 @@ pub struct SockInfo {
     pub uid: u32,
     /// Timestamp (nanoseconds since boot) when the entry was created.
     pub timestamp_ns: u64,
+    /// Process comm (exe basename, kernel-truncated to 16 bytes) captured at
+    /// hook time — survives the exit race that empties /proc/<pid>/exe for
+    /// short-lived processes. NUL-padded.
+    pub comm: [u8; 16],
 }
 
 // SAFETY: SockInfo is a POD type — all bit patterns are valid.
@@ -59,6 +63,25 @@ unsafe impl aya::Pod for SockInfo {}
 pub struct TrackedProcess {
     pub pid: u32,
     pub uid: u32,
+    /// Process comm captured at hook time, as a Rust string (empty when the
+    /// BPF helper failed). The comm is the exe basename truncated to 15
+    /// chars by the kernel — usable as the process name when /proc is gone.
+    pub comm: String,
+}
+
+impl TrackedProcess {
+    fn from_info(info: &SockInfo) -> Self {
+        let nul = info
+            .comm
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(info.comm.len());
+        Self {
+            pid: info.pid,
+            uid: info.uid,
+            comm: String::from_utf8_lossy(&info.comm[..nul]).into_owned(),
+        }
+    }
 }
 
 /// Manages the eBPF socket tracker: loads the BPF programs, attaches them,
@@ -185,10 +208,7 @@ impl SockTracker {
             return None;
         }
 
-        Some(TrackedProcess {
-            pid: info.pid,
-            uid: info.uid,
-        })
+        Some(TrackedProcess::from_info(&info))
     }
 }
 
@@ -247,6 +267,7 @@ impl SocketTrackerTrait for SockTracker {
             .map(|tp| FcTrackedProcess {
                 pid: tp.pid,
                 uid: tp.uid,
+                comm: tp.comm,
             })
     }
 }

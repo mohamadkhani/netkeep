@@ -335,7 +335,7 @@ fn action_to_i64(action: &RuleAction) -> i64 {
         RuleAction::Allow => 1,
         RuleAction::Deny => 2,
         RuleAction::Ask => 3,
-        RuleAction::Route { .. } => 4,
+        RuleAction::Route => 4,
     }
 }
 

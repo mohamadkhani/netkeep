@@ -205,13 +205,21 @@ impl ProcessResolver for ProcProcessResolver {
             None => self.find_pid(ip, src_port, protocol)?,
         };
 
-        // Read exe: full path first, fall back to comm.
+        // Read exe: full path first, fall back to comm. When the process
+        // already exited (short-lived CLI raced the resolver), both /proc
+        // reads fail — the eBPF hook-time comm is the only surviving name.
         let exe_path = read_exe_path(pid);
         let raw_name = exe_path
             .as_deref()
             .and_then(|p| std::path::Path::new(p).file_name())
             .map(|n| n.to_string_lossy().to_string())
-            .or_else(|| read_comm(pid))?;
+            .or_else(|| read_comm(pid))
+            .or_else(|| {
+                tracked_pid
+                    .as_ref()
+                    .map(|t| t.comm.clone())
+                    .filter(|c| !c.is_empty())
+            })?;
 
         // Name fixup: shell wrappers → parent, electron → cmdline / env.
         let name = if raw_name.len() <= 1
@@ -909,6 +917,7 @@ mod tests {
             Some(crate::TrackedProcess {
                 pid: self.pid.load(std::sync::atomic::Ordering::SeqCst),
                 uid: 0,
+                comm: "portreuse-mock".to_string(),
             })
         }
     }
