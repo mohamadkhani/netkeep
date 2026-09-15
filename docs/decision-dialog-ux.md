@@ -254,3 +254,56 @@ The `route_target` comes from the egress chip selection (optional).
 | Normal | `firefox` | `accounts.google.com` | All options available |
 | IP only | `curl` | `(unknown)` | Domain toggles replaced by CIDR picker |
 | Both unknown | `(unknown)` | `(unknown)` | Warning banner; process locked; `any` destination hidden; destination required |
+
+## SNI deferral for unknown TLS connections (Bug 26, 2026-09-16)
+
+**Symptom.** After the daemon had been running for a while, decision dialogs
+appeared in bursts showing bare IPv4/IPv6 addresses instead of hostnames —
+typically many addresses from a single CDN range, one dialog per new IP.
+
+**Root cause.** The pending decision fired on the connection's first packet —
+the SYN. A SYN never carries a TLS ClientHello, so the hostname is
+unknowable at that point, and the IP→domain cache only knows IPs seen before
+(via prior SNI) or learned by the DNS snoop. Because a Pending verdict DROPS
+the SYN, the handshake could not complete, so the ClientHello — the only
+packet that carries the SNI — could never arrive to fill the dialog in. For
+any rotating CDN IP that the cache had not seen, the only possible outcome
+was a bare-IP dialog (and, once allowed, a new `IpExact` rule — hence the
+rule-table full of per-IP allows).
+
+**Fix.** `ControlService::register` now returns `FlowDecision::DeferSni`
+instead of opening a pending when ALL of these hold:
+
+- no rule matched (the decision would be Pending),
+- the flow is TCP with destination port 443,
+- the classified packet is the SYN,
+- no hostname is known (otherwise the dialog already has a domain).
+
+`DeferSni` accepts the bare handshake (verdict Accept, never cached) so the
+ClientHello arrives. Pending verdicts are deliberately never cached, so the
+ClientHello is re-classified and either:
+
+* matches an existing rule by hostname — the connection flows with **no
+  dialog at all** (this is what reduces decision prompts), or
+* opens the pending **with the real hostname** (verified live: a curl to a
+  never-seen IP produces a pending carrying the SNI name, `tcp_syn=false`),
+  or
+* non-TLS traffic on 443 (no ClientHello ever) opens an IP-only pending on
+  its first payload packet — same as before, just one packet later.
+
+**Exposure.** For an unknown TLS connection the handshake (SYN/SYN-ACK/ACK)
+passes unclassified; the ClientHello itself is the first gated packet and is
+dropped while the dialog is open, so no application payload flows before a
+verdict.
+
+**Caveat.** Domain-scoped *Route* rules first match at ClientHello time, one
+round-trip after conntrack NEW, so the initial NAT binding was made on the
+default egress. The SNI seen on the ClientHello is written to the shared
+DNS cache, so the application's reconnect attempt matches the route rule at
+SYN time and routes correctly from a clean connection.
+
+**Tests.** `control-service`: `syn_without_domain_defers_instead_of_pending`,
+`client_hello_with_domain_opens_pending_with_domain`,
+`deferred_syn_resolves_silently_once_domain_known`,
+`non_https_syn_still_pends_immediately`. `FlowContext` gained a
+serde-defaulted `tcp_syn` flag (set by the classifier from the packet).

@@ -204,6 +204,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         };
         let flow_apex = FlowContext {
             process_name: None,
@@ -217,6 +218,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         };
         let rule = mk_rule(
             "r1",
@@ -251,6 +253,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         };
         let flow_deep = FlowContext {
             destination_domain: Some("a.b.c.example.com".to_string()),
@@ -311,6 +314,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         };
         let with_prefix = mk_rule(
             "p",
@@ -351,6 +355,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         };
         for pat in ["", "*.", "*."] {
             let rule = mk_rule(
@@ -380,6 +385,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         };
         let general = mk_rule(
             "general",
@@ -412,6 +418,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         };
         let allow = mk_rule(
             "allow",
@@ -442,6 +449,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         }
     }
 
@@ -544,6 +552,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         };
         let mut tun = mk_rule(
             "demo-digikala-tun",
@@ -676,6 +685,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         };
         // Low has the higher action_rank (Deny), but priority dominates.
         let resolved = resolve_action(&[low, high], &flow).expect("must resolve");
@@ -714,6 +724,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         };
         let resolved = resolve_action(&[ip_only, proc_any], &flow).expect("must resolve");
         assert_eq!(resolved.rule_id, "proc-any");

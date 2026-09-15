@@ -383,6 +383,11 @@ If the eBPF program fails to load (no `CAP_BPF`, kernel < 5.5, etc.), the daemon
 | `crates/flow-classifier/src/proc_resolver.rs` | Step 0 integration in `find_pid()` |
 | `crates/flow-classifier/src/sock_diag.rs` | Dual-family + UDP wildcard SOCK_DIAG fix |
 
+> **Note (Bug 25):** the TCP hook described above was the
+> `inet_sock_set_state` tracepoint; it is now the `tcp_connect` kprobe —
+> see the Bug 25 section at the end of this document for why the tracepoint
+> is unusable on modern kernels.
+
 ---
 
 ## When to revisit
@@ -392,3 +397,144 @@ The eBPF socket tracker (Layer −1) addresses the first bullet below — it ret
 - a resolver that returns `(name, confidence)` instead of `Option<name>` (Layer 3's "specific destination" guard could be replaced by a confidence threshold);
 - packet-level user-space queues other than NFQUEUE (the race window changes shape);
 - eBPF BTF: runtime validation of hardcoded struct offsets in `sock_tracker.rs` (currently hardcoded for x86_64, Linux 6.x).
+
+---
+
+## Bug 25 — Systematic misattribution audit (2026-09-15)
+
+A systematic, evidence-first investigation of "wrong process name for some
+NFQUEUE packets" traced the full path
+`NFQUEUE packet → tuple → socket → PID → exe → name → Layer-0 cache →
+policy/decision → flow event`, tested every layer independently, and found
+**five independent wrong-name sources**. All are fixed; the tests below pin
+them permanently.
+
+### Root cause 1 — the TCP eBPF hook was silently dead on kernel 6.18 (and structurally broken on all modern kernels)
+
+Two stacked failures, discovered by a live test that loads the real BPF
+programs and creates real sockets (`live_tcp_ipv4_full_key_hits_own_pid`):
+
+1. **Tracepoint record layout is not stable.** Kernel 6.18 reordered the
+   `inet_sock_set_state` record fields — `sport` moved from offset 28 to 24
+   and `family` from 24 to 28. The program's hardcoded offsets then read
+   `dport` as `protocol`, the `protocol == IPPROTO_TCP` guard rejected every
+   event, and TCP PID capture silently inserted nothing. The daemon's
+   "graceful degradation" (SOCK_DIAG + `/proc` fallback) masked it — every
+   TCP flow quietly lost the race-free eBPF attribution.
+2. **The SYN_SENT record no longer carries the port at all.** Even with
+   correct offsets, raw-record capture on 6.18 shows `sport=0`,
+   `saddr=0.0.0.0` (but valid `daddr`) for auto-bound sockets: the kernel
+   now fires `tcp_set_state(SYN_SENT)` BEFORE `inet_hash_connect` assigns
+   the ephemeral port. Only pre-bound sockets (explicit `bind()`) carry
+   values. The information we need is not in the record, so no offset fix
+   can save the tracepoint approach.
+
+**Fix.** The TCP hook is now a **kprobe on `tcp_connect`** reading the live
+`struct sock` (`skc_num`, `skc_rcv_saddr`, `skc_v6_rcv_saddr`, `skc_family` —
+the same BTF-verified offsets the UDP hook already used). `tcp_connect` runs
+after connect() has assigned port and source address, so the key is always
+complete. The tracepoint program, the format-file parser, and the offset
+injection were removed. Verified by the five live tests
+(`sudo target/debug/deps/dns_tracker-* sock_tracker -- --ignored --test-threads 1`).
+
+### Root cause 2 — eBPF port-reuse: stale full-key entry shadowed the fresh port-only entry
+
+`SOCK_EVENTS` entries deliberately outlive their sockets (short-lived-process
+support) and the lookup consulted the full `(ip, port)` map FIRST. After an
+ephemeral port was recycled from a connected UDP socket (process A) to an
+unconnected socket (process B), the stale full-key entry (≤60 s old) won and
+B's packets were attributed to A — confidently, not as `None`.
+
+**Fix.** `lookup_pid` consults BOTH maps and returns whichever entry is
+NEWER (`timestamp_ns`); the port-only map additionally gets a tight 10 s age
+gate (it only needs to outlive the in-flight datagram). Maps grew
+16384 → 65536 entries so churn cannot LRU-evict live sockets' entries.
+Regression: `live_port_reuse_stale_full_key_must_not_shadow_fresh_port_entry`
+(drives the old socket from an external `nc` so the pids differ).
+
+### Root cause 3 — Layer-0 destination caches attributed cross-process
+
+The `(dst_ip, dst_port)` and `(domain, dst_port)` restore caches assumed a
+destination is used by one process. False in general (DNS resolvers, NTP,
+anycast CDNs): when process B's live resolution failed on a destination
+process A had used, B's packet got A's *name* — and A's rules.
+
+**Fix.** `AttrCache::record_success` poisons a key the moment a second,
+different process name is observed on it (within TTL): the entry is removed
+and never restored from. Single-process destinations keep the CDN-rotation
+fix. Additionally, restores are skipped entirely for packets captured on the
+FORWARD hook (`raw.forwarded` from `NFQA_*` hook metadata) — routed traffic
+has no local socket, so any restored local name was guaranteed wrong (this
+was reproducible live: a docker container's traffic showed up as the
+operator's local `curl`). Containers are now attributed to their real
+binaries via the kprobe-captured PIDs (verified: `busybox`).
+
+Regression: `layer0_does_not_restore_when_second_process_shares_destination`,
+`layer0_domain_cache_does_not_restore_when_shared`,
+`layer0_key_re_arms_after_expiry`,
+`forwarded_container_traffic_is_not_attributed_to_local_process` (e2e).
+
+### Root cause 4 — resolver per-socket cache served stale entries without corroboration
+
+With a tracker configured, a cache hit was served on TTL alone when the
+tracker had no entry for the socket (evicted / port recycled). The cached
+name could belong to the previous owner of the port.
+
+**Fix.** When a tracker IS configured but reports nothing for the socket,
+the cache is not trusted — a live lookup runs instead (SOCK_DIAG succeeds
+for still-alive sockets, so the common case costs nothing). Regression:
+`stale_cache_not_served_when_tracker_goes_silent`.
+
+### Root cause 5 — port-only fallbacks guessed among multiple candidates
+
+`/proc` port-only matching returned the FIRST row with the port; two
+`SO_REUSEADDR` UDP sockets sharing a port (mDNS is the classic case) meant
+one process's packet could be attributed to the other.
+
+**Fix.** `parse_proc_net_port_only` returns the row only when EXACTLY ONE
+candidate matches; ambiguity yields `None`. Regression:
+`port_only_match_with_two_candidates_returns_none`.
+
+### Hardening added along the way
+
+* **NFQA_UID/GID**: the daemon now enables `set_recv_uid_gid` and the packet
+  UID is threaded through `ProcessResolver::resolve(.., sk_uid)`. eBPF
+  entries whose captured UID disagrees with the packet's socket-owner UID
+  are rejected (`logiguard.proc.resolver.ebpf.uid_mismatch`) — a race-free
+  kernel cross-check against stale entries.
+* **FlowEvent** now records `source_port` + `destination_port` (SQLite
+  columns + JSON), which is what makes per-flow attribution auditable: each
+  e2e probe binds a FIXED source port, so every flow event maps to exactly
+  one generating process.
+* **`LOGIGUARD_DIAG=1`**: structured per-stage logging
+  (`pkt → ebpf → cache → inode → fdpid → name → layer0 → flow`) so the
+  first incorrect value of any future incident is visible in the journal.
+* **e2e cross-attribution suite** (`e2e/tests/cross_attribution.rs`): N
+  uniquely-named probes with fixed source ports hammer ONE shared
+  destination; the audit fails on ANY flow whose name disagrees with its
+  source port's owner. `E2E_ROUNDS` scales the stress (10 rounds = ~800
+  flows, 0 misattributed).
+
+### Why the previous fixes did not solve the problem
+
+Bugs 22–24 and the Layer −1 eBPF tracker all hardened *lookup races*
+(fork/exec gaps, TIME_WAIT inode=0, ACK eviction). They assumed the eBPF
+tracker worked. On this kernel it did not — TCP silently fell back to the
+racy path the layers were supposed to make rare, and the remaining
+wrong-name sources (Layer-0 cross-process restore, stale shadowing,
+port-only guessing) were *confident wrong answers*, not misses, so the
+None-focused safety nets could not catch them.
+
+### Remaining, documented limitations
+
+* **FD sharing across processes** (fork inheritance, socket activation):
+  `find_pid_for_inode` returns the lowest-PID holder; the "owner" is genuinely
+  ambiguous. Unchanged (pre-existing behavior).
+* **Same-user wildcard UDP sockets sharing one port** (mDNS-style
+  REUSEADDR): last-writer-wins in `PORT_PIDS`; bounded by the 10 s port-entry
+  age gate. Two simultaneous same-port senders within that window can still
+  cross-attribute — inherent to a port-only key.
+* **NFQUEUE provides no PID.** Kernel NFQUEUE netlink delivers
+  UID/GID (`NFQA_UID` with `NFQA_CFG_F_UID_GID`), mark, timestamp, ifindex,
+  conntrack — never a PID. Process identity must come from socket lookup;
+  `NFQA_UID` is used as a cross-check.

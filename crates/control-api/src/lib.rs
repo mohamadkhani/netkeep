@@ -325,6 +325,7 @@ mod tests {
                 protocol: TransportProtocol::Tcp,
                 direction: FlowDirection::Outbound,
                 device_label: None,
+                tcp_syn: false,
             },
             created_at_secs: 1000,
             deadline_at_secs: 1100,

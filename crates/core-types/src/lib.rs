@@ -101,6 +101,12 @@ pub struct FlowContext {
     pub protocol: TransportProtocol,
     pub direction: FlowDirection,
     pub device_label: Option<String>,
+    /// True when the classified packet was the TCP SYN (connection
+    /// initiation). A SYN never carries a TLS ClientHello, so a flow
+    /// classified on its SYN cannot know the destination hostname yet —
+    /// used to defer pending decisions until SNI is available.
+    #[serde(default)]
+    pub tcp_syn: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +149,15 @@ pub struct FlowEvent {
     pub protocol: TransportProtocol,
     pub state: FlowState,
     pub timestamp_secs: u64,
+    /// Ephemeral source port of the flow's first classified packet.
+    /// Identifies the exact local socket — the primary key for verifying
+    /// process attribution in tests and diagnostics. Older rows (and any
+    /// FlowContext-based producers without a socket) default to 0.
+    #[serde(default)]
+    pub source_port: u16,
+    /// Destination port of the flow. Defaults to 0 for legacy rows.
+    #[serde(default)]
+    pub destination_port: u16,
 }
 
 // ---------------------------------------------------------------------------

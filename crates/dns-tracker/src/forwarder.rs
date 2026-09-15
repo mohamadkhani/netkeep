@@ -246,7 +246,7 @@ impl DnsForwarder {
             let src_ip = v4.ip().to_string();
             if let Some(proc_info) =
                 self.proc_resolver
-                    .resolve(&src_ip, v4.port(), TransportProtocol::Udp)
+                    .resolve(&src_ip, v4.port(), TransportProtocol::Udp, None)
             {
                 if !proc_info.name.is_empty() {
                     return Some(proc_info.name);

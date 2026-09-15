@@ -111,6 +111,7 @@ fn main() {
             protocol: proto,
             direction: FlowDirection::Outbound,
             device_label: specified("--device").unwrap_or(None),
+            tcp_syn: false,
         },
         created_at_secs: now,
         deadline_at_secs: now + timeout,

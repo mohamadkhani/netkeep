@@ -1,3 +1,4 @@
+pub mod diag;
 pub mod proc_resolver;
 pub mod sock_diag;
 
@@ -77,6 +78,17 @@ pub struct RawPacket {
     /// for the connection before the routing rule ever runs, and a later
     /// data packet's fwmark can't undo that.
     pub tcp_syn: bool,
+    /// UID of the socket that produced this packet, as reported by the
+    /// kernel (`NFQA_UID`) at NFQUEUE enqueue time. Race-free credentials —
+    /// used to reject candidate (pid, socket) matches that belong to a
+    /// different user. `None` for forwarded packets (no local socket) or
+    /// when the kernel/crate cannot deliver the attribute.
+    pub sk_uid: Option<u32>,
+    /// True when the packet was captured on the FORWARD hook (routed
+    /// traffic from containers/VMs/LAN clients) rather than OUTPUT.
+    /// Forwarded packets may have no local socket at all; attribution
+    /// fallbacks that guess from destination caches must be skipped.
+    pub forwarded: bool,
 }
 
 /// Full information about the local process that owns a network socket.
@@ -95,12 +107,17 @@ pub struct ProcessInfo {
 }
 
 /// Resolves the local process owning a network socket.
+///
+/// `sk_uid` is the packet's kernel-reported socket-owner UID (`NFQA_UID`),
+/// when available. Implementations use it to reject candidate matches that
+/// belong to a different user (port collisions across users, stale entries).
 pub trait ProcessResolver {
     fn resolve(
         &self,
         src_ip: &str,
         src_port: u16,
         protocol: TransportProtocol,
+        sk_uid: Option<u32>,
     ) -> Option<ProcessInfo>;
 }
 
@@ -143,9 +160,12 @@ where
             TransportProtocol::Other => "other",
         };
 
-        let proc_info =
-            self.process_resolver
-                .resolve(&packet.src_ip, packet.src_port, packet.protocol);
+        let proc_info = self.process_resolver.resolve(
+            &packet.src_ip,
+            packet.src_port,
+            packet.protocol,
+            packet.sk_uid,
+        );
 
         if proc_info.is_some() {
             counter!("logiguard.process.resolved", "result" => "hit").increment(1);
@@ -184,6 +204,7 @@ where
             protocol: packet.protocol,
             direction: FlowDirection::Outbound,
             device_label,
+            tcp_syn: packet.tcp_syn,
         }
     }
 
@@ -234,6 +255,7 @@ impl ProcessResolver for FakeProcessResolver {
         _src_ip: &str,
         _src_port: u16,
         _protocol: TransportProtocol,
+        _sk_uid: Option<u32>,
     ) -> Option<ProcessInfo> {
         self.result.as_ref().map(|name| ProcessInfo {
             name: name.clone(),
@@ -326,6 +348,8 @@ mod tests {
             tcp_fin: false,
             tcp_rst: false,
             tcp_syn: false,
+            sk_uid: None,
+            forwarded: false,
         }
     }
 
@@ -441,4 +465,30 @@ pub struct TrackedProcess {
     /// Process comm captured at eBPF hook time — survives the exit race
     /// that empties /proc/<pid>/exe for short-lived processes.
     pub comm: String,
+    /// Which BPF map the entry came from — the port-only fallback map is
+    /// inherently ambiguous (ports are not unique across sockets) and its
+    /// answers carry lower confidence.
+    pub source: TrackerSource,
+}
+
+/// Which eBPF map satisfied a lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackerSource {
+    /// `SOCK_EVENTS[(src_ip, src_port, protocol)]` — full socket key.
+    FullKey,
+    /// `PORT_PIDS[(src_port, protocol)]` — port-only fallback for
+    /// unconnected UDP sockets (source address unknown at send time).
+    PortKey,
+    /// Test fakes that don't model the two-map split.
+    Unknown,
+}
+
+impl TrackerSource {
+    pub fn label(&self) -> &'static str {
+        match self {
+            TrackerSource::FullKey => "full-key",
+            TrackerSource::PortKey => "port-key",
+            TrackerSource::Unknown => "unknown",
+        }
+    }
 }

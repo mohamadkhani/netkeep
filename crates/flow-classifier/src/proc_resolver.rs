@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use core_types::TransportProtocol;
 use metrics::{counter, histogram};
 
+use crate::diag;
 use crate::sock_diag;
 use crate::{ProcessInfo, ProcessResolver, SocketTracker};
 
@@ -85,6 +86,7 @@ impl ProcProcessResolver {
     ///   2. /proc/net + /proc/*/fd scan with retries.
     ///   3. `ss` command fallback if both paths miss the inode or fd scan.
     fn find_pid(&self, ip: IpAddr, port: u16, protocol: TransportProtocol) -> Option<u32> {
+        let proto_str = proto_label(protocol);
         // Step 0: eBPF socket tracker — instant PID lookup from BPF map.
         // The eBPF program captures the PID at socket creation time (TCP SYN_SENT)
         // or at send time (udp_sendmsg), BEFORE the packet reaches NFQUEUE.
@@ -92,30 +94,38 @@ impl ProcProcessResolver {
         if let Some(ref tracker) = self.sock_tracker {
             if let Some(tracked) = tracker.lookup_pid(ip, port, protocol) {
                 counter!("logiguard.proc.resolver.ebpf.hits").increment(1);
-                eprintln!("proc: key={ip}:{port} pid={} source=ebpf", tracked.pid);
+                diag!(
+                    "{proto_str} {ip}:{port} ebpf pid={} src={}",
+                    tracked.pid,
+                    tracked.source.label()
+                );
                 return Some(tracked.pid);
             }
             counter!("logiguard.proc.resolver.ebpf.misses").increment(1);
+            diag!("{proto_str} {ip}:{port} ebpf miss");
         }
 
         let inode_uid = sock_diag::query_socket_inode(ip, port, protocol)
             .or_else(|| retry_find_socket(ip, port, protocol));
         if let Some((inode, uid)) = inode_uid {
+            diag!("{proto_str} {ip}:{port} inode={inode} uid={uid} src=sockdiag|procnet");
             if let Some(pid) = find_pid_for_inode(inode, uid) {
-                eprintln!("proc: key={ip}:{port} pid={pid} inode={inode} source=sockdiag+procfds");
+                diag!("{proto_str} {ip}:{port} fdpid={pid}");
                 return Some(pid);
             }
-            eprintln!(
-                "proc: key={ip}:{port} inode={inode} uid={uid} found but no /proc/*/fd owner \
+            diag!(
+                "{proto_str} {ip}:{port} inode={inode} uid={uid} no /proc/*/fd owner \
                  (fork/exec gap?) — trying ss fallback"
             );
             // Inode found but /proc/*/fd scan came up empty (fork/exec gap).
         } else {
-            eprintln!("proc: key={ip}:{port} no inode via sock-diag — trying ss fallback");
+            diag!("{proto_str} {ip}:{port} no inode via sock-diag — trying ss fallback");
         }
         let ss_pid = try_ss_fallback(ip, port, protocol);
         if ss_pid.is_none() {
-            eprintln!("proc: key={ip}:{port} UNRESOLVED — all sources missed");
+            diag!("{proto_str} {ip}:{port} UNRESOLVED — all sources missed");
+        } else {
+            diag!("{proto_str} {ip}:{port} ss pid={:?}", ss_pid);
         }
         ss_pid
     }
@@ -151,6 +161,7 @@ impl ProcessResolver for ProcProcessResolver {
         src_ip: &str,
         src_port: u16,
         protocol: TransportProtocol,
+        sk_uid: Option<u32>,
     ) -> Option<ProcessInfo> {
         let resolve_start = Instant::now();
         let ip: IpAddr = src_ip.parse().ok()?;
@@ -160,29 +171,62 @@ impl ProcessResolver for ProcProcessResolver {
             protocol,
         };
         let now = Instant::now();
+        let proto_str = proto_label(protocol);
 
         // eBPF tracker first (when available): it is authoritative — it
         // captured the PID at socket-creation time. Consulting the cache
         // before it would hide port reuse (kernel recycling an ephemeral
         // port to a different process within the cache TTL).
         let tracked_pid = if let Some(ref tracker) = self.sock_tracker {
-            tracker.lookup_pid(ip, src_port, protocol)
+            let tracked = tracker.lookup_pid(ip, src_port, protocol);
+            // Cross-check the kernel-reported packet UID against the UID the
+            // eBPF hook captured for the socket. A mismatch proves the entry
+            // belongs to a different process than the packet's socket —
+            // typical for a recycled port reused across users.
+            match (&tracked, sk_uid) {
+                (Some(t), Some(uid)) if t.uid != uid => {
+                    counter!("logiguard.proc.resolver.ebpf.uid_mismatch").increment(1);
+                    diag!(
+                        "{proto_str} {ip}:{src_port} ebpf uid-mismatch \
+                         (entry uid={} vs packet uid={uid}) — entry rejected",
+                        t.uid
+                    );
+                    None
+                }
+                _ => tracked,
+            }
         } else {
             None
         };
 
-        // Cache fast path. When the tracker reported a PID, the cached entry
-        // is only valid if it was resolved for that same PID.
+        // Cache fast path. The cached mapping is only trustworthy while it
+        // is corroborated:
+        //   * the tracker reported the SAME pid (socket still alive, same
+        //     owner), or
+        //   * no tracker is configured at all (TTL-only mode).
+        // When a tracker IS configured but has no entry for this socket,
+        // the (ip, port) may have been recycled to another process whose
+        // eBPF entry was evicted — the TTL cache cannot tell. Fall through
+        // to a live lookup (SOCK_DIAG succeeds for still-alive sockets, so
+        // this costs nothing in the common case).
+        let tracker_configured = self.sock_tracker.is_some();
         if let Ok(cache) = self.cache.lock() {
             if let Some(entry) = cache.get(&key) {
-                let pid_matches = match (tracked_pid.clone(), entry.pid) {
+                let pid_matches = match (tracked_pid.as_ref(), entry.pid) {
                     (Some(tracked), Some(cached)) => tracked.pid == cached,
-                    // No tracker (or tracker has no entry for this socket):
-                    // fall back to the old TTL-only behaviour.
+                    (None, _) if tracker_configured => false,
                     _ => true,
                 };
                 if pid_matches && now.duration_since(entry.inserted_at) < CACHE_TTL {
                     counter!("logiguard.proc.resolver.cache.hits").increment(1);
+                    diag!(
+                        "{proto_str} {ip}:{src_port} cache-hit name={:?} pid={:?} \
+                         ebpf_pid={:?} age_ms={}",
+                        entry.name,
+                        entry.pid,
+                        tracked_pid.as_ref().map(|t| t.pid),
+                        now.duration_since(entry.inserted_at).as_millis()
+                    );
                     histogram!("logiguard.proc.resolver.resolve.duration")
                         .record(resolve_start.elapsed().as_secs_f64());
                     return Some(ProcessInfo {
@@ -192,6 +236,12 @@ impl ProcessResolver for ProcProcessResolver {
                     });
                 }
                 counter!("logiguard.proc.resolver.cache.stale_pid").increment(1);
+                diag!(
+                    "{proto_str} {ip}:{src_port} cache-stale-pid cached={:?} \
+                     ebpf_pid={:?} — bypassing cache",
+                    entry.pid,
+                    tracked_pid.as_ref().map(|t| t.pid)
+                );
             }
         }
 
@@ -261,6 +311,17 @@ impl ProcessResolver for ProcProcessResolver {
             app_name,
         };
 
+        diag!(
+            "{proto_str} {ip}:{src_port} resolved pid={pid} name={:?} exe={:?} \
+             via={:?}",
+            info.name,
+            info.exe,
+            tracked_pid
+                .as_ref()
+                .map(|t| t.source.label())
+                .unwrap_or("proc")
+        );
+
         if let Ok(mut cache) = self.cache.lock() {
             if cache.len() >= CACHE_MAX {
                 cache.retain(|_, v| now.duration_since(v.inserted_at) < CACHE_TTL);
@@ -286,6 +347,16 @@ impl ProcessResolver for ProcProcessResolver {
 // ---------------------------------------------------------------------------
 // `ss` fallback (SOCK_DIAG via iproute2)
 // ---------------------------------------------------------------------------
+
+/// Short protocol label for diag lines.
+fn proto_label(protocol: TransportProtocol) -> &'static str {
+    match protocol {
+        TransportProtocol::Tcp => "tcp",
+        TransportProtocol::Udp => "udp",
+        TransportProtocol::Quic => "quic",
+        TransportProtocol::Other => "other",
+    }
+}
 
 /// Try `ss -Hnp -{t|u} src :<port>` to find the pid owning the socket.
 ///
@@ -510,11 +581,19 @@ pub fn parse_proc_net(content: &str, src_ip: IpAddr, src_port: u16) -> Option<(u
     None
 }
 
-/// Port-only match: find the first row whose local port equals src_port,
+/// Port-only match: find the row whose local port equals src_port,
 /// regardless of the bound address (handles 0.0.0.0 wildcard UDP sockets).
+///
+/// AMBIGUITY RULE: only returns a row when EXACTLY ONE candidate matches.
+/// Two live sockets can share a local port (SO_REUSEADDR/SO_REUSEPORT UDP —
+/// mDNS is the classic case, or connected UDP sockets bound to different
+/// local IPs). Returning either one would attribute one process's packet to
+/// another process; ambiguity must yield `None` and let the retry loop /
+/// safety nets handle the miss.
 fn parse_proc_net_port_only(content: &str, src_port: u16) -> Option<(u64, u32)> {
     let port_hex = format!("{:04X}", src_port);
 
+    let mut found: Option<(u64, u32)> = None;
     for line in content.lines().skip(1) {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if cols.len() < 10 {
@@ -532,9 +611,13 @@ fn parse_proc_net_port_only(content: &str, src_port: u16) -> Option<(u64, u32)> 
             continue;
         }
         let uid: u32 = cols[7].parse().unwrap_or(u32::MAX);
-        return Some((inode, uid));
+        if found.is_some() {
+            // Second candidate — ambiguous, refuse to guess.
+            return None;
+        }
+        found = Some((inode, uid));
     }
-    None
+    found
 }
 
 /// Decode a /proc/net hex address — either 8-char IPv4 or 32-char IPv6 —
@@ -866,7 +949,7 @@ mod tests {
         );
         assert_eq!(
             resolver
-                .resolve("10.20.30.40", 65000, TransportProtocol::Tcp)
+                .resolve("10.20.30.40", 65000, TransportProtocol::Tcp, None)
                 .map(|p| p.name)
                 .as_deref(),
             Some("curl"),
@@ -893,11 +976,11 @@ mod tests {
         );
         // Different port → no hit (returns None because /proc has no entry).
         assert!(resolver
-            .resolve("10.20.30.40", 65001, TransportProtocol::Tcp)
+            .resolve("10.20.30.40", 65001, TransportProtocol::Tcp, None)
             .is_none());
         // Different protocol → no hit.
         assert!(resolver
-            .resolve("10.20.30.40", 65000, TransportProtocol::Udp)
+            .resolve("10.20.30.40", 65000, TransportProtocol::Udp, None)
             .is_none());
     }
 
@@ -918,6 +1001,7 @@ mod tests {
                 pid: self.pid.load(std::sync::atomic::Ordering::SeqCst),
                 uid: 0,
                 comm: "portreuse-mock".to_string(),
+                source: crate::TrackerSource::Unknown,
             })
         }
     }
@@ -956,7 +1040,7 @@ mod tests {
 
         let ip = "10.20.30.40";
         let first_name = resolver
-            .resolve(ip, 54321, TransportProtocol::Tcp)
+            .resolve(ip, 54321, TransportProtocol::Tcp, None)
             .map(|p| p.name);
         assert_eq!(first_name.as_deref(), Some("sleep"));
 
@@ -965,7 +1049,7 @@ mod tests {
             .pid
             .store(second.id(), std::sync::atomic::Ordering::SeqCst);
         let second_name = resolver
-            .resolve(ip, 54321, TransportProtocol::Tcp)
+            .resolve(ip, 54321, TransportProtocol::Tcp, None)
             .map(|p| p.name);
         assert_eq!(
             second_name.as_deref(),
@@ -1002,7 +1086,7 @@ mod tests {
         );
         // Stale entry must not be served; fallback to /proc fails → None.
         assert!(resolver
-            .resolve("10.20.30.40", 65000, TransportProtocol::Tcp)
+            .resolve("10.20.30.40", 65000, TransportProtocol::Tcp, None)
             .is_none());
     }
 
@@ -1054,10 +1138,130 @@ mod tests {
         // Only a TIME_WAIT (inode=0) row exists — should return None so the
         // caller's retry loop tries again rather than returning a useless inode.
         const ONLY_ZERO: &str = "\
-  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
-   0: 0F02000A:1F90 01020304:0050 06 00000000:00000000 00:00000000 00000000  1000        0 0 1 0 100 0";
+   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+    0: 0F02000A:1F90 01020304:0050 06 00000000:00000000 00:00000000 00000000  1000        0 0 1 0 100 0";
         let ip: IpAddr = "10.0.2.15".parse().unwrap();
         assert_eq!(parse_proc_net(ONLY_ZERO, ip, 8080), None);
+    }
+
+    /// REGRESSION (misattribution): the UDP port-only fallback must not pick
+    /// arbitrarily among multiple sockets that share a local port. Two rows
+    /// with the same local port (e.g. two SO_REUSEADDR mDNS sockets, or two
+    /// connected UDP sockets bound to different local IPs) identify DIFFERENT
+    /// processes; returning the first row's inode attributes one process's
+    /// packet to another process. Ambiguity must yield `None`.
+    #[test]
+    fn port_only_match_with_two_candidates_returns_none() {
+        const TWO_ROWS_SAME_PORT: &str = "\
+   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+    0: 00000000:D3B9 00000000:0000 07 00000000:00000000 00:00000000 00000000  1000        0 11111 1 0 100 0
+    1: 00000000:D3B9 0A00020F:0035 07 00000000:00000000 00:00000000 00000000  1001        0 22222 1 0 100 0";
+        // 0xD3B9 = 54201
+        assert_eq!(
+            parse_proc_net_port_only(TWO_ROWS_SAME_PORT, 54201),
+            None,
+            "two candidate sockets share the port — picking either one risks \
+             attributing the packet to the wrong process"
+        );
+    }
+
+    /// Unambiguous port-only case still works: exactly one row matches.
+    #[test]
+    fn port_only_match_with_single_candidate_still_returns_it() {
+        assert_eq!(
+            parse_proc_net_port_only(UDP_WILDCARD_SAMPLE, 54321),
+            Some((55555, 1000))
+        );
+    }
+
+    /// Tracker that reports a PID once, then goes silent (simulates an eBPF
+    /// map entry evicted under LRU pressure after port reuse).
+    struct FlakyTracker {
+        pid: std::sync::atomic::AtomicU32,
+        silent: std::sync::atomic::AtomicBool,
+    }
+
+    impl crate::SocketTracker for FlakyTracker {
+        fn lookup_pid(
+            &self,
+            _src_ip: IpAddr,
+            _src_port: u16,
+            _protocol: TransportProtocol,
+        ) -> Option<crate::TrackedProcess> {
+            if self.silent.load(std::sync::atomic::Ordering::SeqCst) {
+                return None;
+            }
+            Some(crate::TrackedProcess {
+                pid: self.pid.load(std::sync::atomic::Ordering::SeqCst),
+                uid: 0,
+                comm: "flaky-mock".to_string(),
+                source: crate::TrackerSource::FullKey,
+            })
+        }
+    }
+
+    /// REGRESSION (misattribution): the per-socket cache must not serve a
+    /// stale mapping when the tracker that corroborated it has gone silent.
+    ///
+    /// Scenario: process A resolves via the tracker (pid cached). The kernel
+    /// recycles the ephemeral port to process B. The tracker's entry for the
+    /// old socket was evicted (LRU) so it reports nothing for B's packet. The
+    /// stale cache entry (keyed only by `(ip, port, protocol)`) is then served
+    /// for B's packet — attributing B's traffic to A. When the tracker is
+    /// present but has NO entry for the socket, the cache cannot corroborate
+    /// the mapping; it must fall through to a live lookup instead.
+    #[test]
+    fn stale_cache_not_served_when_tracker_goes_silent() {
+        use std::process::{Command, Stdio};
+
+        let mut first = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let mut second = Command::new("tail")
+            .args(["-f", "/dev/null"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn tail");
+
+        let tracker: Arc<FlakyTracker> = Arc::new(FlakyTracker {
+            pid: std::sync::atomic::AtomicU32::new(first.id()),
+            silent: std::sync::atomic::AtomicBool::new(false),
+        });
+        let resolver = ProcProcessResolver::with_sock_tracker(
+            Arc::clone(&tracker) as Arc<dyn crate::SocketTracker>
+        );
+
+        // First packet from (ip, port): attributed to `sleep` via tracker.
+        assert_eq!(
+            resolver
+                .resolve("10.20.30.40", 55555, TransportProtocol::Tcp, None)
+                .map(|p| p.name),
+            Some("sleep".to_string())
+        );
+
+        // Port recycled to `tail`; tracker evicted the old entry and has no
+        // new one. The stale cache entry for `sleep` must NOT be served.
+        tracker
+            .silent
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            resolver
+                .resolve("10.20.30.40", 55555, TransportProtocol::Tcp, None)
+                .map(|p| p.name),
+            None,
+            "tracker went silent — the cached mapping is uncorroborated and \
+             the port may have been recycled to another process; a live \
+             lookup (which finds nothing here) must win over the stale cache"
+        );
+
+        let _ = first.kill();
+        let _ = second.kill();
+        let _ = first.wait();
+        let _ = second.wait();
     }
 
     #[test]

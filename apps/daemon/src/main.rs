@@ -1090,6 +1090,7 @@ fn main() {
                 protocol: core_types::TransportProtocol::Udp,
                 direction: core_types::FlowDirection::Outbound,
                 device_label: None,
+                tcp_syn: false,
             };
             let decision = svc.lookup_rule_only(&flow);
             match decision {

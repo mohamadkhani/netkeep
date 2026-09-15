@@ -180,6 +180,7 @@ fn parse_request(args: &[String]) -> Result<(ControlRequest, OutputMode), String
                         protocol,
                         direction: FlowDirection::Outbound,
                         device_label: None,
+                        tcp_syn: false,
                     },
                     now_secs,
                 },
@@ -267,13 +268,15 @@ fn render_response(response: ControlResponse, output_mode: OutputMode) -> Result
                     .iter()
                     .map(|e| {
                         format!(
-                            "{} process={:?} ip={} domain={:?} proto={:?} state={:?} t={}",
+                            "{} process={:?} ip={} domain={:?} proto={:?} state={:?} sport={} dport={} t={}",
                             e.id,
                             e.process_name,
                             e.destination_ip,
                             e.destination_domain,
                             e.protocol,
                             e.state,
+                            e.source_port,
+                            e.destination_port,
                             e.timestamp_secs,
                         )
                     })

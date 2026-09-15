@@ -296,6 +296,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         }
     }
 

@@ -56,7 +56,21 @@ pub trait PacketSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowDecision {
     Immediate(RuleAction, Option<RouteTarget>),
-    Pending { id: String, deadline_at_secs: u64 },
+    Pending {
+        id: String,
+        deadline_at_secs: u64,
+    },
+    /// Defer the decision to the next packet of the connection: the flow is
+    /// an unknown TLS (TCP:443) connection classified on its SYN. A SYN
+    /// carries no ClientHello, so the hostname is unknowable at this point —
+    /// and a Pending verdict would DROP the SYN, blocking the handshake and
+    /// making SNI forever unavailable. Accepting the bare handshake lets the
+    /// ClientHello arrive; it is re-classified (pending verdicts are never
+    /// cached) and either matches a rule by domain — no dialog at all — or
+    /// opens the pending WITH the real hostname instead of a bare IP.
+    /// No application payload flows before a real verdict: the ClientHello
+    /// itself is the first gated packet.
+    DeferSni,
 }
 
 /// Registers a classified flow and returns an immediate or pending decision.
@@ -114,6 +128,9 @@ where
             FlowDecision::Immediate(RuleAction::Route, Some(target)) => EnforcementVerdict::Route {
                 target: target.clone(),
             },
+            // Deferred-SNI handshake: no payload may flow until the ClientHello
+            // is classified, but the bare connection setup passes.
+            FlowDecision::DeferSni => EnforcementVerdict::Allow,
             // Route with no resolved target, Deny, Ask, or pending → drop (fail-close).
             FlowDecision::Immediate(RuleAction::Route, None)
             | FlowDecision::Immediate(RuleAction::Deny, _)
@@ -838,6 +855,8 @@ mod tests {
             tcp_fin: false,
             tcp_rst: false,
             tcp_syn: false,
+            sk_uid: None,
+            forwarded: false,
         }
     }
 
@@ -854,6 +873,7 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
         }
     }
 

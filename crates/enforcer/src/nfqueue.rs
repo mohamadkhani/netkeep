@@ -3,6 +3,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use core_types::{RuleAction, TransportProtocol};
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
+use flow_classifier::diag;
 use flow_classifier::{Classifier, RawPacket, SniDnsCache};
 use metrics::{counter, gauge, histogram};
 use nfq::{Queue, Verdict};
@@ -32,12 +33,158 @@ struct CachedVerdict {
 /// the resolved process here. Later connections to the same server where
 /// proc_resolver loses the /proc race re-use this attribution rather than
 /// triggering a new pending decision for the user.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct CachedProcessAttr {
     process_name: String,
     process_exe: Option<String>,
     app_name: Option<String>,
     expires_at: u64,
+}
+
+/// IP-based attribution cache TTL and cap.
+const PROC_ATTR_TTL_SECS: u64 = 900; // 15 min — outlasts most streaming sessions
+const PROC_ATTR_MAX: usize = 1024;
+// Domain-based attribution cache TTL and cap (longer, CDN IPs rotate more than domains).
+const DOMAIN_ATTR_TTL_SECS: u64 = 3600; // 1 hour
+const DOMAIN_ATTR_MAX: usize = 512;
+
+/// Layer-0 destination-keyed process-attribution caches.
+///
+/// Two maps:
+/// * `ip`    — `(dst_ip, dst_port) → CachedProcessAttr` (same CDN endpoint).
+/// * `domain`— `(domain, dst_port) → CachedProcessAttr` (CDN rotated the IP).
+///
+/// These caches answer: *"the last process that reached this destination told
+/// us who it was — a later packet whose live resolution failed is probably
+/// the same process."* That inference is only safe while the destination is
+/// used by exactly ONE local process. The moment a second, different process
+/// is observed on the same key, the key becomes ambiguous and must never be
+/// restored from again (until expiry) — otherwise packets from process B get
+/// process A's name (and A's rules). This was a real misattribution source:
+/// every local app sharing one DNS resolver, NTP server, or anycast CDN
+/// endpoint reused the previous app's name whenever the live lookup raced.
+pub(crate) struct AttrCache {
+    proc_attr: HashMap<(String, u16), CachedProcessAttr>,
+    domain_proc_attr: HashMap<(String, u16), CachedProcessAttr>,
+}
+
+impl AttrCache {
+    fn new() -> Self {
+        Self {
+            proc_attr: HashMap::new(),
+            domain_proc_attr: HashMap::new(),
+        }
+    }
+
+    /// Record a successful live resolution for `(dst_ip, dst_port)` and, when
+    /// known, `(domain, dst_port)`. A key currently held by a DIFFERENT
+    /// process is poisoned (removed) — see the struct doc.
+    fn record_success(
+        &mut self,
+        dst_ip: &str,
+        dst_port: u16,
+        domain: Option<&str>,
+        proc: &flow_classifier::ProcessInfo,
+        now_secs: u64,
+    ) {
+        let entry = CachedProcessAttr {
+            process_name: proc.name.clone(),
+            process_exe: proc.exe.clone(),
+            app_name: proc.app_name.clone(),
+            expires_at: now_secs + PROC_ATTR_TTL_SECS,
+        };
+        if self.proc_attr.len() >= PROC_ATTR_MAX {
+            self.proc_attr.retain(|_, v| v.expires_at > now_secs);
+        }
+        Self::insert_unless_ambiguous(
+            &mut self.proc_attr,
+            (dst_ip.to_string(), dst_port),
+            entry,
+            now_secs,
+        );
+
+        if let Some(domain) = domain {
+            if self.domain_proc_attr.len() >= DOMAIN_ATTR_MAX {
+                self.domain_proc_attr.retain(|_, v| v.expires_at > now_secs);
+            }
+            Self::insert_unless_ambiguous(
+                &mut self.domain_proc_attr,
+                (domain.to_string(), dst_port),
+                CachedProcessAttr {
+                    expires_at: now_secs + DOMAIN_ATTR_TTL_SECS,
+                    process_name: proc.name.clone(),
+                    process_exe: proc.exe.clone(),
+                    app_name: proc.app_name.clone(),
+                },
+                now_secs,
+            );
+        }
+    }
+
+    /// Insert `entry` under `key` unless the key is live and held by a
+    /// different process — in that case remove it entirely: the key can
+    /// never prove which process a future unresolved packet belongs to.
+    fn insert_unless_ambiguous(
+        map: &mut HashMap<(String, u16), CachedProcessAttr>,
+        key: (String, u16),
+        entry: CachedProcessAttr,
+        now_secs: u64,
+    ) {
+        if let Some(existing) = map.get(&key) {
+            if existing.expires_at > now_secs && existing.process_name != entry.process_name {
+                diag!(
+                    "layer0 key {key:?} AMBIGUOUS ({} vs {}) — entry dropped; \
+                     future resolver misses on this destination stay unknown",
+                    existing.process_name,
+                    entry.process_name
+                );
+                map.remove(&key);
+                return;
+            }
+        }
+        map.insert(key, entry);
+    }
+
+    /// Restore attribution for an unresolved packet. IP cache first, then
+    /// domain cache. Returns `None` when both miss or the key was poisoned
+    /// as ambiguous.
+    fn restore(
+        &mut self,
+        dst_ip: &str,
+        dst_port: u16,
+        domain: Option<&str>,
+        now_secs: u64,
+    ) -> Option<CachedProcessAttr> {
+        let ip_key = (dst_ip.to_string(), dst_port);
+        let cached_ip = self
+            .proc_attr
+            .get(&ip_key)
+            .filter(|c| c.expires_at > now_secs)
+            .cloned();
+        if cached_ip.is_none() {
+            self.proc_attr.remove(&ip_key);
+        }
+        if cached_ip.is_some() {
+            return cached_ip;
+        }
+
+        domain.and_then(|d| {
+            let dk = (d.to_string(), dst_port);
+            let cached_dom = self
+                .domain_proc_attr
+                .get(&dk)
+                .filter(|c| c.expires_at > now_secs)
+                .cloned();
+            if cached_dom.is_none() {
+                self.domain_proc_attr.remove(&dk);
+            }
+            cached_dom
+        })
+    }
+
+    fn len(&self) -> (usize, usize) {
+        (self.proc_attr.len(), self.domain_proc_attr.len())
+    }
 }
 
 /// Real packet processor that reads from an NFQUEUE and applies verdicts.
@@ -62,14 +209,8 @@ pub struct NfqueueProcessor<C, FR> {
     /// `ct state established,related accept` would accept all retransmits before
     /// they reach NFQUEUE again.
     decided: HashMap<ConnectionKey, CachedVerdict>,
-    /// Maps `(dst_ip, dst_port)` → resolved process.
-    /// Handles re-use of the same CDN endpoint.
-    proc_attr: HashMap<(String, u16), CachedProcessAttr>,
-    /// Maps `(domain, dst_port)` → resolved process.
-    /// Secondary fallback when a CDN rotates to a new IP not yet in `proc_attr`.
-    /// Keyed by the destination domain resolved from SNI/DNS so that any IP
-    /// serving `*.googlevideo.com:443` is attributed to the same process.
-    domain_proc_attr: HashMap<(String, u16), CachedProcessAttr>,
+    /// Layer-0 destination-keyed process attribution caches (see `AttrCache`).
+    attr_cache: AttrCache,
 }
 
 // Cached decisions expire after 10 minutes. TCP FINs evict the entry early
@@ -77,13 +218,6 @@ pub struct NfqueueProcessor<C, FR> {
 const CACHE_TTL_SECS: u64 = 600;
 // Maximum cache entries before a sweep evicts expired entries.
 const CACHE_MAX: usize = 8192;
-
-// IP-based attribution cache TTL and cap.
-const PROC_ATTR_TTL_SECS: u64 = 900; // 15 min — outlasts most streaming sessions
-const PROC_ATTR_MAX: usize = 1024;
-// Domain-based attribution cache TTL and cap (longer, CDN IPs rotate more than domains).
-const DOMAIN_ATTR_TTL_SECS: u64 = 3600; // 1 hour
-const DOMAIN_ATTR_MAX: usize = 512;
 
 /// Returns `true` for netlink/NFQUEUE errors that indicate the queue binding
 /// has been invalidated and the socket needs to be reopened. Specifically:
@@ -123,14 +257,25 @@ where
     ) -> std::io::Result<Self> {
         let mut queue = Queue::open()?;
         queue.bind(queue_num)?;
+        // Ask the kernel to attach NFQA_UID / NFQA_GID to every queued
+        // packet: the socket-owner credentials at enqueue time. Race-free
+        // (captured from skb->sk while the socket cannot go away) and used
+        // by the resolver to disambiguate port-only candidate matches.
+        // Forged/misattributed candidates with a different UID can then be
+        // rejected before they produce a wrong process name.
+        if let Err(e) = queue.set_recv_uid_gid(queue_num, true) {
+            eprintln!(
+                "nfqueue: could not enable NFQA_UID/GID delivery ({e}) — \
+                 process attribution loses the UID cross-check"
+            );
+        }
         Ok(Self {
             queue,
             classifier,
             registrar,
             dns_cache,
             decided: HashMap::new(),
-            proc_attr: HashMap::new(),
-            domain_proc_attr: HashMap::new(),
+            attr_cache: AttrCache::new(),
         })
     }
 
@@ -172,7 +317,17 @@ where
                             counter!("logiguard.packets.parse_failed").increment(1);
                             (Verdict::Drop, None)
                         }
-                        Some(raw) => self.decide(&raw, now_secs),
+                        Some(mut raw) => {
+                            // Race-free kernel metadata for this exact packet.
+                            raw.sk_uid = msg.get_uid();
+                            let forwarded = msg.get_hook() == NF_INET_FORWARD;
+                            raw.forwarded = forwarded;
+                            if forwarded {
+                                counter!("logiguard.packets.received", "hook" => "forward")
+                                    .increment(1);
+                            }
+                            self.decide(&raw, now_secs)
+                        }
                     };
 
                     histogram!("logiguard.packet.processing_duration")
@@ -331,77 +486,87 @@ where
 
         // Slow path: classify the connection for the first time.
         let slow_start = Instant::now();
+        let proto_str = match raw.protocol {
+            TransportProtocol::Tcp => "tcp",
+            TransportProtocol::Udp => "udp",
+            TransportProtocol::Quic => "quic",
+            TransportProtocol::Other => "other",
+        };
+        diag!(
+            "pkt {proto_str} {}:{} -> {}:{} syn={} fin={} rst={}",
+            raw.src_ip,
+            raw.src_port,
+            raw.dst_ip,
+            raw.dst_port,
+            raw.tcp_syn,
+            raw.tcp_fin,
+            raw.tcp_rst
+        );
         if let Some(sni) = &raw.sni_hint {
             self.dns_cache.insert(&raw.dst_ip, sni);
         }
         let mut flow = self.classifier.classify(raw);
 
-        let attr_key = (raw.dst_ip.clone(), raw.dst_port);
         if flow.process_name.is_none() {
-            // Proc resolver lost the race.
-            // 1. Try IP-based attribution (same CDN endpoint seen before).
-            let cached_ip = self.proc_attr.get(&attr_key).and_then(|c| {
-                if c.expires_at > now_secs {
-                    Some(c.clone())
-                } else {
-                    None
+            // Live resolution failed for this packet. Layer-0 can only
+            // *guess* the process from the destination — and for forwarded
+            // packets (no local socket: containers without an eBPF entry,
+            // LAN clients behind this host) any restored local process name
+            // would be flatly wrong. Never restore for forwarded traffic.
+            if !raw.forwarded {
+                if let Some(c) = self.attr_cache.restore(
+                    &raw.dst_ip,
+                    raw.dst_port,
+                    flow.destination_domain.as_deref(),
+                    now_secs,
+                ) {
+                    let cache_kind = "ip|domain";
+                    diag!(
+                        "layer0 {}:{} restored name={:?} ({cache_kind}) — \
+                         live resolution FAILED for this packet",
+                        raw.dst_ip,
+                        raw.dst_port,
+                        c.process_name
+                    );
+                    flow.process_name = Some(c.process_name.clone());
+                    flow.process_exe = c.process_exe.clone();
+                    flow.app_name = c.app_name.clone();
                 }
-            });
-            if cached_ip.is_none() {
-                self.proc_attr.remove(&attr_key);
-            }
-
-            // 2. Fall back to domain-based attribution (CDN rotated to a new IP).
-            let cached_dom = if cached_ip.is_none() {
-                flow.destination_domain.as_ref().and_then(|d| {
-                    self.domain_proc_attr
-                        .get(&(d.clone(), raw.dst_port))
-                        .and_then(|c| {
-                            if c.expires_at > now_secs {
-                                Some(c.clone())
-                            } else {
-                                None
-                            }
-                        })
-                })
             } else {
-                None
-            };
-
-            if let Some(c) = cached_ip.or(cached_dom) {
-                flow.process_name = Some(c.process_name.clone());
-                flow.process_exe = c.process_exe.clone();
-                flow.app_name = c.app_name.clone();
+                diag!(
+                    "layer0 {}:{} skipped restore — packet is FORWARDED \
+                     (no local socket can own it)",
+                    raw.dst_ip,
+                    raw.dst_port
+                );
             }
         } else {
             // Successful resolution — populate both caches.
-            let entry = CachedProcessAttr {
-                process_name: flow.process_name.clone().unwrap_or_default(),
-                process_exe: flow.process_exe.clone(),
-                app_name: flow.app_name.clone(),
-                expires_at: now_secs + PROC_ATTR_TTL_SECS,
-            };
-            if self.proc_attr.len() >= PROC_ATTR_MAX {
-                self.proc_attr.retain(|_, v| v.expires_at > now_secs);
-            }
-            self.proc_attr.insert(attr_key, entry.clone());
-
-            if let Some(domain) = &flow.destination_domain {
-                if self.domain_proc_attr.len() >= DOMAIN_ATTR_MAX {
-                    self.domain_proc_attr.retain(|_, v| v.expires_at > now_secs);
-                }
-                self.domain_proc_attr.insert(
-                    (domain.clone(), raw.dst_port),
-                    CachedProcessAttr {
-                        expires_at: now_secs + DOMAIN_ATTR_TTL_SECS,
-                        ..entry
-                    },
-                );
-            }
+            self.attr_cache.record_success(
+                &raw.dst_ip,
+                raw.dst_port,
+                flow.destination_domain.as_deref(),
+                &flow_classifier::ProcessInfo {
+                    name: flow.process_name.clone().unwrap_or_default(),
+                    exe: flow.process_exe.clone(),
+                    app_name: flow.app_name.clone(),
+                },
+                now_secs,
+            );
         }
 
         let register_start = Instant::now();
+        let flow_name = flow.process_name.clone();
         let decision = self.registrar.register(flow, now_secs);
+        diag!(
+            "flow {proto_str} {}:{} -> {}:{} process={:?} verdict={}",
+            raw.src_ip,
+            raw.src_port,
+            raw.dst_ip,
+            raw.dst_port,
+            flow_name,
+            verdict_label(&decision),
+        );
         histogram!("logiguard.registration.duration")
             .record(register_start.elapsed().as_secs_f64());
         histogram!("logiguard.decision.slow_path.duration")
@@ -426,7 +591,8 @@ where
 
         let verdict = match &decision {
             FlowDecision::Immediate(RuleAction::Allow, _)
-            | FlowDecision::Immediate(RuleAction::Route, Some(_)) => Verdict::Accept,
+            | FlowDecision::Immediate(RuleAction::Route, Some(_))
+            | FlowDecision::DeferSni => Verdict::Accept,
             _ => Verdict::Drop,
         };
 
@@ -451,10 +617,9 @@ where
         }
 
         gauge!("logiguard.verdict.cache.entries").set(self.decided.len() as f64);
-        gauge!("logiguard.proc.attr.cache.entries", "cache" => "ip")
-            .set(self.proc_attr.len() as f64);
-        gauge!("logiguard.proc.attr.cache.entries", "cache" => "domain")
-            .set(self.domain_proc_attr.len() as f64);
+        let (ip_entries, domain_entries) = self.attr_cache.len();
+        gauge!("logiguard.proc.attr.cache.entries", "cache" => "ip").set(ip_entries as f64);
+        gauge!("logiguard.proc.attr.cache.entries", "cache" => "domain").set(domain_entries as f64);
 
         match &decision {
             FlowDecision::Immediate(RuleAction::Allow, _) => {
@@ -462,6 +627,9 @@ where
             }
             FlowDecision::Immediate(RuleAction::Route, Some(_)) => {
                 counter!("logiguard.packets.accepted", "reason" => "rule_route").increment(1);
+            }
+            FlowDecision::DeferSni => {
+                counter!("logiguard.packets.accepted", "reason" => "defer_sni").increment(1);
             }
             FlowDecision::Immediate(RuleAction::Deny, _) => {
                 counter!("logiguard.packets.dropped", "reason" => "rule_deny").increment(1);
@@ -478,6 +646,19 @@ where
         }
 
         (verdict, fwmark)
+    }
+}
+
+/// Short verdict label for diag lines.
+fn verdict_label(decision: &FlowDecision) -> &'static str {
+    match decision {
+        FlowDecision::Immediate(RuleAction::Allow, _) => "allow",
+        FlowDecision::Immediate(RuleAction::Deny, _) => "deny",
+        FlowDecision::Immediate(RuleAction::Route, Some(_)) => "route",
+        FlowDecision::Immediate(RuleAction::Route, None) => "route-no-target",
+        FlowDecision::Immediate(RuleAction::Ask, _) => "ask",
+        FlowDecision::Pending { .. } => "pending",
+        FlowDecision::DeferSni => "defer-sni",
     }
 }
 
@@ -606,8 +787,15 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         tcp_fin,
         tcp_rst,
         tcp_syn,
+        // Filled in by the caller from NFQUEUE metadata (uid/hook).
+        sk_uid: None,
+        forwarded: false,
     })
 }
+
+/// `NF_INET_FORWARD` from `<linux/netfilter.h>` — packets routed through
+/// this host (containers, VMs, LAN clients) rather than generated by it.
+const NF_INET_FORWARD: u8 = 2;
 
 /// Extract the TLS SNI hostname from a TCP payload containing a TLS ClientHello.
 ///
@@ -851,6 +1039,132 @@ fn looks_like_host_value(s: &str) -> bool {
 mod tests {
     use super::*;
     use etherparse::PacketBuilder;
+
+    // -------------------------------------------------------------------
+    // Layer-0 destination-keyed attribution cache (AttrCache)
+    // -------------------------------------------------------------------
+
+    /// Test helper: build a ProcessInfo for AttrCache::record_success.
+    fn proc_info(name: &str) -> flow_classifier::ProcessInfo {
+        flow_classifier::ProcessInfo {
+            name: name.to_string(),
+            exe: None,
+            app_name: None,
+        }
+    }
+
+    /// Baseline behavior: a single process's successful resolution is
+    /// restored for a later packet whose live resolution failed (the
+    /// CDN-rotation fix from Bug 24 — must keep working).
+    #[test]
+    fn layer0_restores_same_process_after_resolver_miss() {
+        let mut cache = AttrCache::new();
+        cache.record_success(
+            "1.2.3.4",
+            443,
+            Some("cdn.example.com"),
+            &proc_info("firefox"),
+            1000,
+        );
+
+        let restored = cache.restore("1.2.3.4", 443, None, 1100);
+        assert_eq!(
+            restored.map(|c| c.process_name),
+            Some("firefox".to_string()),
+            "same-process restore must keep working"
+        );
+
+        // Domain fallback for a rotated CDN IP.
+        let restored = cache.restore("5.6.7.8", 443, Some("cdn.example.com"), 1200);
+        assert_eq!(
+            restored.map(|c| c.process_name),
+            Some("firefox".to_string()),
+            "domain-cache restore must keep working"
+        );
+    }
+
+    /// REGRESSION (misattribution): two DIFFERENT processes reaching the same
+    /// `(dst_ip, dst_port)` make the key ambiguous. A third packet whose live
+    /// resolution fails must NOT be attributed to either process — the cache
+    /// cannot know which of the two it belongs to. Before the fix the cache
+    /// happily returned whichever process resolved last, producing confident
+    /// wrong process names (e.g. every local app sharing one DNS resolver,
+    /// NTP server, or any anycast CDN endpoint).
+    #[test]
+    fn layer0_does_not_restore_when_second_process_shares_destination() {
+        let mut cache = AttrCache::new();
+        cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1000);
+        cache.record_success("8.8.8.8", 53, None, &proc_info("chrome"), 1100);
+
+        let restored = cache.restore("8.8.8.8", 53, None, 1200);
+        assert_eq!(
+            restored, None,
+            "destination shared by two processes is ambiguous — must restore nothing"
+        );
+    }
+
+    /// Same requirement for the domain-keyed cache.
+    #[test]
+    fn layer0_domain_cache_does_not_restore_when_shared() {
+        let mut cache = AttrCache::new();
+        cache.record_success(
+            "1.1.1.1",
+            443,
+            Some("shared.example.com"),
+            &proc_info("firefox"),
+            1000,
+        );
+        cache.record_success(
+            "2.2.2.2",
+            443,
+            Some("shared.example.com"),
+            &proc_info("chromium"),
+            1100,
+        );
+
+        // IP keys are distinct, so IP restore works — but the shared DOMAIN
+        // key must not restore for a fresh unknown IP.
+        assert_eq!(
+            cache.restore("3.3.3.3", 443, Some("shared.example.com"), 1200),
+            None,
+            "domain shared by two processes is ambiguous — must restore nothing"
+        );
+        // The single-process IP keys still restore.
+        assert_eq!(
+            cache
+                .restore("1.1.1.1", 443, None, 1200)
+                .map(|c| c.process_name),
+            Some("firefox".to_string())
+        );
+    }
+
+    /// Ambiguity is a property of the live TTL window, not forever: after the
+    /// entries expire the key can be re-armed by a new successful resolution.
+    #[test]
+    fn layer0_key_re_arms_after_expiry() {
+        let mut cache = AttrCache::new();
+        cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1000);
+        cache.record_success("8.8.8.8", 53, None, &proc_info("chrome"), 1100);
+        // Both entries expire (> 15 min later).
+        assert_eq!(
+            cache.restore("8.8.8.8", 53, None, 1000 + PROC_ATTR_TTL_SECS + 10),
+            None
+        );
+        // A fresh single-process success re-arms the key.
+        cache.record_success(
+            "8.8.8.8",
+            53,
+            None,
+            &proc_info("dig"),
+            1000 + PROC_ATTR_TTL_SECS + 20,
+        );
+        assert_eq!(
+            cache
+                .restore("8.8.8.8", 53, None, 1000 + PROC_ATTR_TTL_SECS + 30)
+                .map(|c| c.process_name),
+            Some("dig".to_string())
+        );
+    }
 
     fn build_ipv4_tcp(src: [u8; 4], dst: [u8; 4], src_port: u16, dst_port: u16) -> Vec<u8> {
         let payload = b"hello";

@@ -10,9 +10,9 @@ use aya_ebpf::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
         bpf_probe_read_kernel,
     },
-    macros::{kprobe, map, tracepoint},
+    macros::{kprobe, map},
     maps::LruHashMap,
-    programs::{ProbeContext, TracePointContext},
+    programs::ProbeContext,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,10 +60,16 @@ pub struct SockInfo {
 /// delete on socket close — the resolver must still find the PID AFTER a
 /// short-lived process exits (its /proc entry is already gone by then; the
 /// BPF map is the only surviving record). Port reuse overwrites the key at
-/// the new socket's first send; the userspace lookup age-gates entries.
+/// the new socket's first send; the userspace lookup age-gates entries and
+/// picks the NEWEST entry across both maps.
+///
+/// Capacity 65536 covers the full ephemeral port range (~28k sockets) with
+/// headroom, so a busy desktop's churn cannot LRU-evict entries for sockets
+/// that are still being classified (which would fall back to the racy
+/// /proc path and misattribute under load).
 #[map]
 static SOCK_EVENTS: LruHashMap<SockKey, SockInfo> =
-    LruHashMap::with_max_entries(16384, 0);
+    LruHashMap::with_max_entries(65536, 0);
 
 /// Secondary map keyed by (source port, protocol) ONLY. Unconnected UDP
 /// sockets (the common case: nc, DNS stubs, most one-shot clients) have
@@ -71,9 +77,9 @@ static SOCK_EVENTS: LruHashMap<SockKey, SockInfo> =
 /// later, during route lookup. Those sends can't build a full SockKey, so we
 /// record them here by port alone; an in-flight ephemeral port uniquely
 /// identifies the socket, and the userspace resolver falls back to this map
-/// on a full-key miss.
+/// on a full-key miss (preferring whichever of the two entries is newer).
 #[map]
-static PORT_PIDS: LruHashMap<PortKey, SockInfo> = LruHashMap::with_max_entries(16384, 0);
+static PORT_PIDS: LruHashMap<PortKey, SockInfo> = LruHashMap::with_max_entries(65536, 0);
 
 /// Key for the port-only secondary map.
 #[repr(C)]
@@ -87,13 +93,8 @@ pub struct PortKey {
 }
 
 // ---------------------------------------------------------------------------
-// TCP: tracepoint on inet_sock_set_state
+// TCP: kprobe on tcp_connect
 // ---------------------------------------------------------------------------
-
-/// TCP state constants (from include/net/tcp_states.h).
-const TCP_SYN_SENT: u32 = 2;
-const TCP_TIME_WAIT: u32 = 6;
-const TCP_CLOSE: u32 = 7;
 
 /// Protocol constants.
 const IPPROTO_TCP: u16 = 6;
@@ -103,98 +104,92 @@ const IPPROTO_UDP: u16 = 17;
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
 
-/// Tracepoint offsets for inet_sock_set_state (x86_64, Linux 6.x).
-/// These are the byte offsets from the start of the raw tracepoint record
-/// (including the 8-byte common header).
+/// kprobe on `tcp_connect`.
+/// Uses the shared SKC_* field offsets defined in the UDP section below.
+/// Kernel: int tcp_connect(struct sock *sk)
 ///
-/// Format (from /sys/kernel/tracing/events/sock/inet_sock_set_state/format):
-///   offset 8:  const void *skaddr      (8 bytes, pointer)
-///   offset 16: int oldstate            (4 bytes)
-///   offset 20: int newstate            (4 bytes)
-///   offset 24: __u16 family            (2 bytes)
-///   offset 26: __u16 protocol          (2 bytes)
-///   offset 28: __u16 sport             (2 bytes)
-///   offset 30: __u16 dport             (2 bytes)
-///   offset 32: __be32 saddr            (4 bytes, IPv4 src)
-///   offset 36: __be32 daddr            (4 bytes, IPv4 dst)
-///   offset 40: __u32 saddr_v6[4]       (16 bytes, IPv6 src)
-///   offset 56: __u32 daddr_v6[4]       (16 bytes, IPv6 dst)
-const TP_OFF_NEWSTATE: usize = 20;
-const TP_OFF_FAMILY: usize = 24;
-const TP_OFF_PROTOCOL: usize = 26;
-const TP_OFF_SPORT: usize = 28;
-const TP_OFF_SADDR: usize = 32;
-const TP_OFF_SADDR_V6: usize = 40;
-
-/// Hook: tracepoint/sock/inet_sock_set_state
+/// Captures PID for every outgoing TCP connection attempt. `tcp_connect`
+/// runs at the END of tcp_v4_connect/tcp_v6_connect — AFTER the ephemeral
+/// port (skc_num) and source address (skc_rcv_saddr) have been assigned by
+/// connect() — so the key fields are guaranteed populated even for
+/// auto-bound sockets.
 ///
-/// Captures PID when a TCP socket enters SYN_SENT (outgoing connection).
-/// Cleans up the entry when the socket enters TIME_WAIT or CLOSE.
-#[tracepoint(category = "sock", name = "inet_sock_set_state")]
-pub fn trace_tcp_state(ctx: TracePointContext) -> u32 {
-    match unsafe { try_trace_tcp_state(&ctx) } {
+/// HISTORY: this hook used to be the `inet_sock_set_state` tracepoint
+/// filtered on TCP_SYN_SENT. That broke twice, and is now known to be
+/// structurally unusable for this purpose on modern kernels:
+///   1. The tracepoint record layout is not stable (6.18 moved sport/dport
+///      ahead of family/protocol) — fixable by parsing the format file.
+///   2. Since the tcp_set_state(SYN_SENT) call was moved BEFORE the port
+///      hash assignment (kernel ~6.15+), the record itself carries
+///      sport=0 / saddr=0.0.0.0 for auto-bound sockets — the information we
+///      need is not in the record at all. Verified empirically on 6.18:
+///      the raw record for a fresh connect shows daddr set but sport/saddr
+///      zeroed; only pre-bound sockets (explicit bind()) carry values.
+/// Reading the socket fields via the `sk` pointer — like the UDP hook — is
+/// immune to both problems.
+#[kprobe]
+pub fn sock_tcp_connect(ctx: ProbeContext) -> u32 {
+    match unsafe { try_sock_tcp_connect(&ctx) } {
         Ok(()) | Err(()) => 0,
     }
 }
 
 #[inline(always)]
-unsafe fn try_trace_tcp_state(ctx: &TracePointContext) -> Result<(), ()> {
-    let newstate: u32 = ctx.read_at(TP_OFF_NEWSTATE).map_err(|_| ())?;
-    let protocol: u16 = ctx.read_at(TP_OFF_PROTOCOL).map_err(|_| ())?;
+unsafe fn try_sock_tcp_connect(ctx: &ProbeContext) -> Result<(), ()> {
+    // arg0 = struct sock *sk
+    let sk_ptr: *const u8 = ctx.arg::<*const u8>(0).ok_or(())?;
 
-    // Only handle TCP.
-    if protocol != IPPROTO_TCP {
+    // Read family.
+    let family: u16 =
+        bpf_probe_read_kernel(sk_ptr.add(SKC_FAMILY_OFF) as *const u16).map_err(|_| ())?;
+
+    // Source port (host byte order) — assigned by tcp_v4_connect before
+    // tcp_connect runs. Zero means it was not assigned (should not happen
+    // on this path); skip to avoid polluting the map with useless keys.
+    let src_port: u16 =
+        bpf_probe_read_kernel(sk_ptr.add(SKC_NUM_OFF) as *const u16).map_err(|_| ())?;
+    if src_port == 0 {
         return Ok(());
     }
 
-    // On SYN_SENT: insert into map.
-    if newstate == TCP_SYN_SENT {
-        let family: u16 = ctx.read_at(TP_OFF_FAMILY).map_err(|_| ())?;
-        let sport: u16 = ctx.read_at(TP_OFF_SPORT).map_err(|_| ())?;
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let uid_gid = bpf_get_current_uid_gid();
 
-        let mut key = SockKey {
-            src_ip: zeroed_ip16(),
-            src_port: sport,
-            protocol: IPPROTO_TCP as u8,
-            _pad: 0,
-        };
+    let info = SockInfo {
+        pid: (pid_tgid >> 32) as u32,
+        uid: uid_gid as u32,
+        timestamp_ns: bpf_ktime_get_ns(),
+        comm: current_comm(),
+    };
 
-        // Fill source IP, normalizing IPv4 to IPv4-mapped IPv6.
-        if family == AF_INET {
-            // IPv4: read 4-byte saddr, store as ::ffff:a.b.c.d
-            let saddr: u32 = ctx.read_at(TP_OFF_SADDR).map_err(|_| ())?;
-            // ::ffff: prefix: 0000:0000:0000:0000:0000:ffff
-            key.src_ip[10] = 0xff;
-            key.src_ip[11] = 0xff;
-            // saddr is network byte order from the kernel — copy directly.
-            key.src_ip[12..16].copy_from_slice(&saddr.to_ne_bytes());
-        } else if family == AF_INET6 {
-            // IPv6: read 16-byte saddr_v6.
-            let saddr_v6: [u8; 16] = ctx.read_at(TP_OFF_SADDR_V6).map_err(|_| ())?;
-            key.src_ip.copy_from_slice(&saddr_v6);
-        } else {
-            return Ok(());
-        }
+    let mut key = SockKey {
+        src_ip: zeroed_ip16(),
+        src_port,
+        protocol: IPPROTO_TCP as u8,
+        _pad: 0,
+    };
 
-        let pid_tgid = bpf_get_current_pid_tgid();
-        let uid_gid = bpf_get_current_uid_gid();
-
-        let info = SockInfo {
-            pid: (pid_tgid >> 32) as u32,
-            uid: uid_gid as u32,
-            timestamp_ns: bpf_ktime_get_ns(),
-            comm: current_comm(),
-        };
-
-        let _ = SOCK_EVENTS.insert(&key, &info, 0);
+    if family == AF_INET as u16 {
+        // IPv4: read 4-byte source address (network byte order).
+        let src_ip4: u32 = bpf_probe_read_kernel(sk_ptr.add(SKC_RCV_SADDR_OFF) as *const u32)
+            .map_err(|_| ())?;
+        // Normalize to IPv4-mapped IPv6.
+        key.src_ip[10] = 0xff;
+        key.src_ip[11] = 0xff;
+        // src_ip4 is network byte order from the kernel.
+        key.src_ip[12..16].copy_from_slice(&src_ip4.to_ne_bytes());
+    } else if family == AF_INET6 as u16 {
+        // IPv6: read 16-byte source address.
+        let src_ip6: [u8; 16] = core::mem::transmute(
+            bpf_probe_read_kernel::<[u32; 4]>(sk_ptr.add(SKC_V6_RCV_SADDR_OFF) as *const [u32; 4])
+                .map_err(|_| ())?,
+        );
+        key.src_ip.copy_from_slice(&src_ip6);
+    } else {
         return Ok(());
     }
 
-    // On TIME_WAIT or CLOSE: do nothing. The entry deliberately survives the
-    // socket (see the SOCK_EVENTS map doc) — the userspace resolver needs it
-    // after short-lived processes exit, and LRU eviction bounds its lifetime.
-    let _ = (newstate, TP_OFF_FAMILY, TP_OFF_SPORT, TP_OFF_SADDR, TP_OFF_SADDR_V6);
-
+    let _ = SOCK_EVENTS.insert(&key, &info, 0);
     Ok(())
 }
 

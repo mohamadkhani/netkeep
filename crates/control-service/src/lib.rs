@@ -1,6 +1,7 @@
 use control_api::{validate_request, ControlRequest, ControlResponse, PushNotification};
 use core_types::{
     Egress, FlowContext, FlowEvent, FlowState, ProcessPriority, RouteTarget, Rule, RuleAction,
+    TransportProtocol,
 };
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
@@ -238,6 +239,8 @@ impl<R: Repository> ControlService<R> {
             protocol: flow.protocol,
             state,
             timestamp_secs,
+            source_port: flow.source_port,
+            destination_port: flow.destination_port,
         });
     }
 
@@ -833,6 +836,23 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                 RuleAction::Ask => {}
             }
         }
+        // Defer unknown TLS connections classified on their SYN. The SYN
+        // carries no ClientHello, so `destination_domain` is unknowable —
+        // and opening the pending now would both show the user a bare IP
+        // and DROP the SYN, blocking the handshake so SNI could never
+        // arrive. Accept the bare handshake instead: the ClientHello is
+        // re-classified (pending verdicts are never cached) and either
+        // matches a rule by hostname — no dialog at all — or opens the
+        // pending with the real domain. No payload flows before a real
+        // verdict: the ClientHello itself is the first gated packet.
+        if flow.destination_domain.is_none()
+            && flow.protocol == TransportProtocol::Tcp
+            && flow.destination_port == 443
+            && flow.tcp_syn
+        {
+            counter!("logiguard.control.deferred_sni").increment(1);
+            return FlowDecision::DeferSni;
+        }
         match self
             .decision_engine
             .register_unknown_flow(flow.clone(), now_secs)
@@ -873,6 +893,7 @@ mod tests {
 
     use super::{ControlService, HealthConfig, POLICY_LOG_DEDUP_SECS};
     use decision_engine::{DecisionEngine, OverflowPolicy};
+    use enforcer::{FlowDecision, FlowRegistrar as _};
 
     fn mk_rule(id: &str) -> Rule {
         Rule {
@@ -901,6 +922,99 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
+            tcp_syn: false,
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // SNI deferral: unknown TLS connections classified on their SYN
+    // -------------------------------------------------------------------
+
+    /// A TCP:443 SYN with no matching rule and no hostname must be DEFERRED,
+    /// not turned into a pending decision. Opening the pending here would
+    /// (a) show the user a bare IP — the SYN cannot carry a hostname — and
+    /// (b) DROP the SYN, blocking the handshake so the ClientHello (the only
+    /// packet that carries the SNI) could never arrive.
+    #[test]
+    fn syn_without_domain_defers_instead_of_pending() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let mut flow = mk_flow();
+        flow.destination_domain = None;
+        flow.tcp_syn = true;
+
+        match service.register(flow, 1000) {
+            FlowDecision::DeferSni => {}
+            other => panic!("expected DeferSni, got {other:?}"),
+        }
+        // No pending may exist, and no IP-keyed flow event recorded.
+        assert!(
+            service.decision_engine.list_pending().is_empty(),
+            "deferred SYN must not create a pending decision"
+        );
+    }
+
+    /// When the ClientHello arrives (same connection, SNI now known), the
+    /// unknown flow must open the pending WITH the hostname — so the dialog
+    /// shows the domain instead of the bare IP.
+    #[test]
+    fn client_hello_with_domain_opens_pending_with_domain() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let hello = mk_flow(); // domain = example.com, tcp_syn = false
+
+        match service.register(hello, 1000) {
+            FlowDecision::Pending { .. } => {}
+            other => panic!("expected Pending, got {other:?}"),
+        }
+        let pendings = service.decision_engine.list_pending();
+        assert_eq!(pendings.len(), 1);
+        assert_eq!(
+            pendings[0].flow.destination_domain.as_deref(),
+            Some("example.com"),
+            "pending must carry the SNI hostname, not a bare IP"
+        );
+    }
+
+    /// A deferred SYN whose domain rule already exists resolves at the
+    /// ClientHello with NO pending at all — the dialog never appears
+    /// ("decisions reduced" — the point of the deferral).
+    #[test]
+    fn deferred_syn_resolves_silently_once_domain_known() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let allow_rule = mk_rule("allow-example");
+        service.handle(ControlRequest::AddRule(allow_rule.clone()));
+
+        let mut syn = mk_flow();
+        syn.destination_domain = None;
+        syn.tcp_syn = true;
+        assert!(matches!(
+            service.register(syn, 1000),
+            FlowDecision::DeferSni
+        ));
+
+        let hello = mk_flow(); // ClientHello: SNI = example.com
+        match service.register(hello, 1001) {
+            FlowDecision::Immediate(RuleAction::Allow, _) => {}
+            other => panic!("expected silent Allow after SNI, got {other:?}"),
+        }
+        assert!(
+            service.decision_engine.list_pending().is_empty(),
+            "no dialog expected"
+        );
+    }
+
+    /// Non-TLS-443 first packets keep the old behavior: pending immediately
+    /// (there is no SNI to wait for on other ports/protocols).
+    #[test]
+    fn non_https_syn_still_pends_immediately() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let mut flow = mk_flow();
+        flow.destination_domain = None;
+        flow.tcp_syn = true;
+        flow.destination_port = 8080;
+
+        match service.register(flow, 1000) {
+            FlowDecision::Pending { .. } => {}
+            other => panic!("expected Pending on non-443, got {other:?}"),
         }
     }
 

@@ -178,6 +178,7 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
         protocol: TransportProtocol::Tcp,
         direction: FlowDirection::Outbound,
         device_label: None,
+        tcp_syn: false,
     };
     let response = send_control_request(
         socket_path,

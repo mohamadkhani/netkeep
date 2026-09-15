@@ -262,7 +262,9 @@ impl SqliteRuleRepository {
                  destination_domain TEXT NULL,
                  protocol INTEGER NOT NULL,
                  state INTEGER NOT NULL,
-                 timestamp_secs INTEGER NOT NULL
+                 timestamp_secs INTEGER NOT NULL,
+                 source_port INTEGER NOT NULL DEFAULT 0,
+                 destination_port INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE IF NOT EXISTS pending_decisions (
                  id TEXT PRIMARY KEY,
@@ -308,6 +310,12 @@ impl SqliteRuleRepository {
         let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN process_exe TEXT NULL;");
         let _ =
             conn.execute_batch("ALTER TABLE rules ADD COLUMN priority REAL NOT NULL DEFAULT 1.0;");
+        let _ = conn.execute_batch(
+            "ALTER TABLE flow_events ADD COLUMN source_port INTEGER NOT NULL DEFAULT 0;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE flow_events ADD COLUMN destination_port INTEGER NOT NULL DEFAULT 0;",
+        );
         // One-time backfill: rules from pre-priority DBs carry the
         // column default 1.0; re-seed them from the hardcoded restriction
         // ladder. Guarded by PRAGMA user_version so it runs exactly once —
@@ -663,8 +671,8 @@ impl FlowRepository for SqliteRuleRepository {
     fn append_event(&mut self, event: FlowEvent) {
         let _ = self.conn.execute(
             "INSERT OR REPLACE INTO flow_events
-             (id, process_name, device_label, destination_ip, destination_domain, protocol, state, timestamp_secs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (id, process_name, device_label, destination_ip, destination_domain, protocol, state, timestamp_secs, source_port, destination_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 event.id,
                 event.process_name,
@@ -674,6 +682,8 @@ impl FlowRepository for SqliteRuleRepository {
                 protocol_to_i64(event.protocol),
                 state_to_i64(event.state),
                 event.timestamp_secs as i64,
+                event.source_port as i64,
+                event.destination_port as i64,
             ],
         );
     }
@@ -681,7 +691,8 @@ impl FlowRepository for SqliteRuleRepository {
     fn list_events(&self, limit: usize) -> Vec<FlowEvent> {
         let mut stmt = match self.conn.prepare(
             "SELECT id, process_name, device_label, destination_ip, destination_domain,
-                    protocol, state, timestamp_secs
+                    protocol, state, timestamp_secs,
+                    COALESCE(source_port, 0), COALESCE(destination_port, 0)
              FROM flow_events ORDER BY timestamp_secs DESC LIMIT ?1",
         ) {
             Ok(s) => s,
@@ -710,6 +721,8 @@ impl FlowRepository for SqliteRuleRepository {
                 protocol,
                 state,
                 timestamp_secs: row.get::<_, i64>(7)? as u64,
+                source_port: row.get::<_, i64>(8)? as u16,
+                destination_port: row.get::<_, i64>(9)? as u16,
             })
         }) {
             Ok(m) => m,
@@ -1095,6 +1108,8 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             state: FlowState::Allowed,
             timestamp_secs: 1000,
+            source_port: 54321,
+            destination_port: 443,
         }
     }
 
@@ -1113,6 +1128,7 @@ mod tests {
                 protocol: TransportProtocol::Tcp,
                 direction: FlowDirection::Outbound,
                 device_label: None,
+                tcp_syn: false,
             },
             created_at_secs: 100,
             deadline_at_secs: 200,
