@@ -20,23 +20,51 @@ pub struct ResolvedRule {
 /// intentionally lenient and accepts both `"foo.com"` and `"*.foo.com"` so we
 /// don't silently fail to match real rules.
 ///
-/// Semantics: matches *proper* subdomains only. `"example.com"` matches
-/// `"api.example.com"` and `"a.b.example.com"` but **not** `"example.com"`
-/// itself (the apex). Allowing the apex requires a separate `DomainExact`
-/// rule — this matches the documented contract in `docs/decision-dialog-ux.md`.
+/// Semantics: matches the apex itself **and** any depth of proper subdomains.
+/// `"example.com"` matches `"example.com"`, `"api.example.com"` and
+/// `"a.b.example.com"` but not `"notexample.com"`. This deviates from the
+/// original subdomains-only contract: re-prompting the user for the very
+/// host they just wildcarded felt like a broken rule (see
+/// `docs/decision-dialog-ux.md`).
 fn wildcard_matches(pattern: &str, host: &str) -> bool {
     let apex = pattern.strip_prefix("*.").unwrap_or(pattern);
     if apex.is_empty() {
         return false;
     }
-    host.ends_with(&format!(".{apex}"))
+    host == apex || host.ends_with(&format!(".{apex}"))
+}
+
+/// True when `ip` falls inside the network described by `prefix`.
+///
+/// Accepts real CIDR notation (`"10.0.0.0/8"` — the form the GPUI dialog,
+/// settings form, and CLI all persist). Falls back to a literal string
+/// prefix (`"10.0.0."`) for rules stored by older versions or imported
+/// from foreign schemas. Unparsable prefixes match nothing rather than
+/// everything.
+fn cidr_contains(prefix: &str, ip: &str) -> bool {
+    if let Some((net_str, len_str)) = prefix.split_once('/') {
+        let (Ok(net), Ok(len), Ok(addr)) = (
+            net_str.parse::<std::net::Ipv4Addr>(),
+            len_str.parse::<u32>(),
+            ip.parse::<std::net::Ipv4Addr>(),
+        ) else {
+            return false;
+        };
+        if len > 32 {
+            return false;
+        }
+        let mask: u32 = if len == 0 { 0 } else { u32::MAX << (32 - len) };
+        (u32::from(net) & mask) == (u32::from(addr) & mask)
+    } else {
+        ip.starts_with(prefix)
+    }
 }
 
 fn destination_matches(rule: &Rule, flow: &FlowContext) -> bool {
     match &rule.destination {
         DestinationMatcher::Any => true,
         DestinationMatcher::IpExact(ip) => flow.destination_ip == *ip,
-        DestinationMatcher::Cidr(prefix) => flow.destination_ip.starts_with(prefix),
+        DestinationMatcher::Cidr(prefix) => cidr_contains(prefix, &flow.destination_ip),
         DestinationMatcher::DomainExact(domain) => flow.destination_domain.as_ref() == Some(domain),
         DestinationMatcher::DomainWildcard(pattern) => flow
             .destination_domain
@@ -191,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_matches_subdomain_but_not_apex() {
+    fn wildcard_matches_apex_and_subdomains() {
         let flow_sub = FlowContext {
             process_name: None,
             process_exe: None,
@@ -227,10 +255,14 @@ mod tests {
             DestinationMatcher::DomainWildcard("*.example.com".to_string()),
         );
         assert_eq!(
-            resolve_action(&[rule.clone()], &flow_sub).map(|r| r.action),
+            resolve_action(std::slice::from_ref(&rule), &flow_sub).map(|r| r.action),
             Some(RuleAction::Allow)
         );
-        assert_eq!(resolve_action(&[rule], &flow_apex), None);
+        assert_eq!(
+            resolve_action(&[rule], &flow_apex).map(|r| r.action),
+            Some(RuleAction::Allow),
+            "apex must match too — re-prompting for the wildcarded host reads as a broken rule"
+        );
     }
 
     /// Production storage form: the GPUI decision dialog and the CLI both
@@ -275,19 +307,19 @@ mod tests {
             DestinationMatcher::DomainWildcard("example.com".to_string()),
         );
         assert_eq!(
-            resolve_action(&[rule.clone()], &flow_sub).map(|r| r.action),
+            resolve_action(std::slice::from_ref(&rule), &flow_sub).map(|r| r.action),
             Some(RuleAction::Allow),
             "subdomain must match apex-only wildcard storage"
         );
         assert_eq!(
-            resolve_action(&[rule.clone()], &flow_deep).map(|r| r.action),
+            resolve_action(std::slice::from_ref(&rule), &flow_deep).map(|r| r.action),
             Some(RuleAction::Allow),
             "deep subdomain must match apex-only wildcard storage"
         );
         assert_eq!(
-            resolve_action(&[rule.clone()], &flow_apex),
-            None,
-            "apex must still NOT match wildcard (separate rule required)"
+            resolve_action(std::slice::from_ref(&rule), &flow_apex).map(|r| r.action),
+            Some(RuleAction::Allow),
+            "apex must match too (apex + subdomains wildcard semantics)"
         );
         assert_eq!(
             resolve_action(&[rule], &flow_unrelated),
@@ -517,6 +549,75 @@ mod tests {
             RuleAction::Allow,
             Some("curl"),
             DestinationMatcher::Cidr("10.0.0.".to_string()),
+        );
+        let flow = flow_unknown_proc(None, "10.0.0.5");
+        assert!(resolve_action(&[rule], &flow).is_none());
+    }
+
+    /// Exactly the form `build_dest_matcher`, `parse_destination`, and the
+    /// settings form persist (`"a.b.c.d/N"`). Before `cidr_contains` this
+    /// rule NEVER matched: the matcher ran `"10.0.0.5".starts_with("10.0.0.0/24")`.
+    #[test]
+    fn cidr_matches_dialog_cidr_notation() {
+        let rule = mk_rule(
+            "cidr-24",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::Cidr("10.0.0.0/24".into()),
+        );
+        let inside = flow_unknown_proc(None, "10.0.0.5");
+        let outside = flow_unknown_proc(None, "10.0.1.5");
+        assert_eq!(
+            resolve_action(std::slice::from_ref(&rule), &inside).map(|r| r.action),
+            Some(RuleAction::Allow)
+        );
+        assert_eq!(resolve_action(&[rule], &outside), None);
+    }
+
+    #[test]
+    fn cidr_mask_covers_whole_network() {
+        let rule = mk_rule(
+            "cidr-8",
+            RuleAction::Deny,
+            None,
+            DestinationMatcher::Cidr("10.0.0.0/8".into()),
+        );
+        for ip in ["10.0.0.1", "10.9.9.9", "10.255.255.254"] {
+            let flow = flow_unknown_proc(None, ip);
+            assert_eq!(
+                resolve_action(std::slice::from_ref(&rule), &flow).map(|r| r.action),
+                Some(RuleAction::Deny),
+                "/8 must cover {ip}"
+            );
+        }
+        let outside = flow_unknown_proc(None, "11.0.0.1");
+        assert_eq!(resolve_action(&[rule], &outside), None);
+    }
+
+    /// Legacy dotted-prefix storage (`"10.0.0."`, no `/N`) keeps working.
+    #[test]
+    fn cidr_legacy_dotted_prefix_still_matches() {
+        let rule = mk_rule(
+            "cidr-legacy",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::Cidr("10.0.0.".into()),
+        );
+        let flow = flow_unknown_proc(None, "10.0.0.77");
+        assert_eq!(
+            resolve_action(&[rule], &flow).map(|r| r.action),
+            Some(RuleAction::Allow)
+        );
+    }
+
+    /// A malformed prefix must fail closed — match nothing, not everything.
+    #[test]
+    fn cidr_unparsable_prefix_matches_nothing() {
+        let rule = mk_rule(
+            "cidr-bad",
+            RuleAction::Allow,
+            None,
+            DestinationMatcher::Cidr("not-an-ip/24".into()),
         );
         let flow = flow_unknown_proc(None, "10.0.0.5");
         assert!(resolve_action(&[rule], &flow).is_none());

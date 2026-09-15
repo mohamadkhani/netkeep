@@ -89,12 +89,12 @@ Three-option button group:
 | Selection | Rule type | Covers |
 |---|---|---|
 | `accounts.google.com` | `DomainExact` | Exactly this subdomain |
-| `*.google.com` | `DomainWildcard` | All subdomains of google.com (not the apex itself per wildcard semantics) |
+| `*.google.com` | `DomainWildcard` | google.com itself and all its subdomains |
 | `any` | no destination matcher | Any destination |
 
 Default: exact subdomain (narrowest scope, safest default).
 
-**Note on wildcard semantics:** `*.google.com` does NOT match `google.com` itself. If the user wants to cover both, they need two rules. The UI label `*.google.com` is shown verbatim so this is honest.
+**Note on wildcard semantics:** `*.google.com` matches `google.com` **and** every subdomain (`mail.google.com`, `a.b.google.com`). Matching the apex used to be excluded, but that re-prompted the user for the very host they just wildcarded — it read as a broken rule, so the apex is covered since 2026-09. The UI label `*.google.com` remains the display convention.
 
 #### Canonical storage form
 

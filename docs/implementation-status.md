@@ -566,6 +566,17 @@ Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 
 7. **Web UI:** GPUI app covers desktop. Web UI for remote/admin access (stretch goal).
 
+## Bug Fixes (CIDR + wildcard apex matching, 2026-09-15)
+
+**Bug 20:** `Cidr` rules never matched, and wildcard `DomainWildcard` rules appeared broken whenever the user revisited the exact host they wildcarded.
+
+- **CIDR root cause:** `policy_engine::destination_matches` matched `Cidr(prefix)` with `flow.destination_ip.starts_with(prefix)` — a literal string prefix check. All three rule writers persist proper CIDR notation (`"10.0.0.0/24"`: dialog `build_dest_matcher`, CLI `parse_destination`, settings form), so the matcher evaluated `"10.0.0.5".starts_with("10.0.0.0/24")` → always `false`. Every CIDR rule silently never matched. No positive CIDR test existed, so the suite stayed green.
+- **CIDR fix:** new `cidr_contains()` — real `/N` mask math over `Ipv4Addr`, with a fallback to the legacy dotted-prefix form (`"10.0.0."`) and fail-closed behavior for unparsable prefixes.
+- **Wildcard root cause:** the matcher covered subdomains only (`*.example.com` did not match `example.com`). Revisiting the exact host the user had just wildcarded re-prompted — indistinguishable from a broken rule, especially for one-dot domains (`github.com`) where the apex *is* the prompted host.
+- **Wildcard fix:** `wildcard_matches` now matches the apex **and** subdomains. The old subdomains-only contract (and its "separate DomainExact rule required" caveat) is retired; see `docs/decision-dialog-ux.md`.
+- **Tests:** 4 new tests in `policy-engine` (`cidr_matches_dialog_cidr_notation`, `cidr_mask_covers_whole_network`, `cidr_legacy_dotted_prefix_still_matches`, `cidr_unparsable_prefix_matches_nothing`); `wildcard_matches_subdomain_but_not_apex` renamed/flipped to `wildcard_matches_apex_and_subdomains`.
+- **Note:** the `feature/rules-periority` branch already contained `cidr_contains()`; a merge resolution that kept the `main` side of `crates/policy-engine/src/lib.rs` silently dropped it. This fix restores that logic on top of the priority ladder.
+
 ## Known Limitations
 
 1. **ProcessResolver on high-churn systems:** `/proc/*/fd` scan is O(processes×fds). Adequate for desktop use; would need an inode→pid index for server-scale traffic.
