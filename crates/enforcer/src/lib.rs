@@ -618,9 +618,14 @@ fn default_gateway_for_device(dev: &str) -> Option<String> {
     None
 }
 
-/// Parse `ip -o addr show dev <dev>` output into global-scope prefixes.
+/// Parse `ip -o addr show dev <dev>` output into global-scope network prefixes.
 /// Returns one `addr/len` entry per global v4/v6 address; link-local and
 /// host-scope addresses are skipped (they never need a policy-route entry).
+///
+/// `ip -o addr` prints the interface *address* (e.g. `192.168.7.6/24`), which
+/// is not a valid route prefix when host bits are set — `ip route` rejects
+/// `192.168.7.6/24` with "Invalid prefix for given prefix length" — so the
+/// address is masked down to its network (e.g. `192.168.7.0/24`).
 fn parse_connected_prefixes(output: &str) -> Vec<String> {
     let mut prefixes = Vec::new();
     for line in output.lines() {
@@ -635,9 +640,40 @@ fn parse_connected_prefixes(output: &str) -> Vec<String> {
         if !is_global {
             continue;
         }
-        prefixes.push(parts[3].to_string());
+        if let Some(prefix) = mask_cidr_host_bits(parts[3]) {
+            prefixes.push(prefix);
+        }
     }
     prefixes
+}
+
+/// Mask the host bits of an `addr/len` CIDR down to the network prefix.
+fn mask_cidr_host_bits(cidr: &str) -> Option<String> {
+    let (addr, len) = cidr.split_once('/')?;
+    let len: u32 = len.parse().ok()?;
+    if addr.contains(':') {
+        let addr = addr.parse::<std::net::Ipv6Addr>().ok()?;
+        if len > 128 {
+            return None;
+        }
+        let mask = if len == 0 {
+            0
+        } else {
+            u128::MAX << (128 - len)
+        };
+        Some(format!("{}/{}", std::net::Ipv6Addr::from(u128::from(addr) & mask), len))
+    } else {
+        let addr = addr.parse::<std::net::Ipv4Addr>().ok()?;
+        if len > 32 {
+            return None;
+        }
+        let mask = if len == 0 {
+            0
+        } else {
+            u32::MAX << (32 - len)
+        };
+        Some(format!("{}/{}", std::net::Ipv4Addr::from(u32::from(addr) & mask), len))
+    }
 }
 
 fn connected_prefixes_for_device(dev: &str) -> Vec<String> {
@@ -1120,7 +1156,7 @@ mod tests {
                       2: wlan0    inet6 fd00::6/64 scope global dynamic mngtmpaddr noprefixroute wlan0\\       valid_lft 1784sec preferred_lft 1784sec\n";
         assert_eq!(
             parse_connected_prefixes(output),
-            vec!["192.168.7.6/24".to_string(), "fd00::6/64".to_string()]
+            vec!["192.168.7.0/24".to_string(), "fd00::/64".to_string()]
         );
     }
 
@@ -1130,6 +1166,26 @@ mod tests {
                       3: utun420    inet6 fe80::1/64 scope link stable-privacy\n\
                       not-an-addr-line\n";
         assert!(parse_connected_prefixes(output).is_empty());
+    }
+
+    #[test]
+    fn mask_cidr_host_bits_masks_to_network() {
+        assert_eq!(
+            mask_cidr_host_bits("192.168.7.6/24").as_deref(),
+            Some("192.168.7.0/24")
+        );
+        assert_eq!(
+            mask_cidr_host_bits("fd00::6/64").as_deref(),
+            Some("fd00::/64")
+        );
+        assert_eq!(
+            mask_cidr_host_bits("10.255.255.2/32").as_deref(),
+            Some("10.255.255.2/32")
+        );
+        assert_eq!(mask_cidr_host_bits("1.2.3.4/0").as_deref(), Some("0.0.0.0/0"));
+        assert_eq!(mask_cidr_host_bits("no-slash"), None);
+        assert_eq!(mask_cidr_host_bits("1.2.3.4/33"), None);
+        assert_eq!(mask_cidr_host_bits("::1/129"), None);
     }
 }
 
