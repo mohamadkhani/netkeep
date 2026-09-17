@@ -618,6 +618,39 @@ fn default_gateway_for_device(dev: &str) -> Option<String> {
     None
 }
 
+/// Parse `ip -o addr show dev <dev>` output into global-scope prefixes.
+/// Returns one `addr/len` entry per global v4/v6 address; link-local and
+/// host-scope addresses are skipped (they never need a policy-route entry).
+fn parse_connected_prefixes(output: &str) -> Vec<String> {
+    let mut prefixes = Vec::new();
+    for line in output.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // "2: wlan0 inet 192.168.7.6/24 brd ... scope global dynamic ..."
+        if parts.len() < 4 || (parts[2] != "inet" && parts[2] != "inet6") {
+            continue;
+        }
+        let is_global = parts
+            .windows(2)
+            .any(|w| w[0] == "scope" && w[1] == "global");
+        if !is_global {
+            continue;
+        }
+        prefixes.push(parts[3].to_string());
+    }
+    prefixes
+}
+
+fn connected_prefixes_for_device(dev: &str) -> Vec<String> {
+    let output = match std::process::Command::new("ip")
+        .args(["-o", "addr", "show", "dev", dev])
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => return Vec::new(),
+    };
+    parse_connected_prefixes(&output)
+}
+
 impl RouteManager for SystemRouteManager {
     fn add_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String> {
         let table_id = 10000 + fwmark as u32;
@@ -681,6 +714,33 @@ impl RouteManager for SystemRouteManager {
 
         if let Err(e) = route_result {
             return Err(format!("install primary route for {target:?} failed: {e}"));
+        }
+
+        // Keep on-link destinations on the egress device itself. Without this
+        // the table's only entry is the `default` route, so marked traffic to
+        // a host on the device's own subnet hairpins through the gateway —
+        // which many routers drop — instead of taking the connected route the
+        // unmarked path uses. Longest-prefix match makes these win over the
+        // default regardless of metric.
+        if let RouteTarget::Device(_) = target {
+            for prefix in connected_prefixes_for_device(dev) {
+                let mut args: Vec<&str> = Vec::new();
+                if prefix.contains(':') {
+                    args.push("-6");
+                }
+                args.extend([
+                    "route",
+                    "replace",
+                    &prefix,
+                    "dev",
+                    dev,
+                    "table",
+                    &table_s,
+                    "metric",
+                    "50",
+                ]);
+                run_ip(&args)?;
+            }
         }
 
         let mut installed = self.installed.lock().map_err(|e| e.to_string())?;
@@ -1051,6 +1111,25 @@ mod tests {
         let result = p.process_next(1000).expect("result");
         assert_eq!(result.verdict, EnforcementVerdict::Route { target });
         assert_eq!(result.flow_id, "f-route");
+    }
+
+    #[test]
+    fn parse_connected_prefixes_keeps_global_skips_link_local() {
+        let output = "2: wlan0    inet 192.168.7.6/24 brd 192.168.7.255 scope global dynamic wlan0\\       valid_lft 83871sec preferred_lft 83871sec\n\
+                      2: wlan0    inet6 fe80::1e2b:31ff:fe4f:9c32/64 scope link \n\
+                      2: wlan0    inet6 fd00::6/64 scope global dynamic mngtmpaddr noprefixroute wlan0\\       valid_lft 1784sec preferred_lft 1784sec\n";
+        assert_eq!(
+            parse_connected_prefixes(output),
+            vec!["192.168.7.6/24".to_string(), "fd00::6/64".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_connected_prefixes_skips_host_scope_and_malformed_lines() {
+        let output = "3: utun420    inet 10.255.255.2/32 scope host utun420\n\
+                      3: utun420    inet6 fe80::1/64 scope link stable-privacy\n\
+                      not-an-addr-line\n";
+        assert!(parse_connected_prefixes(output).is_empty());
     }
 }
 
