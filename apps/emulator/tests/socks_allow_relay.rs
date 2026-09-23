@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use control_api::ControlResponse;
 use core_types::RuleAction;
-use logiguard_emulator::handle_client;
+use netkeep_emulator::handle_client;
 use tempfile::TempDir;
 
 fn start_mock_daemon(socket_path: String) -> thread::JoinHandle<()> {

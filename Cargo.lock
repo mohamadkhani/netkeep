@@ -3826,66 +3826,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "logiguard-cli"
-version = "0.1.0"
-dependencies = [
- "control-api",
- "core-types",
- "serde_json",
-]
-
-[[package]]
-name = "logiguard-daemon"
-version = "0.1.0"
-dependencies = [
- "control-api",
- "control-service",
- "core-types",
- "decision-engine",
- "dns-tracker",
- "enforcer",
- "flow-classifier",
- "hickory-resolver",
- "libc",
- "metrics",
- "metrics-exporter-prometheus",
- "proxy-client",
- "rusqlite",
- "serde_json",
- "socket2",
- "state-store",
- "tokio",
-]
-
-[[package]]
-name = "logiguard-emulator"
-version = "0.1.0"
-dependencies = [
- "control-api",
- "core-types",
- "libc",
- "serde_json",
- "socket2",
- "tempfile",
-]
-
-[[package]]
-name = "logiguard-gpui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "control-api",
- "core-types",
- "gpui",
- "gpui-component",
- "gpui-component-assets",
- "gpui_platform",
- "ksni",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "loom"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4297,6 +4237,66 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
+]
+
+[[package]]
+name = "netkeep-cli"
+version = "0.1.0"
+dependencies = [
+ "control-api",
+ "core-types",
+ "serde_json",
+]
+
+[[package]]
+name = "netkeep-daemon"
+version = "0.1.0"
+dependencies = [
+ "control-api",
+ "control-service",
+ "core-types",
+ "decision-engine",
+ "dns-tracker",
+ "enforcer",
+ "flow-classifier",
+ "hickory-resolver",
+ "libc",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "proxy-client",
+ "rusqlite",
+ "serde_json",
+ "socket2",
+ "state-store",
+ "tokio",
+]
+
+[[package]]
+name = "netkeep-emulator"
+version = "0.1.0"
+dependencies = [
+ "control-api",
+ "core-types",
+ "libc",
+ "serde_json",
+ "socket2",
+ "tempfile",
+]
+
+[[package]]
+name = "netkeep-gpui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "control-api",
+ "core-types",
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
+ "gpui_platform",
+ "ksni",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

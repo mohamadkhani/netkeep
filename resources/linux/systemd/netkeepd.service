@@ -1,0 +1,26 @@
+[Unit]
+Description=Netkeep network authorization daemon
+Documentation=https://github.com/mohammadreza-khani/netkeep
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=netkeep
+RuntimeDirectoryMode=0755
+StateDirectory=netkeep
+StateDirectoryMode=0750
+Environment=NETKEEP_SOCKET_PATH=/run/netkeep/netkeep.sock
+Environment=NETKEEP_DB_PATH=/var/lib/netkeep/netkeep.db
+# Uncomment when you want kernel interception (requires nft rules + NFQUEUE):
+Environment=NETKEEP_NFQUEUE=0
+# Egress-aware DNS forwarder on 127.0.0.1:53 (requires free port 53 + nameserver 127.0.0.1):
+# Environment=NETKEEP_DNS_FORWARDER=1
+ExecStart=/usr/bin/netkeepd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

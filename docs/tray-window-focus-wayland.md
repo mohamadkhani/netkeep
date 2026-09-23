@@ -4,7 +4,7 @@ Date: 2026-07-12
 
 ## Problem
 
-On GNOME/Wayland, clicking "Settings…" in LogiGuard's tray menu does not reliably raise and focus
+On GNOME/Wayland, clicking "Settings…" in Netkeep's tray menu does not reliably raise and focus
 the settings window. The current implementation spawns a clickable popup instead of directly
 activating the existing window.
 
@@ -14,7 +14,7 @@ GNOME/Wayland enforces **user-initiated activation** via the `xdg-activation-v1`
 process cannot raise its own window (or another process's window) without a compositor-supplied
 activation token that proves the request originated from a user gesture.
 
-LogiGuard's architecture splits the tray and settings window into **separate processes**:
+Netkeep's architecture splits the tray and settings window into **separate processes**:
 
 ```
 [tray process]  ── Unix socket IPC ──>  [settings process]
@@ -101,7 +101,7 @@ works. The tray path never sets this token.
 
 ## Comparison Table
 
-| | Throne | Telegram Desktop | LogiGuard (before fix) | LogiGuard (after fix) |
+| | Throne | Telegram Desktop | Netkeep (before fix) | Netkeep (after fix) |
 |---|---|---|---|---|
 | Language | C++/Qt6 | C++/Qt6 | Rust/GPUI | Rust/GPUI |
 | Tray | `QSystemTrayIcon` (SNI) | `QSystemTrayIcon` (SNI) | `tray-icon`/`muda` (SNI) | ksni (SNI, vendored+patched) |
@@ -111,7 +111,7 @@ works. The tray path never sets this token.
 | GNOME tray raise | Works | Works | **Broken** (demand-attention popup) | **Works** |
 
 
-## Why LogiGuard's Case is Worse
+## Why Netkeep's Case is Worse
 
 1. **Cross-process IPC:** The tray process owns the user gesture but the settings process
    owns the window surface. The compositor sees two unrelated PIDs.
@@ -274,7 +274,7 @@ The GTK `startup_notify_id` / `mint_activation_token` approach documented above 
    runs on a dedicated current-thread tokio runtime thread.
 3. **`apps/gpui/src/main.rs`** `run_tray_monitor` — polls the action channel; on `Settings`
    calls `window.activate_window()` + `activate_with_token(token)`.
-4. **GPUI fork** (`https://github.com/mohamadkhani/zed`, branch `logiguard/activate-with-token`,
+4. **GPUI fork** (`https://github.com/mohamadkhani/zed`, branch `netkeep/activate-with-token`,
    rev `c612da65`, rebased on zed HEAD `424a6824`) provides
    `Window::activate_with_token(&str)` → `xdg_activation_v1.activate(token, surface)`.
    Wired in via `[patch."https://github.com/zed-industries/zed"]` in the workspace root

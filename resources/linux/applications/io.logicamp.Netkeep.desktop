@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
 Version=1.5
-Name=LogiGuard
+Name=Netkeep
 Comment=Network flow authorization and pending decision UI
-Exec=sh -c 'LOGIGUARD_SOCKET_PATH=${LOGIGUARD_SOCKET_PATH:-/run/logiguard/logiguard.sock} exec logiguard-gpui'
-Icon=io.logicamp.LogiGuard
+Exec=sh -c 'NETKEEP_SOCKET_PATH=${NETKEEP_SOCKET_PATH:-/run/netkeep/netkeep.sock} exec netkeep-gpui'
+Icon=io.logicamp.Netkeep
 Terminal=false
 Categories=Network;Security;Monitor;
 Keywords=firewall;network;security;vpn;

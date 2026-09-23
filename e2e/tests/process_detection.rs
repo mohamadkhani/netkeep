@@ -21,7 +21,7 @@
 //! All phases require interception (`nfqueue_enabled: true`) and otherwise
 //! self-skip. Run via `just e2e` under a root daemon. When attribution
 //! fails, the daemon's `proc:` stderr lines show which lookup stage missed —
-//! check the journal (`journalctl -u logiguardd | grep 'proc:'`).
+//! check the journal (`journalctl -u netkeepd | grep 'proc:'`).
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -181,7 +181,7 @@ fn census_probes(
         missed.is_empty(),
         "process attribution failed for {} of {} probes: {missed:?}\n\
          The resolver lost these processes' flows. Inspect the failing lookup \
-         stage in the daemon journal: `journalctl -u logiguardd | grep 'proc:'`",
+         stage in the daemon journal: `journalctl -u netkeepd | grep 'proc:'`",
         missed.len(),
         probe_names.len()
     );
@@ -192,7 +192,7 @@ fn census_probes(
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "needs a root logiguard daemon with NFQUEUE interception; run via `just e2e`"]
+#[ignore = "needs a root netkeep daemon with NFQUEUE interception; run via `just e2e`"]
 fn tcp_ten_processes_times_hundred_requests_are_attributed() {
     let Some(target_ip) = preflight() else {
         return;
@@ -266,7 +266,7 @@ fn tcp_ten_processes_times_hundred_requests_are_attributed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "needs a root logiguard daemon with NFQUEUE interception; run via `just e2e`"]
+#[ignore = "needs a root netkeep daemon with NFQUEUE interception; run via `just e2e`"]
 fn udp_ten_processes_times_hundred_datagrams_are_attributed() {
     let Some(target_ip) = preflight() else {
         return;
@@ -342,7 +342,7 @@ fn udp_ten_processes_times_hundred_datagrams_are_attributed() {
 /// back-mapping* instead: connect to the resolved IP and expect the flow
 /// event to carry the domain the daemon's DNS snoop learned.
 #[test]
-#[ignore = "needs a root logiguard daemon with NFQUEUE interception + internet; run via `just e2e`"]
+#[ignore = "needs a root netkeep daemon with NFQUEUE interception + internet; run via `just e2e`"]
 fn dns_resolved_domain_is_stamped_on_flow() {
     let _guard = serial_guard();
     e2e::require_daemon();
@@ -434,7 +434,7 @@ fn dns_resolved_domain_is_stamped_on_flow() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "needs a root logiguard daemon with NFQUEUE interception + HTTP/3-capable curl; run via `just e2e`"]
+#[ignore = "needs a root netkeep daemon with NFQUEUE interception + HTTP/3-capable curl; run via `just e2e`"]
 fn quic_http3_flow_is_attributed() {
     let _guard = serial_guard();
     e2e::require_daemon();

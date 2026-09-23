@@ -168,7 +168,7 @@ If you remove any layer, an above row reappears as a duplicate dialog.
 
 ## Bug 23 — Daemon's own connections intercepted (fixed 2026-06-04)
 
-This is not a process attribution race per se, but it produces the same visible symptom: `process=Some("logiguard-daemon")` in policy logs.
+This is not a process attribution race per se, but it produces the same visible symptom: `process=Some("netkeep-daemon")` in policy logs.
 
 ### Root cause
 
@@ -180,7 +180,7 @@ The daemon makes outbound connections on behalf of applications:
 - TCP relay proxy connects (`connect_via_proxy_target`) — TCP to a SOCKS5/HTTP proxy.
 - TCP relay device fallback (`connect_plain`) — plain TCP.
 
-None of these sockets had `SO_MARK` set. The nftables `output_early` chain only bypasses NFQUEUE for packets with `mark >= ROUTE_MARK_BASE` (20000) or specific proxy marks. All unmarked daemon traffic was queued to NFQUEUE, classified as `process=logiguard-daemon`, and triggered policy matching.
+None of these sockets had `SO_MARK` set. The nftables `output_early` chain only bypasses NFQUEUE for packets with `mark >= ROUTE_MARK_BASE` (20000) or specific proxy marks. All unmarked daemon traffic was queued to NFQUEUE, classified as `process=netkeep-daemon`, and triggered policy matching.
 
 This was **not** a resolver failure — the resolver correctly identified the process. The problem was that the daemon's relay/DNS connections should never have been intercepted in the first place.
 
@@ -370,8 +370,8 @@ If the eBPF program fails to load (no `CAP_BPF`, kernel < 5.5, etc.), the daemon
 
 ### Metrics
 
-- `logiguard.proc.resolver.ebpf.hits` — PID found via eBPF map
-- `logiguard.proc.resolver.ebpf.misses` — eBPF map had no entry (fell through to SOCK_DIAG)
+- `netkeep.proc.resolver.ebpf.hits` — PID found via eBPF map
+- `netkeep.proc.resolver.ebpf.misses` — eBPF map had no entry (fell through to SOCK_DIAG)
 
 ### Files
 
@@ -500,13 +500,13 @@ candidate matches; ambiguity yields `None`. Regression:
 * **NFQA_UID/GID**: the daemon now enables `set_recv_uid_gid` and the packet
   UID is threaded through `ProcessResolver::resolve(.., sk_uid)`. eBPF
   entries whose captured UID disagrees with the packet's socket-owner UID
-  are rejected (`logiguard.proc.resolver.ebpf.uid_mismatch`) — a race-free
+  are rejected (`netkeep.proc.resolver.ebpf.uid_mismatch`) — a race-free
   kernel cross-check against stale entries.
 * **FlowEvent** now records `source_port` + `destination_port` (SQLite
   columns + JSON), which is what makes per-flow attribution auditable: each
   e2e probe binds a FIXED source port, so every flow event maps to exactly
   one generating process.
-* **`LOGIGUARD_DIAG=1`**: structured per-stage logging
+* **`NETKEEP_DIAG=1`**: structured per-stage logging
   (`pkt → ebpf → cache → inode → fdpid → name → layer0 → flow`) so the
   first incorrect value of any future incident is visible in the journal.
 * **e2e cross-attribution suite** (`e2e/tests/cross_attribution.rs`): N

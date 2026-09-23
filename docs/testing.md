@@ -1,4 +1,4 @@
-# LogiGuard Testing Strategy
+# Netkeep Testing Strategy
 
 ## Principle
 

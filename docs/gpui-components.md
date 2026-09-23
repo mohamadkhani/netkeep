@@ -175,7 +175,7 @@ cx.open_window(
 
 ### Example: Decision Dialog (Legacy — Pre-MD3 Redesign)
 
-> **Note:** The actual LogiGuard GPUI app now uses custom GPUI elements instead of
+> **Note:** The actual Netkeep GPUI app now uses custom GPUI elements instead of
 > gpui-component `Button` and `Checkbox` to match the Material Design 3 design spec.
 > The segmented pill toggle, outlined action buttons, and grid layout are all built
 > with raw `div()` + `h_flex()`/`v_flex()`. This example shows the general pattern.
@@ -653,7 +653,7 @@ window.open_dialog(cx, move |dialog, _, _cx| {
 
 ## Design System Components (`components/modal.rs`)
 
-Reusable UI primitives matching the LogiGuard design language. Import from `crate::components::*`.
+Reusable UI primitives matching the Netkeep design language. Import from `crate::components::*`.
 
 ### `modal_header(icon, title)`
 
@@ -867,7 +867,7 @@ Many gpui-component types are in submodules and **not** re-exported at the crate
 
 ## Layout: h_flex / v_flex vs div
 
-`h_flex()` and `v_flex()` from `gpui_component` are pre-configured flex containers. They are the preferred layout primitives in all LogiGuard GPUI code.
+`h_flex()` and `v_flex()` from `gpui_component` are pre-configured flex containers. They are the preferred layout primitives in all Netkeep GPUI code.
 
 ```rust
 // ✅ Prefer
@@ -886,7 +886,7 @@ div().flex().flex_row().gap(px(8.)).items_center().child(a).child(b)
 
 ## Project Design-System Layer (`components/ds.rs`)
 
-LogiGuard wraps the lowest-level GPUI/gpui-component primitives in `apps/gpui/src/components/ds.rs`. Always check `ds.rs` before writing inline UI atoms.
+Netkeep wraps the lowest-level GPUI/gpui-component primitives in `apps/gpui/src/components/ds.rs`. Always check `ds.rs` before writing inline UI atoms.
 
 ### Available Primitives
 

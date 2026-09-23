@@ -1,6 +1,6 @@
 # Process Resolver: Mapping Network Packets to Processes
 
-This document explains how LogiGuard identifies which process owns an intercepted network connection, using the Linux `/proc` filesystem and optional system tools (`ss`, package managers).
+This document explains how Netkeep identifies which process owns an intercepted network connection, using the Linux `/proc` filesystem and optional system tools (`ss`, package managers).
 
 > **Adjacent reading.** Race interactions between this resolver, the decision engine, and the policy engine — and the three layers of defense that absorb them — are in [`docs/process-attribution-races.md`](process-attribution-races.md). Read that doc *too* if you are touching the resolver and the failure modes are not just an isolated parse bug.
 
@@ -110,7 +110,7 @@ The eBPF program stores `(src_ip, src_port, protocol) → (pid, uid, timestamp_n
 
 ### Integration
 
-`ProcProcessResolver::find_pid()` checks the eBPF map **first** (Step 0). If it returns a PID, the entire `/proc` lookup chain is skipped. Metrics: `logiguard.proc.resolver.ebpf.hits` / `logiguard.proc.resolver.ebpf.misses`.
+`ProcProcessResolver::find_pid()` checks the eBPF map **first** (Step 0). If it returns a PID, the entire `/proc` lookup chain is skipped. Metrics: `netkeep.proc.resolver.ebpf.hits` / `netkeep.proc.resolver.ebpf.misses`.
 
 ### Graceful degradation
 

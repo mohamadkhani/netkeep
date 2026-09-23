@@ -1,4 +1,4 @@
-//! Reusable modal (dialog) components matching the LogiGuard design system.
+//! Reusable modal (dialog) components matching the Netkeep design system.
 
 use gpui::{
     div, px, AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,

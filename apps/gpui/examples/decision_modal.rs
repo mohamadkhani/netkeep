@@ -6,7 +6,7 @@
 //! Run:
 //!
 //! ```text
-//! cargo run -p logiguard-gpui --example decision_modal -- [flags]
+//! cargo run -p netkeep-gpui --example decision_modal -- [flags]
 //! ```
 //!
 //! Flags override every condition of the synthetic pending decision:

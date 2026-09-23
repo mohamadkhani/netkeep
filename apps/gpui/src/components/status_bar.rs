@@ -18,7 +18,7 @@ pub fn status_bar(pending_count: usize) -> gpui::AnyElement {
                 .text_size(px(10.))
                 .opacity(0.7)
                 .child(format!(
-                    "LogiGuard \u{00B7} Fail-close active \u{00B7} Queue: {} pending",
+                    "Netkeep \u{00B7} Fail-close active \u{00B7} Queue: {} pending",
                     pending_count
                 )),
         )

@@ -103,7 +103,7 @@ impl DecisionEngine {
         let key = FlowKey::from(&flow);
         if let Some(existing_id) = self.pending_by_flow.get(&key) {
             if let Some(existing) = self.pending.get(existing_id) {
-                counter!("logiguard.pending.deduplicated", "type" => "exact").increment(1);
+                counter!("netkeep.pending.deduplicated", "type" => "exact").increment(1);
                 return DecisionOutcome::Pending(existing.clone());
             }
         }
@@ -149,13 +149,13 @@ impl DecisionEngine {
                     }
                     let new_key = FlowKey::from(&existing.flow);
                     self.pending_by_flow.insert(new_key, existing_id.clone());
-                    counter!("logiguard.pending.deduplicated", "type" => "name_upgrade")
+                    counter!("netkeep.pending.deduplicated", "type" => "name_upgrade")
                         .increment(1);
                     return DecisionOutcome::Pending(existing.clone());
                 }
             }
             if let Some(existing) = self.pending.get(&existing_id) {
-                counter!("logiguard.pending.deduplicated", "type" => "symmetric").increment(1);
+                counter!("netkeep.pending.deduplicated", "type" => "symmetric").increment(1);
                 return DecisionOutcome::Pending(existing.clone());
             }
         }
@@ -165,7 +165,7 @@ impl DecisionEngine {
                 OverflowPolicy::DenyNew => "deny_new",
                 OverflowPolicy::AllowNew => "allow_new",
             };
-            counter!("logiguard.pending.overflow", "policy" => policy_str).increment(1);
+            counter!("netkeep.pending.overflow", "policy" => policy_str).increment(1);
             return match self.overflow_policy {
                 OverflowPolicy::DenyNew => DecisionOutcome::Immediate(RuleAction::Deny),
                 OverflowPolicy::AllowNew => DecisionOutcome::Immediate(RuleAction::Allow),
@@ -188,8 +188,8 @@ impl DecisionEngine {
         };
         self.pending_by_flow.insert(key, id.clone());
         self.pending.insert(id, decision.clone());
-        counter!("logiguard.pending.created", "protocol" => proto_str).increment(1);
-        gauge!("logiguard.pending.decisions").set(self.pending.len() as f64);
+        counter!("netkeep.pending.created", "protocol" => proto_str).increment(1);
+        gauge!("netkeep.pending.decisions").set(self.pending.len() as f64);
         DecisionOutcome::Pending(decision)
     }
 
@@ -210,8 +210,8 @@ impl DecisionEngine {
                 RuleAction::Ask => "ask",
                 RuleAction::Route => "route",
             };
-            counter!("logiguard.pending.resolved", "action" => action_str).increment(1);
-            gauge!("logiguard.pending.decisions").set(self.pending.len() as f64);
+            counter!("netkeep.pending.resolved", "action" => action_str).increment(1);
+            gauge!("netkeep.pending.decisions").set(self.pending.len() as f64);
             Some(action)
         } else {
             None
@@ -240,8 +240,8 @@ impl DecisionEngine {
             }
         }
         if count > 0 {
-            counter!("logiguard.pending.expired").increment(count);
-            gauge!("logiguard.pending.decisions").set(self.pending.len() as f64);
+            counter!("netkeep.pending.expired").increment(count);
+            gauge!("netkeep.pending.decisions").set(self.pending.len() as f64);
         }
         expired
     }

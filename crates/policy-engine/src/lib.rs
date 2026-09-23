@@ -146,7 +146,7 @@ fn action_rank(action: &RuleAction) -> u8 {
 
 pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule> {
     let start = std::time::Instant::now();
-    counter!("logiguard.policy.evaluations").increment(1);
+    counter!("netkeep.policy.evaluations").increment(1);
 
     let result = rules
         .iter()
@@ -164,7 +164,7 @@ pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule
             egress_id: r.egress_id.clone(),
         });
 
-    histogram!("logiguard.policy.evaluation.duration").record(start.elapsed().as_secs_f64());
+    histogram!("netkeep.policy.evaluation.duration").record(start.elapsed().as_secs_f64());
 
     match &result {
         Some(r) => {
@@ -174,10 +174,10 @@ pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule
                 RuleAction::Ask => "ask",
                 RuleAction::Route => "route",
             };
-            counter!("logiguard.policy.resolved", "action" => action_str).increment(1);
+            counter!("netkeep.policy.resolved", "action" => action_str).increment(1);
         }
         None => {
-            counter!("logiguard.policy.no_match").increment(1);
+            counter!("netkeep.policy.no_match").increment(1);
         }
     }
 

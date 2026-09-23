@@ -224,7 +224,7 @@ impl<S: VerdictSink> DryRunEnforcer<S> {
 // Nftables bootstrap — sets up/tears down the NFQUEUE interception rules
 // ---------------------------------------------------------------------------
 
-/// Base fwmark used by logiguard's policy-routing tables.
+/// Base fwmark used by netkeep's policy-routing tables.
 /// Packets carrying any mark in this range are daemon-originated relay
 /// connections and must NOT be re-queued to NFQUEUE (would cause a deadlock
 /// where the relay's own SYN is held pending a user decision).
@@ -240,7 +240,7 @@ pub const PROXY_REDIRECT_MARK: u32 = ROUTE_MARK_BASE - 1;
 /// Fwmark stamped on daemon-originated sockets (DNS forwarder, relay connects,
 /// proxy connects) so nftables bypasses NFQUEUE for the daemon's own traffic.
 /// Without this mark, the daemon's outbound packets are intercepted and
-/// attributed to "logiguard-daemon" instead of the real application.
+/// attributed to "netkeep-daemon" instead of the real application.
 ///
 /// This mark is intentionally **not** in the `>= ROUTE_MARK_BASE` range so
 /// that it does NOT trigger policy routing rules (`ip rule add fwmark N
@@ -252,12 +252,12 @@ pub const PROXY_REDIRECT_MARK: u32 = ROUTE_MARK_BASE - 1;
 pub const DAEMON_BYPASS_MARK: u32 = PROXY_REDIRECT_MARK - 1;
 
 pub trait NftablesBootstrap: Send + Sync {
-    /// Install the logiguard nftables table.
+    /// Install the netkeep nftables table.
     ///
     /// * `queue_num` — when `Some(n)`, NFQUEUE rules are added so packets are
     ///   sent to userspace for classification.  When `None`, only the
     ///   route-mark protection chains are installed (no interception).
-    /// * `route_mark_base` — marks at or above this value belong to logiguard
+    /// * `route_mark_base` — marks at or above this value belong to netkeep
     ///   relay sockets and are preserved across other tools' marking chains
     ///   via conntrack mark save/restore.
     /// * `proxy_redirects` — list of `(fwmark, local_port)` pairs, one per
@@ -322,7 +322,7 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         // (route) restores meta mark from ct mark — its pre-mark is 0 and post-
         // mark is X, the kernel sees the change, and ip_route_me_harder fires.
         let mut script = String::new();
-        script.push_str("add table inet logiguard\n");
+        script.push_str("add table inet netkeep\n");
 
         // Add a nat/output chain to bypass throne's TCP redirect for our marked traffic.
         // Throne uses "meta nfproto ipv4 meta l4proto tcp redirect to :37805" which
@@ -332,82 +332,82 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         // so throne skips the redirect, while also saving our routing mark for later restoration.
         // Use priority -199 to run BEFORE throne's "mangle" priority (-150).
         script.push_str(
-            "add chain inet logiguard output_nat { type nat hook output priority -199; policy accept; }\n",
+            "add chain inet netkeep output_nat { type nat hook output priority -199; policy accept; }\n",
         );
         // Only bypass throne if output device is NOT throne-tun (i.e., physical NIC routing)
         script.push_str(&format!(
-            "add rule inet logiguard output_nat meta mark >= {route_mark_base} oifname != \"throne-tun\" ct mark set meta mark meta mark set 0x2024 return\n",
+            "add rule inet netkeep output_nat meta mark >= {route_mark_base} oifname != \"throne-tun\" ct mark set meta mark meta mark set 0x2024 return\n",
         ));
 
         script.push_str(
-            "add chain inet logiguard output_early { type route hook output priority -150; policy accept; }\n",
+            "add chain inet netkeep output_early { type route hook output priority -150; policy accept; }\n",
         );
         // Accept packets already carrying a routing mark (set by a previous NFQUEUE verdict
         // or by our relay sockets). The mark was saved to ct mark by output_nat the first
         // time the packet traversed that chain; restore it here so policy routing is stable.
         script.push_str(&format!(
-            "add rule inet logiguard output_early ct mark >= {route_mark_base} meta mark set ct mark accept\n",
+            "add rule inet netkeep output_early ct mark >= {route_mark_base} meta mark set ct mark accept\n",
         ));
         // Save fwmark to ct mark when a routed packet first passes through this chain
         // (output_nat already ran and saw meta mark=0 before NFQUEUE set it, so we
         // must save it here on the accept-with-mark path). Subsequent packets then
         // hit the ct mark rule above and bypass NFQUEUE entirely.
         script.push_str(&format!(
-            "add rule inet logiguard output_early meta mark >= {route_mark_base} ct mark set meta mark accept\n",
+            "add rule inet netkeep output_early meta mark >= {route_mark_base} ct mark set meta mark accept\n",
         ));
         if let Some(q) = queue_num {
             // Exclude loopback traffic: skip both the loopback interface and the
             // 127.0.0.0/8 address range (defense-in-depth; the Rust processor also
             // filters loopback as a second layer).
             script.push_str(&format!(
-                "add rule inet logiguard output_early oifname \"lo\" accept\n",
+                "add rule inet netkeep output_early oifname \"lo\" accept\n",
             ));
             script.push_str(&format!(
-                "add rule inet logiguard output_early ip daddr 127.0.0.0/8 accept\n",
+                "add rule inet netkeep output_early ip daddr 127.0.0.0/8 accept\n",
             ));
             script.push_str(&format!(
-                "add rule inet logiguard output_early ip6 daddr ::1 accept\n",
+                "add rule inet netkeep output_early ip6 daddr ::1 accept\n",
             ));
             // IPv4-mapped loopback (::ffff:127.0.0.0/8) — not matched by `ip daddr` or `::1`.
             script.push_str(
-                "add rule inet logiguard output_early ip6 daddr ::ffff:7f00:0000/104 accept\n",
+                "add rule inet netkeep output_early ip6 daddr ::ffff:7f00:0000/104 accept\n",
             );
             // DNS queries must bypass NFQUEUE. If queued, they appear as flows to the DNS
             // server IP (not the actual destination) and block name resolution entirely,
             // preventing any domain from being reached.
-            script.push_str("add rule inet logiguard output_early udp dport 53 accept\n");
-            script.push_str("add rule inet logiguard output_early tcp dport 53 accept\n");
+            script.push_str("add rule inet netkeep output_early udp dport 53 accept\n");
+            script.push_str("add rule inet netkeep output_early tcp dport 53 accept\n");
             // ICMP and ICMPv6 must bypass NFQUEUE. These are layer-3 control
             // protocols with no TCP/UDP port — the process resolver cannot match
             // them to a user process. ICMPv6 also includes NDP (types 133–137)
             // which the kernel generates autonomously; queuing it would produce
             // spurious "unknown process" dialogs and blocking it would break IPv6
             // neighbor discovery entirely.
-            script.push_str("add rule inet logiguard output_early meta l4proto icmp accept\n");
-            script.push_str("add rule inet logiguard output_early meta l4proto icmpv6 accept\n");
+            script.push_str("add rule inet netkeep output_early meta l4proto icmp accept\n");
+            script.push_str("add rule inet netkeep output_early meta l4proto icmpv6 accept\n");
             // Proxy-routed packets carry a per-proxy fwmark (below route_mark_base).
             // Accept them without re-queuing so follow-on segments are not dropped.
             for (mark, _port) in proxy_redirects {
                 script.push_str(&format!(
-                    "add rule inet logiguard output_early meta mark {mark} accept\n",
+                    "add rule inet netkeep output_early meta mark {mark} accept\n",
                 ));
             }
             // Also accept the legacy single PROXY_REDIRECT_MARK for backwards compat.
             script.push_str(&format!(
-                "add rule inet logiguard output_early meta mark {PROXY_REDIRECT_MARK} accept\n",
+                "add rule inet netkeep output_early meta mark {PROXY_REDIRECT_MARK} accept\n",
             ));
             // Daemon bypass mark — stamped on daemon-originated sockets (DNS
             // forwarder, relay connects, proxy connects) so they skip NFQUEUE.
             // Without this, the daemon's own traffic is intercepted and
-            // attributed to "logiguard-daemon" instead of the real application.
+            // attributed to "netkeep-daemon" instead of the real application.
             // Uses a dedicated mark (not >= route_mark_base) to avoid triggering
             // policy routing rules — the daemon's own connections follow the
             // system default route.
             script.push_str(&format!(
-                "add rule inet logiguard output_early meta mark {DAEMON_BYPASS_MARK} accept\n",
+                "add rule inet netkeep output_early meta mark {DAEMON_BYPASS_MARK} accept\n",
             ));
             script.push_str(&format!(
-                "add rule inet logiguard output_early queue num {q}\n",
+                "add rule inet netkeep output_early queue num {q}\n",
             ));
         }
 
@@ -422,10 +422,10 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         // continues iteration at the *next* hook entry — anything we add below
         // `queue num q` in output_early never executes for queued packets.
         script.push_str(
-            "add chain inet logiguard output_save_mark { type filter hook output priority -125; policy accept; }\n",
+            "add chain inet netkeep output_save_mark { type filter hook output priority -125; policy accept; }\n",
         );
         script.push_str(&format!(
-            "add rule inet logiguard output_save_mark meta mark >= {route_mark_base} ct mark set meta mark meta mark set 0\n",
+            "add rule inet netkeep output_save_mark meta mark >= {route_mark_base} ct mark set meta mark meta mark set 0\n",
         ));
 
         // Stage 3 of the reroute dance — restore meta mark from ct mark inside
@@ -436,40 +436,40 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         // the route lookup with the new mark — finally putting the packet on
         // the right egress interface for our fwmark policy rule.
         script.push_str(
-            "add chain inet logiguard output_reroute { type route hook output priority -100; policy accept; }\n",
+            "add chain inet netkeep output_reroute { type route hook output priority -100; policy accept; }\n",
         );
         script.push_str(&format!(
-            "add rule inet logiguard output_reroute ct mark >= {route_mark_base} meta mark set ct mark\n",
+            "add rule inet netkeep output_reroute ct mark >= {route_mark_base} meta mark set ct mark\n",
         ));
 
         if let Some(q) = queue_num {
             script.push_str(
-                "add chain inet logiguard forward { type filter hook forward priority 0; policy accept; }\n",
+                "add chain inet netkeep forward { type filter hook forward priority 0; policy accept; }\n",
             );
             // Exclude loopback from forward chain
-            script.push_str("add rule inet logiguard forward oifname \"lo\" accept\n");
+            script.push_str("add rule inet netkeep forward oifname \"lo\" accept\n");
             script.push_str(&format!(
-                "add rule inet logiguard forward ip daddr 127.0.0.0/8 accept\n",
+                "add rule inet netkeep forward ip daddr 127.0.0.0/8 accept\n",
             ));
             script.push_str(&format!(
-                "add rule inet logiguard forward ip6 daddr ::1 accept\n",
+                "add rule inet netkeep forward ip6 daddr ::1 accept\n",
             ));
             script.push_str(
-                "add rule inet logiguard forward ip6 daddr ::ffff:7f00:0000/104 accept\n",
+                "add rule inet netkeep forward ip6 daddr ::ffff:7f00:0000/104 accept\n",
             );
-            script.push_str("add rule inet logiguard forward meta l4proto icmp accept\n");
-            script.push_str("add rule inet logiguard forward meta l4proto icmpv6 accept\n");
-            script.push_str(&format!("add rule inet logiguard forward queue num {q}\n",));
+            script.push_str("add rule inet netkeep forward meta l4proto icmp accept\n");
+            script.push_str("add rule inet netkeep forward meta l4proto icmpv6 accept\n");
+            script.push_str(&format!("add rule inet netkeep forward queue num {q}\n",));
 
             // INPUT chain: passively snoop DNS responses (UDP src_port 53) on a
             // second NFQUEUE queue (queue_num + 1) with `bypass` so that if the
             // DnsSnoopWorker is not running, DNS responses pass through unaffected.
             if let Some(dns_q) = q.checked_add(1) {
                 script.push_str(
-                    "add chain inet logiguard input_dns { type filter hook input priority 0; policy accept; }\n",
+                    "add chain inet netkeep input_dns { type filter hook input priority 0; policy accept; }\n",
                 );
                 script.push_str(&format!(
-                    "add rule inet logiguard input_dns udp sport 53 queue num {dns_q} bypass\n",
+                    "add rule inet netkeep input_dns udp sport 53 queue num {dns_q} bypass\n",
                 ));
             }
         }
@@ -498,13 +498,13 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         //     `meta mark` with 0x2024 (the throne-bypass cookie) and saved
         //     the original into `ct mark`. We must match either.
         script.push_str(
-            "add chain inet logiguard postrouting { type nat hook postrouting priority 100; policy accept; }\n",
+            "add chain inet netkeep postrouting { type nat hook postrouting priority 100; policy accept; }\n",
         );
         script.push_str(&format!(
-            "add rule inet logiguard postrouting meta mark >= {route_mark_base} oifname != \"lo\" masquerade\n",
+            "add rule inet netkeep postrouting meta mark >= {route_mark_base} oifname != \"lo\" masquerade\n",
         ));
         script.push_str(&format!(
-            "add rule inet logiguard postrouting ct mark >= {route_mark_base} oifname != \"lo\" masquerade\n",
+            "add rule inet netkeep postrouting ct mark >= {route_mark_base} oifname != \"lo\" masquerade\n",
         ));
 
         // Per-proxy REDIRECT rules — each proxy has its own fwmark and local port.
@@ -513,11 +513,11 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         // SO_ORIGINAL_DST and tunnels through SOCKS/HTTP.
         if !proxy_redirects.is_empty() {
             script.push_str(
-                "add chain inet logiguard output_proxy_redirect { type nat hook output priority -50; policy accept; }\n",
+                "add chain inet netkeep output_proxy_redirect { type nat hook output priority -50; policy accept; }\n",
             );
             for (mark, port) in proxy_redirects {
                 script.push_str(&format!(
-                    "add rule inet logiguard output_proxy_redirect meta mark {mark} meta l4proto tcp redirect to :{port}\n",
+                    "add rule inet netkeep output_proxy_redirect meta mark {mark} meta l4proto tcp redirect to :{port}\n",
                 ));
             }
         }
@@ -526,7 +526,7 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
     }
 
     fn teardown(&self) -> Result<(), String> {
-        run_nft_script("delete table inet logiguard\n")
+        run_nft_script("delete table inet netkeep\n")
     }
 }
 
@@ -793,7 +793,7 @@ impl RouteManager for SystemRouteManager {
         run_ip(&["route", "flush", "table", &table_s]).ok();
         run_ip(&["rule", "del", "fwmark", &fwmark_s, "lookup", &table_s]).ok();
         // Best-effort cleanup of a per-rule unreachable left over from an
-        // earlier logiguard version that installed it as a separate rule.
+        // earlier netkeep version that installed it as a separate rule.
         run_ip(&["rule", "del", "fwmark", &fwmark_s, "type", "unreachable"]).ok();
 
         let mut installed = self.installed.lock().map_err(|e| e.to_string())?;

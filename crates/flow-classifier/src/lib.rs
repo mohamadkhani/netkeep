@@ -168,12 +168,12 @@ where
         );
 
         if proc_info.is_some() {
-            counter!("logiguard.process.resolved", "result" => "hit").increment(1);
+            counter!("netkeep.process.resolved", "result" => "hit").increment(1);
         } else {
-            counter!("logiguard.process.resolved", "result" => "miss").increment(1);
+            counter!("netkeep.process.resolved", "result" => "miss").increment(1);
         }
 
-        counter!("logiguard.flows.classified", "protocol" => proto_str).increment(1);
+        counter!("netkeep.flows.classified", "protocol" => proto_str).increment(1);
 
         let process_name = proc_info.as_ref().map(|p| p.name.clone());
         let process_exe = proc_info.as_ref().and_then(|p| p.exe.clone());
@@ -190,7 +190,7 @@ where
             None
         };
 
-        histogram!("logiguard.flow.classification.duration").record(start.elapsed().as_secs_f64());
+        histogram!("netkeep.flow.classification.duration").record(start.elapsed().as_secs_f64());
 
         FlowContext {
             process_name,
@@ -235,7 +235,7 @@ where
         } else {
             "dns_cache"
         };
-        counter!("logiguard.domain.resolved", "source" => source).increment(1);
+        counter!("netkeep.domain.resolved", "source" => source).increment(1);
 
         resolved
     }

@@ -1,7 +1,7 @@
-//! Black-box end-to-end suite for LogiGuard.
+//! Black-box end-to-end suite for Netkeep.
 //!
 //! The suite never launches the app: it drives the developer's running daemon
-//! through the real `logiguard-cli` binary and asserts on its `--json` output.
+//! through the real `netkeep-cli` binary and asserts on its `--json` output.
 //! See the spec (issue #1) for the design contract.
 
 use std::process::Command;
@@ -32,22 +32,22 @@ fn cli_bin() -> String {
     // conventional workspace layout.
     let manifest = env!("CARGO_MANIFEST_DIR");
     for dir in ["../target/debug", "../target/release"] {
-        let candidate = format!("{manifest}/{dir}/logiguard-cli");
+        let candidate = format!("{manifest}/{dir}/netkeep-cli");
         if std::path::Path::new(&candidate).exists() {
             return candidate;
         }
     }
-    // Last resort: whatever is on PATH (e.g. the installed /usr/bin/logiguard-cli).
-    "logiguard-cli".to_string()
+    // Last resort: whatever is on PATH (e.g. the installed /usr/bin/netkeep-cli).
+    "netkeep-cli".to_string()
 }
 
 /// Run the real CLI binary with the given arguments and capture its output.
 pub fn run_cli(args: &[&str]) -> std::process::Output {
     Command::new(cli_bin())
         .args(args)
-        .env("LOGIGUARD_SOCKET_PATH", socket_path())
+        .env("NETKEEP_SOCKET_PATH", socket_path())
         .output()
-        .expect("failed to spawn logiguard-cli (is it built? try `cargo build -p logiguard-cli`)")
+        .expect("failed to spawn netkeep-cli (is it built? try `cargo build -p netkeep-cli`)")
 }
 
 /// Run the CLI with `--json` and parse stdout as a JSON object.
@@ -82,7 +82,7 @@ pub fn expect_variant(resp: &serde_json::Value, variant: &str) -> serde_json::Va
 /// The socket the suite talks to — the daemon's control socket, overridable
 /// for pointing the suite at a non-default instance.
 pub fn socket_path() -> String {
-    std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| "/tmp/logiguard.sock".to_string())
+    std::env::var("NETKEEP_SOCKET_PATH").unwrap_or_else(|_| "/tmp/netkeep.sock".to_string())
 }
 
 /// Preflight: fail the whole suite loudly when the daemon is down, with an
@@ -98,8 +98,8 @@ pub fn require_daemon() {
             );
         }
         Err(err) => panic!(
-            "logiguard daemon is not reachable at {socket}.\n\
-             Start it first, e.g. `systemctl start logiguardd` or `just run-daemon`, \
+            "netkeep daemon is not reachable at {socket}.\n\
+             Start it first, e.g. `systemctl start netkeepd` or `just run-daemon`, \
              then re-run the suite.\nUnderlying error: {err}",
             socket = socket_path(),
         ),

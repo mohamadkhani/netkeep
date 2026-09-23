@@ -9,7 +9,7 @@ set -euo pipefail
 #
 # Options:
 #   --tag <tag>          Tag / version for the release (default: from PKGBUILD pkgver)
-#   --title <title>      Release title (default: "LogiGuard <tag>")
+#   --title <title>      Release title (default: "Netkeep <tag>")
 #   --notes <text>       Release notes (default: "Release <tag>")
 #   --notes-file <path>  Read release notes from a file (overrides --notes)
 #   --prerelease         Mark as pre-release
@@ -70,7 +70,7 @@ if [[ -z "$TAG" ]]; then
 fi
 
 if [[ -z "$TITLE" ]]; then
-    TITLE="LogiGuard ${TAG}"
+    TITLE="Netkeep ${TAG}"
 fi
 
 echo "==> Package : ${pkgname}"
@@ -120,7 +120,7 @@ TEA_ARGS=()
 # Try to detect repo from git remote if --repo wasn't given
 if [[ -z "$TEA_REPO" ]]; then
     REMOTE_URL="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
-    # Convert git@git.logicamp.dev:logicamp/logiguard.git → logicamp/logiguard
+    # Convert git@git.logicamp.dev:logicamp/netkeep.git → logicamp/netkeep
     if [[ "$REMOTE_URL" =~ ^git@[^:]+:(.+)\.git$ ]]; then
         TEA_REPO="${BASH_REMATCH[1]}"
         echo "==> Auto-detected repo: ${TEA_REPO}"

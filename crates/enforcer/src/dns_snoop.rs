@@ -50,24 +50,24 @@ impl DnsSnoopWorker {
                 Ok(mut msg) => {
                     backoff_ms = 100;
                     let parse_start = Instant::now();
-                    counter!("logiguard.dns.snoop.packets").increment(1);
+                    counter!("netkeep.dns.snoop.packets").increment(1);
                     match parse_dns_from_ip_packet(msg.get_payload()) {
                         Some(entries) if !entries.is_empty() => {
-                            counter!("logiguard.dns.snoop.parse_success").increment(1);
+                            counter!("netkeep.dns.snoop.parse_success").increment(1);
                             let count = entries.len() as u64;
                             for (ip, domain) in entries {
                                 self.dns_cache.insert(&ip.to_string(), &domain);
                             }
-                            counter!("logiguard.dns.snoop.entries_learned").increment(count);
+                            counter!("netkeep.dns.snoop.entries_learned").increment(count);
                         }
                         Some(_) => {
-                            counter!("logiguard.dns.snoop.parse_empty").increment(1);
+                            counter!("netkeep.dns.snoop.parse_empty").increment(1);
                         }
                         None => {
-                            counter!("logiguard.dns.snoop.parse_failed").increment(1);
+                            counter!("netkeep.dns.snoop.parse_failed").increment(1);
                         }
                     }
-                    histogram!("logiguard.dns.snoop.parse.duration")
+                    histogram!("netkeep.dns.snoop.parse.duration")
                         .record(parse_start.elapsed().as_secs_f64());
                     msg.set_verdict(Verdict::Accept);
                     self.queue.verdict(msg)?;

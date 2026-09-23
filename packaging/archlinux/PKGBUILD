@@ -1,4 +1,4 @@
-# Maintainer: build from a clean clone of the LogiGuard repository.
+# Maintainer: build from a clean clone of the Netkeep repository.
 # Run `makepkg -sf` from this directory (`packaging/archlinux`); the build
 # uses the repository root at ../../ relative to this PKGBUILD.
 #
@@ -11,12 +11,12 @@
 # For plain dev iteration prefer `just dev-install` from the repo root: it
 # builds in-tree against the warm `target/` and skips packaging entirely.
 
-pkgname=logiguard
+pkgname=netkeep
 pkgver=0.1.0
 pkgrel=3
 pkgdesc='Linux desktop network flow authorization (daemon, CLI, GPUI tray)'
 arch=('x86_64')
-url='https://github.com/mohammadreza-khani/logiguard'
+url='https://github.com/mohammadreza-khani/netkeep'
 license=('Apache')
 depends=(
   'gcc-libs'
@@ -29,15 +29,15 @@ depends=(
 makedepends=('pkgconf' 'clang' 'llvm' 'rsync')
 optdepends=(
   'vulkan-mesa-layers: GPU stack for GPUI on some setups'
-  'systemd-resolved: disable stub listener if using LOGIGUARD_DNS_FORWARDER on port 53'
+  'systemd-resolved: disable stub listener if using NETKEEP_DNS_FORWARDER on port 53'
 )
 options=('!lto' '!debug')
-install=logiguard.install
+install=netkeep.install
 
 prepare() {
   _root="$(cd "${startdir}/../.." && pwd)"
   if [[ ! -f "${_root}/Cargo.toml" ]]; then
-    echo "error: expected LogiGuard workspace at ${_root}" >&2
+    echo "error: expected Netkeep workspace at ${_root}" >&2
     exit 1
   fi
   rm -rf "${srcdir}/build"
@@ -85,17 +85,17 @@ build() {
 package() {
   cd "${srcdir}/build"
   export CARGO_TARGET_DIR="${startdir}/.cargo-target"
-  install -Dm755 "${CARGO_TARGET_DIR}/release/logiguard-daemon" "${pkgdir}/usr/bin/logiguardd"
-  install -Dm755 "${CARGO_TARGET_DIR}/release/logiguard-cli" "${pkgdir}/usr/bin/logiguard-cli"
-  install -Dm755 "${CARGO_TARGET_DIR}/release/logiguard-gpui" "${pkgdir}/usr/bin/logiguard-gpui"
+  install -Dm755 "${CARGO_TARGET_DIR}/release/netkeep-daemon" "${pkgdir}/usr/bin/netkeepd"
+  install -Dm755 "${CARGO_TARGET_DIR}/release/netkeep-cli" "${pkgdir}/usr/bin/netkeep-cli"
+  install -Dm755 "${CARGO_TARGET_DIR}/release/netkeep-gpui" "${pkgdir}/usr/bin/netkeep-gpui"
 
-  install -Dm644 resources/linux/systemd/logiguardd.service \
-    "${pkgdir}/usr/lib/systemd/system/logiguardd.service"
-  install -Dm644 resources/linux/applications/io.logicamp.LogiGuard.desktop \
-    "${pkgdir}/usr/share/applications/io.logicamp.LogiGuard.desktop"
-  install -Dm644 resources/linux/icons/hicolor/scalable/apps/io.logicamp.LogiGuard.svg \
-    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/io.logicamp.LogiGuard.svg"
+  install -Dm644 resources/linux/systemd/netkeepd.service \
+    "${pkgdir}/usr/lib/systemd/system/netkeepd.service"
+  install -Dm644 resources/linux/applications/io.logicamp.Netkeep.desktop \
+    "${pkgdir}/usr/share/applications/io.logicamp.Netkeep.desktop"
+  install -Dm644 resources/linux/icons/hicolor/scalable/apps/io.logicamp.Netkeep.svg \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/io.logicamp.Netkeep.svg"
 
-  install -Dm644 "${startdir}/environment.d-logiguard.conf" \
-    "${pkgdir}/etc/environment.d/logiguard.conf"
+  install -Dm644 "${startdir}/environment.d-netkeep.conf" \
+    "${pkgdir}/etc/environment.d/netkeep.conf"
 }

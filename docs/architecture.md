@@ -1,8 +1,8 @@
-# LogiGuard Architecture
+# Netkeep Architecture
 
 Network flow authorization system for Linux: intercept unknown flows, prompt user, enforce rules.
 
-**Repository:** https://github.com/mohammadreza-khani/logiguard
+**Repository:** https://github.com/mohammadreza-khani/netkeep
 **Language:** Rust
 **Platforms:** Linux desktop first
 **Status:** Phase 4+ (GPUI UI + settings window with Table/Dialog + proxy support)
@@ -13,7 +13,7 @@ Network flow authorization system for Linux: intercept unknown flows, prompt use
 ┌──────────────────────────────────────────────────────────────┐
 │                    User Desktop                              │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │ logiguard-gpui (GPUI app)                              │  │
+│  │ netkeep-gpui (GPUI app)                              │  │
 │  │  - Displays pending decisions                          │  │
 │  │  - Countdown timer with auto-deny                     │  │
 │  │  - Allow/Deny buttons with scope toggle               │  │
@@ -21,10 +21,10 @@ Network flow authorization system for Linux: intercept unknown flows, prompt use
 │  └────────────────────────────────────────────────────────┘  │
 │             ▲                                                 │
 │             │ Unix socket JSON RPC                           │
-│             │ /tmp/logiguard.sock                            │
+│             │ /tmp/netkeep.sock                            │
 │             ▼                                                 │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │ logiguard-cli (terminal CLI)                           │  │
+│  │ netkeep-cli (terminal CLI)                           │  │
 │  │  - add-rule, list-rules, delete-rule                  │  │
 │  │  - list-pendings, resolve-pending                     │  │
 │  │  - health, unlock (console-only)                      │  │
@@ -34,7 +34,7 @@ Network flow authorization system for Linux: intercept unknown flows, prompt use
              │ systemd user/system daemon
              │
 ┌────────────────────────────────────────────────────────────────┐
-│ Root Context (logiguardd daemon)                               │
+│ Root Context (netkeepd daemon)                               │
 │  ┌──────────────────────────────────────────────────────────┐ │
 │  │ ControlService                                           │ │
 │  │  - Unix socket server                                   │ │
@@ -76,7 +76,7 @@ Network flow authorization system for Linux: intercept unknown flows, prompt use
 ## Workspace Structure
 
 ```
-logiguard/
+netkeep/
 ├── crates/
 │   ├── core-types/            # Shared types (Rule, Flow, etc.)
 │   ├── policy-engine/         # Rule matching & precedence
@@ -90,9 +90,9 @@ logiguard/
 │   ├── dns-tracker-common/    # Shared structs between BPF and userspace
 │   └── dns-tracker/           # Userspace eBPF loader + map reader + DNS forwarder
 ├── apps/
-│   ├── daemon/                # logiguardd (root systemd service)
-│   ├── cli/                   # logiguard-cli (operator interface)
-│   └── gpui/                  # logiguard-gpui (GPUI decision UI)
+│   ├── daemon/                # netkeepd (root systemd service)
+│   ├── cli/                   # netkeep-cli (operator interface)
+│   └── gpui/                  # netkeep-gpui (GPUI decision UI)
 ├── design/                    # HTML design reference files
 ├── docs/                      # Architecture and API documentation
 ├── Cargo.toml                 # Workspace root
@@ -449,7 +449,7 @@ Planned (Phase 2 onward):
     - `output_reroute` (route, -100): restore `meta mark` from `ct mark`. The chain captures pre-mark `0`, sets post-mark `X` inside its own `nft_do_chain` — kernel sees the change and calls `ip_route_me_harder()`, which finally consults the fwmark rule and lands the packet on the right egress interface.
     - `postrouting` (nat, srcnat=100): `meta mark >= base oifname != "lo" masquerade` (plus a `ct mark >= base` twin for relay-path traffic where `output_nat` overwrote `meta mark` with `0x2024`). Rewrites source IP to the actual egress interface's primary IP — necessary because `ip_route_me_harder` updates the route but does NOT redo source-address selection. Conntrack records the SNAT once at conntrack-NEW and reverses it on the inbound path, transparent to the application.
     - **SYNs are classified, not short-circuited.** `nfqueue.rs:decide()` short-circuits on `tcp_payload_empty && !tcp_syn` — pure ACKs mid-connection consult the verdict cache and fall through to Accept, but SYNs run full classification. The reason is the conntrack-NAT lifecycle: NAT decisions are made once, at the conntrack-NEW packet (the SYN). If the SYN exits unmarked, conntrack records "no NAT" and a later data-packet's mark cannot change that — the connection is permanently nailed to the wrong source IP. Trade-off: flows without a matching Allow rule have their SYN dropped while `Pending` is open; the application retransmits at ~1s intervals and resumes once the user decides. Matches OpenSnitch / Little Snitch interactive-firewall behavior.
-    - Configurable `ROUTE_MARK_BASE` (default: 20000) via `LOGIGUARD_ROUTE_MARK_BASE` env var.
+    - Configurable `ROUTE_MARK_BASE` (default: 20000) via `NETKEEP_ROUTE_MARK_BASE` env var.
     - See [`docs/nfqueue-packet-interception.md`](nfqueue-packet-interception.md) "Why three OUTPUT chains for one routing decision" and "End-to-end Route Action Flow" for the full path.
 12. **Single-decision window gating in monitor mode:** Tray monitor allows only one decision dialog at a time and clears the open-window gate after the spawned `--pending-id` child exits (parent waits on child). Deferred pendings are retried on subsequent polls.
 
@@ -460,7 +460,7 @@ Planned (Phase 2 onward):
 15. **First-run egress seeding (LAN + TUN):** On the very first startup against a fresh DB (i.e. no user-defined egresses beyond `eg-default`), the daemon runs `seed_initial_egresses()` to provide a usable set of routing options out of the box:
     - **LAN egress** — detected via `ip route get 8.8.8.8`; the `dev <iface>` field identifies the default-route interface. Creates one `RouteTarget::Device(iface)` egress (blue `#3b82f6`).
     - **TUN egresses** — scanned from `/sys/class/net/*/type`; any interface whose `type` file reads `65534` (the kernel TUN/TAP constant, shared with WireGuard) gets its own egress named after the interface (purple `#8b5cf6`).
-    Seeding is skipped entirely once any user egress is present, so it never overwrites user configuration. The DB path defaults to `~/.config/logiguard/logiguard.db`, resolved from `$HOME` at runtime (Rust does not expand shell tildes); the parent directory is created automatically.
+    Seeding is skipped entirely once any user egress is present, so it never overwrites user configuration. The DB path defaults to `~/.config/netkeep/netkeep.db`, resolved from `$HOME` at runtime (Rust does not expand shell tildes); the parent directory is created automatically.
 
     **Gotcha:** if the daemon is first started while a VPN is up, `ip route get 8.8.8.8` returns the VPN tun device, so the seeded "LAN" egress ends up pointing at the VPN interface, not the actual physical NIC. The user then picks "Route via LAN" and gets the VPN. Fix is the user's: delete and recreate the egress (or edit its targets via the per-target list editor in Settings) once the VPN is down. A future enhancement could prefer `/sys/class/net/<iface>/type == 1` (ethernet) over `65534` (tun) when seeding the LAN row.
 
@@ -474,8 +474,8 @@ Planned (Phase 2 onward):
 
 ## Systemd Integration
 
-**Daemon unit file (packaged / reference):** `resources/linux/systemd/logiguardd.service`  
-Installs as `/usr/lib/systemd/system/logiguardd.service` with `ExecStart=/usr/bin/logiguardd`, `RuntimeDirectory=logiguard` (socket under `/run/logiguard/`), and `StateDirectory=logiguard` (SQLite under `/var/lib/logiguard/`). Override or drop-in to set `LOGIGUARD_NFQUEUE` when using kernel interception.
+**Daemon unit file (packaged / reference):** `resources/linux/systemd/netkeepd.service`  
+Installs as `/usr/lib/systemd/system/netkeepd.service` with `ExecStart=/usr/bin/netkeepd`, `RuntimeDirectory=netkeep` (socket under `/run/netkeep/`), and `StateDirectory=netkeep` (SQLite under `/var/lib/netkeep/`). Override or drop-in to set `NETKEEP_NFQUEUE` when using kernel interception.
 
 **Boot Gate:** nftables rules block all traffic until daemon signals readiness (health check).
 
@@ -483,22 +483,22 @@ Installs as `/usr/lib/systemd/system/logiguardd.service` with `ExecStart=/usr/bi
 
 ## Environment Variables
 
-- `LOGIGUARD_SOCKET_PATH` — Unix control socket (daemon default: `/tmp/logiguard.sock`)
-- `LOGIGUARD_ROUTE_MARK_BASE` — Base value for routing fwmark allocation (default: 20000). Used to avoid conflicts with other tools (sing-box, xray, throne).
-- `LOGIGUARD_DB_PATH` — SQLite database file (daemon default: `~/.config/logiguard/logiguard.db`; directory is created automatically)
-- `LOGIGUARD_DEVICE_ROUTE_FALLBACK` — if `1`/`true`/`yes`, routed **device** connect may fall back to unmarked `connect` after failures (escape hatch; not fail-close strict)
-- `LOGIGUARD_NFQUEUE` — NFQUEUE number to listen on (default: 0)
-- `LOGIGUARD_DEFAULT_TIMEOUT_SECS` — default pending timeout in seconds (default: 100)
-- `LOGIGUARD_TCP_TIMEOUT_SECS` — TCP-specific pending timeout (falls back to default when unset)
-- `LOGIGUARD_UDP_TIMEOUT_SECS` — UDP-specific pending timeout
-- `LOGIGUARD_QUIC_TIMEOUT_SECS` — QUIC-specific pending timeout
-- `LOGIGUARD_OTHER_TIMEOUT_SECS` — other protocols pending timeout
+- `NETKEEP_SOCKET_PATH` — Unix control socket (daemon default: `/tmp/netkeep.sock`)
+- `NETKEEP_ROUTE_MARK_BASE` — Base value for routing fwmark allocation (default: 20000). Used to avoid conflicts with other tools (sing-box, xray, throne).
+- `NETKEEP_DB_PATH` — SQLite database file (daemon default: `~/.config/netkeep/netkeep.db`; directory is created automatically)
+- `NETKEEP_DEVICE_ROUTE_FALLBACK` — if `1`/`true`/`yes`, routed **device** connect may fall back to unmarked `connect` after failures (escape hatch; not fail-close strict)
+- `NETKEEP_NFQUEUE` — NFQUEUE number to listen on (default: 0)
+- `NETKEEP_DEFAULT_TIMEOUT_SECS` — default pending timeout in seconds (default: 100)
+- `NETKEEP_TCP_TIMEOUT_SECS` — TCP-specific pending timeout (falls back to default when unset)
+- `NETKEEP_UDP_TIMEOUT_SECS` — UDP-specific pending timeout
+- `NETKEEP_QUIC_TIMEOUT_SECS` — QUIC-specific pending timeout
+- `NETKEEP_OTHER_TIMEOUT_SECS` — other protocols pending timeout
 
 ## Recovery
 
 **Fail-close boot gate:** nftables rule blocks all traffic until daemon health endpoint returns ready=true.
 
-**Physical console unlock:** `logiguard unlock` command checks:
+**Physical console unlock:** `netkeep unlock` command checks:
 1. Peer credential (SO_PEERCRED)
 2. Peer process stdin is /dev/console (from /proc/<pid>/fd/0)
 3. If both check, tear down nftables policy

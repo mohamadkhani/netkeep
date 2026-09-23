@@ -17,6 +17,6 @@ packaging/archlinux/*.pkg.tar.*
 packaging/archlinux/*.log
 
 # Binaries
-logiguard-daemon
-logiguard-gpui
-logiguard-emulator
+netkeep-daemon
+netkeep-gpui
+netkeep-emulator

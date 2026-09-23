@@ -77,7 +77,7 @@ pub struct DnsForwarder {
     proxy_cache: Arc<Mutex<HashMap<String, ProxyConfig>>>,
     /// Fwmark stamped on all daemon-originated sockets so nftables bypasses
     /// NFQUEUE. Without this, the daemon's own DNS/TCP relay connections are
-    /// intercepted and attributed to "logiguard-daemon" instead of the real
+    /// intercepted and attributed to "netkeep-daemon" instead of the real
     /// application. Set to `ROUTE_MARK_BASE` (20000) by the daemon.
     daemon_mark: u32,
 }
@@ -308,9 +308,9 @@ impl DnsForwarder {
         let proxy = match proxy {
             Some(p) => p,
             None => {
-                let db_path = std::env::var("LOGIGUARD_DB_PATH").unwrap_or_else(|_| {
+                let db_path = std::env::var("NETKEEP_DB_PATH").unwrap_or_else(|_| {
                     format!(
-                        "{}/.config/logiguard/logiguard.db",
+                        "{}/.config/netkeep/netkeep.db",
                         std::env::var("HOME").unwrap_or_default()
                     )
                 });

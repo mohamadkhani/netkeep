@@ -8,7 +8,7 @@ use core_types::{
 };
 use serde_json::json;
 
-const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
+const DEFAULT_SOCKET_PATH: &str = "/tmp/netkeep.sock";
 const DEFAULT_FLOW_LIST_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,7 +407,7 @@ fn main() {
     };
 
     let socket_path =
-        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
+        std::env::var("NETKEEP_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
     let response = match send_request(&socket_path, &request) {
         Ok(resp) => resp,
         Err(err) => {

@@ -78,18 +78,18 @@ fn resolve_host(host: &str) -> Result<String, String> {
 
 #[test]
 fn route_target_switch_changes_observable_behavior() -> Result<(), String> {
-    if env::var("LOGIGUARD_E2E_ROUTE_SWITCH").ok().as_deref() != Some("1") {
-        eprintln!("skipping e2e test: set LOGIGUARD_E2E_ROUTE_SWITCH=1 to enable");
+    if env::var("NETKEEP_E2E_ROUTE_SWITCH").ok().as_deref() != Some("1") {
+        eprintln!("skipping e2e test: set NETKEEP_E2E_ROUTE_SWITCH=1 to enable");
         return Ok(());
     }
 
-    let db_path = env::var("LOGIGUARD_DB_PATH").unwrap_or_else(|_| "/tmp/logiguard.db".to_string());
-    let proxy = env::var("LOGIGUARD_SOCKS_PROXY")
+    let db_path = env::var("NETKEEP_DB_PATH").unwrap_or_else(|_| "/tmp/netkeep.db".to_string());
+    let proxy = env::var("NETKEEP_SOCKS_PROXY")
         .unwrap_or_else(|_| "socks5h://127.0.0.1:1080".to_string());
     let tun_name =
-        env::var("LOGIGUARD_TUN_TARGET").unwrap_or_else(|_| "X2265102_GERMN3".to_string());
+        env::var("NETKEEP_TUN_TARGET").unwrap_or_else(|_| "X2265102_GERMN3".to_string());
     let device_name =
-        env::var("LOGIGUARD_DEVICE_TARGET").unwrap_or_else(|_| "wlp0s20f3".to_string());
+        env::var("NETKEEP_DEVICE_TARGET").unwrap_or_else(|_| "wlp0s20f3".to_string());
 
     // Resolve ipmyp.ir to IP so the daemon doesn't need DNS for it.
     // The curl to ipmyp.ir still uses the domain (via SOCKS domain forwarding),

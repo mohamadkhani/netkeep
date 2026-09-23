@@ -729,7 +729,7 @@ fn allow_button(
                             egress_id: eid,
                             priority: 0.0,
                         };
-                        let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
+                        let socket = std::env::var("NETKEEP_SOCKET_PATH")
                             .unwrap_or_else(|_| SOCKET_PATH.to_string());
                         let _ = cx
                             .background_executor()
@@ -846,7 +846,7 @@ fn deny_button(
                             // the restriction ladder; this value is ignored.
                             priority: 0.0,
                         };
-                        let socket = std::env::var("LOGIGUARD_SOCKET_PATH")
+                        let socket = std::env::var("NETKEEP_SOCKET_PATH")
                             .unwrap_or_else(|_| SOCKET_PATH.to_string());
                         let _ = cx
                             .background_executor()

@@ -16,7 +16,7 @@ static DECISION_WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
 pub fn poll_decision_spawner(socket_path: String, gui_command: String) {
     let mut shown_ids: HashSet<String> = HashSet::new();
 
-    eprintln!("logiguard-gpui: pending poller, socket {socket_path}");
+    eprintln!("netkeep-gpui: pending poller, socket {socket_path}");
 
     loop {
         match daemon::send_request(&socket_path, &ControlRequest::ListPending) {
@@ -43,7 +43,7 @@ pub fn poll_decision_spawner(socket_path: String, gui_command: String) {
                     match std::process::Command::new(&gui_command)
                         .arg("--pending-id")
                         .arg(&item.id)
-                        .env("LOGIGUARD_SOCKET_PATH", &socket_path)
+                        .env("NETKEEP_SOCKET_PATH", &socket_path)
                         .spawn()
                     {
                         Ok(mut child) => {

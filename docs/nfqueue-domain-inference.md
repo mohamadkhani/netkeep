@@ -160,8 +160,8 @@ For plain UDP services, QUIC/HTTP3 (encrypted SNI), and non-HTTP/non-TLS TCP, ne
 `crates/enforcer/src/dns_snoop.rs` — `DnsSnoopWorker` binds to a second NFQUEUE (queue number `= main_queue + 1`) on the **INPUT hook** with the `bypass` flag:
 
 ```
-add chain inet logiguard input_dns { type filter hook input priority 0; policy accept; }
-add rule inet logiguard input_dns udp sport 53 queue num {n+1} bypass
+add chain inet netkeep input_dns { type filter hook input priority 0; policy accept; }
+add rule inet netkeep input_dns udp sport 53 queue num {n+1} bypass
 ```
 
 `bypass` means: if the worker is not running (daemon restarting, queue overflow), DNS responses pass through unaffected — no latency impact and no DNS failure risk.

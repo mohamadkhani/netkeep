@@ -1,6 +1,6 @@
 # Settings Window Architecture Guide
 
-Complete guide to the LogiGuard settings window implementation using gpui-component Table and Dialog.
+Complete guide to the Netkeep settings window implementation using gpui-component Table and Dialog.
 
 ## Overview
 
@@ -15,7 +15,7 @@ The settings window runs **in the same GPUI process** as the tray icon (the earl
 ### Process Model
 
 ```
-logiguard-gpui (single process)
+netkeep-gpui (single process)
   │
   ├── Tray icon (ksni SNI service on a dedicated tokio-runtime thread)
   │   - menu actions → std::mpsc channel → GPUI main loop

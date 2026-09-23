@@ -20,11 +20,11 @@ pub fn register_fonts(cx: &App) {
         Cow::Borrowed(INTER_ITALIC),
         Cow::Borrowed(SPACE_GROTESK),
     ]) {
-        eprintln!("logiguard-gpui: failed to register bundled fonts: {e}");
+        eprintln!("netkeep-gpui: failed to register bundled fonts: {e}");
     }
 }
 
-/// Sets [`Theme`] font families and base size to match the LogiGuard HTML mockups:
+/// Sets [`Theme`] font families and base size to match the Netkeep HTML mockups:
 /// - UI: Inter Variable (variable-weight TTF, family name "Inter Variable")
 /// - Data / technical: Space Grotesk (family name "Space Grotesk Light")
 /// - Base size: 14px (`body-md`)

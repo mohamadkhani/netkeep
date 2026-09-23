@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream;
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{Egress, PendingDecision};
 
-pub const SOCKET_PATH: &str = "/tmp/logiguard.sock";
+pub const SOCKET_PATH: &str = "/tmp/netkeep.sock";
 
 pub fn send_request(
     socket_path: &str,
@@ -32,7 +32,7 @@ pub fn unix_now() -> u64 {
 
 pub fn fetch_pending(pending_id: &str) -> anyhow::Result<PendingDecision> {
     let socket_path =
-        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
+        std::env::var("NETKEEP_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
 
     match send_request(&socket_path, &ControlRequest::ListPending)? {
         ControlResponse::PendingList(mut items) => {
@@ -162,7 +162,7 @@ pub fn detect_egresses() -> Vec<core_types::Egress> {
 /// Falls back to `detect_egresses()` if the daemon is unreachable.
 pub fn fetch_egresses() -> Vec<Egress> {
     let socket_path =
-        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
+        std::env::var("NETKEEP_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
 
     match send_request(&socket_path, &ControlRequest::ListEgresses) {
         Ok(ControlResponse::EgressList(egresses)) => merge_egress_availability(egresses),
@@ -188,7 +188,7 @@ pub fn merge_egress_availability(mut stored: Vec<Egress>) -> Vec<Egress> {
 /// Get current NFQUEUE status from daemon.
 pub fn get_nfqueue_status() -> anyhow::Result<(bool, Option<u16>)> {
     let socket_path =
-        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
+        std::env::var("NETKEEP_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
 
     match send_request(&socket_path, &ControlRequest::Health)? {
         ControlResponse::Health {
@@ -204,7 +204,7 @@ pub fn get_nfqueue_status() -> anyhow::Result<(bool, Option<u16>)> {
 /// Toggle NFQUEUE on or off.
 pub fn set_nfqueue_enabled(enabled: bool) -> anyhow::Result<()> {
     let socket_path =
-        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
+        std::env::var("NETKEEP_SOCKET_PATH").unwrap_or_else(|_| SOCKET_PATH.to_string());
 
     match send_request(&socket_path, &ControlRequest::SetNfqueueEnabled { enabled })? {
         ControlResponse::Ok => Ok(()),

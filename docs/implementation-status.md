@@ -1,4 +1,4 @@
-# LogiGuard Current Implementation State
+# Netkeep Current Implementation State
 
 **Test Status:** 180 tests passing (`cargo test --workspace`)
 **Phase:** 4 / 5 (GPUI UI complete, rule scope selection implemented)
@@ -71,7 +71,7 @@
 
 ### Phase 4: GPUI Interface ✓
 
-- [x] New `logiguard-gpui` GPUI app
+- [x] New `netkeep-gpui` GPUI app
 - [x] Imported gpui 0.2.2 and gpui-component 0.5.1 from crates.io
 - [x] Modular architecture with separate files:
   - `colors.rs` — Material Design 3 dark theme color constants (from HTML design spec)
@@ -83,7 +83,7 @@
   - `components/header.rs` — security icon, CONNECTION INTERCEPTED title, circular countdown ring, AUTO-DENY label
   - `components/flow_info.rs` — grid layout with colored badges (teal protocol, IP/direction chips)
   - `components/action_footer.rs` — rule scope section (process toggle, destination scope selector, CIDR octet picker, rule summary line), duration pill, egress chips, Allow/Deny buttons with broad-rule validation
-  - `components/status_bar.rs` — centered footer with LogiGuard branding and queue status
+  - `components/status_bar.rs` — centered footer with Netkeep branding and queue status
   - `settings/mod.rs` — SettingsApp with Table/Dialog, tab switching, data sync
   - `settings/rules_tab.rs` — RulesDelegate (TableDelegate) with toggle/delete actions
   - `settings/egress_tab.rs` — EgressDelegate (TableDelegate) with type badges, delete; ID is first column
@@ -121,7 +121,7 @@
 - [x] Emulator now requests daemon-managed routed relay for `RuleAction::Route`
 - [x] Daemon owns privileged connect: **`SO_MARK`** + **`SystemRouteManager`** tables; **Tun** uses **daemon-allocated** fwmark only (never reuse WireGuard “bypass” fwmark—would egress LAN while default route is VPN). **Device** uses **`SO_BINDTODEVICE`** (Linux) + bind + mark where supported.
 - [x] Added routed connect timeout (`8s`) to avoid long hangs
-- [x] Added socket permission auto-fix (`/tmp/logiguard.sock` -> `0666`)
+- [x] Added socket permission auto-fix (`/tmp/netkeep.sock` -> `0666`)
 - [x] Added per-egress DNS host resolution in daemon routed connect path
 - [x] Added fallback to system DNS when no egress DNS is configured
 - [x] Route probes in logs: unmarked `ip route get` vs `ip route get … mark …` for debugging policy vs default route
@@ -230,8 +230,8 @@
 - **Fix:** Wrapped the settings root in `window_border()`; explicitly requested `WindowDecorations::Client` and `is_resizable: true` in `WindowOptions`; set `window_min_size = 640×420` to keep table headers and the tab bar usable. No new tests — manual resize confirms the fix.
 
 **Bug 15:** "Enable Network Interception" tray menu item appeared to do nothing.
-- **Root cause:** The `SetNfqueueEnabled` handler flipped an `AtomicBool` in `ControlService` and returned `Ok`. Nothing about nftables, the running `NfqueueProcessor`, or the kernel changed — but `Health` reported the new flag, so the GUI claimed the toggle had worked. Symptom looked "unreliable" because actual interception state was determined entirely by whether `LOGIGUARD_NFQUEUE` was set at boot.
-- **Fix:** The handler now re-applies the `inet logiguard` nftables table via `NftablesBootstrap::setup(queue, route_mark_base)` — `Some(n)` adds `queue num n` rules, `None` removes them — and only commits the cached flag in `ControlService` after the kernel update succeeds. A new pure helper `plan_nfqueue_toggle(bootstrap_present, nfqueue_num, enabled) -> NfqueueToggleAction` decides between `Apply` and `Reject` so the (bootstrap, queue, enabled) matrix is exhaustive and unit-testable. Two reject paths: nftables didn't install at boot, or `enabled=true` was requested without `LOGIGUARD_NFQUEUE` (which would queue packets to a number nobody is draining → kernel drops everything). Each reject returns an actionable error message; no state mutates on reject.
+- **Root cause:** The `SetNfqueueEnabled` handler flipped an `AtomicBool` in `ControlService` and returned `Ok`. Nothing about nftables, the running `NfqueueProcessor`, or the kernel changed — but `Health` reported the new flag, so the GUI claimed the toggle had worked. Symptom looked "unreliable" because actual interception state was determined entirely by whether `NETKEEP_NFQUEUE` was set at boot.
+- **Fix:** The handler now re-applies the `inet netkeep` nftables table via `NftablesBootstrap::setup(queue, route_mark_base)` — `Some(n)` adds `queue num n` rules, `None` removes them — and only commits the cached flag in `ControlService` after the kernel update succeeds. A new pure helper `plan_nfqueue_toggle(bootstrap_present, nfqueue_num, enabled) -> NfqueueToggleAction` decides between `Apply` and `Reject` so the (bootstrap, queue, enabled) matrix is exhaustive and unit-testable. Two reject paths: nftables didn't install at boot, or `enabled=true` was requested without `NETKEEP_NFQUEUE` (which would queue packets to a number nobody is draining → kernel drops everything). Each reject returns an actionable error message; no state mutates on reject.
 - **Tests:** 4 new tests in `apps/daemon/src/main.rs::tests` covering both reject paths and both apply paths. First unit tests this binary has ever had.
 
 ## Bug Fixes (process resolver + DB path + egress seeding, 2026-05-14)
@@ -302,7 +302,7 @@
   - `ENOENT` (queue invalidated): calls `recover()` to re-apply nftables, then `unbind()` + `Queue::open()` + `bind()`. Retries with exponential backoff (100ms → 30s cap) on failure.
   - `EINTR` / `ENOBUFS` / `EWOULDBLOCK`: simple retry with backoff (transient, self-correcting).
   - Fatal errors (`EBADF`, etc.): terminate the loop.
-  The daemon passes `|q| bootstrap.setup(Some(q), route_mark_base)` as the recover callback, which re-creates the full `inet logiguard` nftables table (idempotent).
+  The daemon passes `|q| bootstrap.setup(Some(q), route_mark_base)` as the recover callback, which re-creates the full `inet netkeep` nftables table (idempotent).
 - **Files:** `crates/enforcer/src/nfqueue.rs`, `crates/enforcer/src/dns_snoop.rs`, `apps/daemon/src/main.rs`.
 - **Tests:** +1 (`transient_error_detection`). 167 → 168.
 - **Docs:** `docs/nfqueue-packet-interception.md` — new "NFQUEUE Error Recovery" section.
@@ -379,9 +379,9 @@ Compound bug — five interacting failure modes:
 
 - **Fix:** Added `meta mark {PROXY_REDIRECT_MARK} accept` rule in `output_early` before the `queue num {q}` rule.
 
-**Bug 17:** Silent misconfiguration when transparent proxy started without NFQUEUE. If proxies existed in DB but `LOGIGUARD_NFQUEUE` was unset, the transparent proxy listened but no outbound traffic was ever marked for redirect — no error, no traffic.
+**Bug 17:** Silent misconfiguration when transparent proxy started without NFQUEUE. If proxies existed in DB but `NETKEEP_NFQUEUE` was unset, the transparent proxy listened but no outbound traffic was ever marked for redirect — no error, no traffic.
 
-- **Fix:** Daemon prints a warning: `transparent proxy is listening but LOGIGUARD_NFQUEUE is unset`.
+- **Fix:** Daemon prints a warning: `transparent proxy is listening but NETKEEP_NFQUEUE is unset`.
 
 - **Files:** [`crates/proxy-client/src/lib.rs`](../crates/proxy-client/src/lib.rs) (handshake timeouts), [`crates/proxy-client/src/transparent.rs`](../crates/proxy-client/src/transparent.rs) (IP_TRANSPARENT, IPv6 SO_ORIGINAL_DST), [`crates/enforcer/src/lib.rs`](../crates/enforcer/src/lib.rs) (PROXY_REDIRECT_MARK bypass rule), [`apps/daemon/src/main.rs`](../apps/daemon/src/main.rs) (NFQUEUE unset warning).
 
@@ -498,38 +498,38 @@ All commands support `--json` flag for structured output.
 ### Rule Management
 
 ```bash
-logiguard add-rule --action Allow --duration Permanent --process firefox 8.8.8.8
-logiguard add-rule --action Deny 1.1.1.1/24
-logiguard list-rules --json
-logiguard delete-rule my-rule-id
+netkeep add-rule --action Allow --duration Permanent --process firefox 8.8.8.8
+netkeep add-rule --action Deny 1.1.1.1/24
+netkeep list-rules --json
+netkeep delete-rule my-rule-id
 ```
 
 ### Decision Management
 
 ```bash
-logiguard list-pendings
-logiguard resolve-pending pending-123 allow
-logiguard resolve-pending pending-123 deny
+netkeep list-pendings
+netkeep resolve-pending pending-123 allow
+netkeep resolve-pending pending-123 deny
 ```
 
 ### System
 
 ```bash
-logiguard health
-logiguard show-config --json   # Detailed config + timeouts
-logiguard unlock               # Console-only recovery
+netkeep health
+netkeep show-config --json   # Detailed config + timeouts
+netkeep unlock               # Console-only recovery
 ```
 
 ## Environment Variables
 
 Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 
-- `LOGIGUARD_SOCKET_PATH` — Unix socket path (default `/tmp/logiguard.sock`)
-- `LOGIGUARD_DB_PATH` — SQLite DB location (default `~/.config/logiguard/logiguard.db`; directory created automatically)
-- `LOGIGUARD_NFQUEUE` — NFQUEUE number when packet interception enabled (optional)
-- `LOGIGUARD_DEFAULT_TIMEOUT_SECS` — Default pending timeout (default 100)
-- `LOGIGUARD_TCP_TIMEOUT_SECS`, `LOGIGUARD_UDP_TIMEOUT_SECS`, `LOGIGUARD_QUIC_TIMEOUT_SECS`, `LOGIGUARD_OTHER_TIMEOUT_SECS` — protocol overrides (fall back to default timeout when unset)
-- `LOGIGUARD_DEVICE_ROUTE_FALLBACK` — set to `1`/`true`/`yes` to allow routed device path to fall back to plain connect after failure (diagnostics only; weakens strict routing)
+- `NETKEEP_SOCKET_PATH` — Unix socket path (default `/tmp/netkeep.sock`)
+- `NETKEEP_DB_PATH` — SQLite DB location (default `~/.config/netkeep/netkeep.db`; directory created automatically)
+- `NETKEEP_NFQUEUE` — NFQUEUE number when packet interception enabled (optional)
+- `NETKEEP_DEFAULT_TIMEOUT_SECS` — Default pending timeout (default 100)
+- `NETKEEP_TCP_TIMEOUT_SECS`, `NETKEEP_UDP_TIMEOUT_SECS`, `NETKEEP_QUIC_TIMEOUT_SECS`, `NETKEEP_OTHER_TIMEOUT_SECS` — protocol overrides (fall back to default timeout when unset)
+- `NETKEEP_DEVICE_ROUTE_FALLBACK` — set to `1`/`true`/`yes` to allow routed device path to fall back to plain connect after failure (diagnostics only; weakens strict routing)
 
 ## Next Steps (Priority Order)
 
@@ -611,7 +611,7 @@ Architecture: [`docs/dns-forwarder.md`](dns-forwarder.md)
 - `crates/dns-tracker/` — userspace loader using `aya`, exposes `DnsTracker::lookup(src_ip, src_port)` + DNS forwarder (`forwarder.rs`)
 
 **DNS forwarder features (session 37–38):**
-- UDP server on `127.0.0.1:53`, env-gated via `LOGIGUARD_DNS_FORWARDER=1`
+- UDP server on `127.0.0.1:53`, env-gated via `NETKEEP_DNS_FORWARDER=1`
 - Per-query dispatch: eBPF lookup → process + domain → rule match → resolve through egress DNS
 - Proxy egress: DNS-over-SOCKS5 (TCP with 2-byte length prefix)
 - Tun egress: `SO_MARK` on outbound UDP socket for policy routing
@@ -643,27 +643,27 @@ cargo test --all
 ### Run Daemon (Requires root)
 
 ```bash
-LOGIGUARD_DB_PATH=/var/lib/logiguard/db.sqlite \
-LOGIGUARD_NFQUEUE=0 \
-  sudo ./target/debug/logiguard-daemon
+NETKEEP_DB_PATH=/var/lib/netkeep/db.sqlite \
+NETKEEP_NFQUEUE=0 \
+  sudo ./target/debug/netkeep-daemon
 ```
 
 ### Run CLI
 
 ```bash
-./target/debug/logiguard list-rules
-./target/debug/logiguard add-rule --action Allow --process firefox 8.8.8.8
-./target/debug/logiguard resolve-pending my-pending-id allow
+./target/debug/netkeep list-rules
+./target/debug/netkeep add-rule --action Allow --process firefox 8.8.8.8
+./target/debug/netkeep resolve-pending my-pending-id allow
 ```
 
 ### Run GPUI App
 
 ```bash
 # Monitor mode (default): polls daemon, spawns dialog per pending
-./target/debug/logiguard-gpui
+./target/debug/netkeep-gpui
 
 # Single decision mode: show one pending and exit
-./target/debug/logiguard-gpui --pending-id <pending-id>
+./target/debug/netkeep-gpui --pending-id <pending-id>
 ```
 
 ## CI/CD Status
@@ -689,11 +689,11 @@ LOGIGUARD_NFQUEUE=0 \
 - **Crates:** 8 (core, policy, decision, flow, enforcer, state, control, proxy-client)
 - **Apps:** 3 (daemon, CLI, GPUI)
 - **Database tables:** 6 (rules, flow_events, pending_decisions, egresses, egress_targets, egress_dns_servers, proxies)
-- **Unix socket path:** `/tmp/logiguard.sock`
+- **Unix socket path:** `/tmp/netkeep.sock`
 - **Default timeouts:** 100s (default), 5s (UDP/QUIC), 3s (other)
 - **Queue cap:** 100 pending decisions
 - **GPUI components:** Table (TableDelegate), Dialog, TabBar, Button, Checkbox, Root
 
 ## Conclusion
 
-LogiGuard is feature-complete for MVP (Phase 1-4). Core logic tested extensively (198 tests). Settings window uses gpui-component Table and Dialog for data management. Proxy support fully implemented across all crates, including connectivity test modal (HTTP HEAD on port 80 + DNS A query to 8.8.8.8:53 through proxy tunnel). Enforcement path fully wired: real ProcessResolver reads `/proc`, TLS SNI extraction populates destination domain. Ready for Phase 2 integration testing and real-world deployment.
+Netkeep is feature-complete for MVP (Phase 1-4). Core logic tested extensively (198 tests). Settings window uses gpui-component Table and Dialog for data management. Proxy support fully implemented across all crates, including connectivity test modal (HTTP HEAD on port 80 + DNS A query to 8.8.8.8:53 through proxy tunnel). Enforcement path fully wired: real ProcessResolver reads `/proc`, TLS SNI extraction populates destination domain. Ready for Phase 2 integration testing and real-world deployment.

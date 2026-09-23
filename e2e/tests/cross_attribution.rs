@@ -245,13 +245,13 @@ fn cross_attribution_scenario(udp: bool, label: &str) {
 }
 
 #[test]
-#[ignore = "needs a root logiguard daemon with NFQUEUE interception; run via `just e2e`"]
+#[ignore = "needs a root netkeep daemon with NFQUEUE interception; run via `just e2e`"]
 fn udp_shared_destination_never_cross_attributes() {
     cross_attribution_scenario(true, "udp-cross");
 }
 
 #[test]
-#[ignore = "needs a root logiguard daemon with NFQUEUE interception; run via `just e2e`"]
+#[ignore = "needs a root netkeep daemon with NFQUEUE interception; run via `just e2e`"]
 fn tcp_shared_destination_never_cross_attributes() {
     cross_attribution_scenario(false, "tcp-cross");
 }
@@ -267,7 +267,7 @@ fn tcp_shared_destination_never_cross_attributes() {
 /// the Layer-0 cache for the destination first — the exact poison the fix
 /// must resist.
 #[test]
-#[ignore = "needs a root logiguard daemon with NFQUEUE interception + docker; run via `just e2e`"]
+#[ignore = "needs a root netkeep daemon with NFQUEUE interception + docker; run via `just e2e`"]
 fn forwarded_container_traffic_is_not_attributed_to_local_process() {
     let Some(target) = preflight() else { return };
 

@@ -1,8 +1,8 @@
 //! Diagnostics instrumentation for the process-attribution path.
 //!
-//! Set `LOGIGUARD_DIAG=1` in the daemon's environment to print one structured
+//! Set `NETKEEP_DIAG=1` in the daemon's environment to print one structured
 //! line per classification stage to stderr (visible via `journalctl -u
-//! logiguardd`). The lines are designed so an incorrectly attributed packet
+//! netkeepd`). The lines are designed so an incorrectly attributed packet
 //! can be traced to the FIRST stage that produced a wrong value:
 //!
 //! ```text
@@ -17,13 +17,13 @@
 
 use std::sync::OnceLock;
 
-/// Whether diagnostics are enabled (`LOGIGUARD_DIAG=1`, checked once).
+/// Whether diagnostics are enabled (`NETKEEP_DIAG=1`, checked once).
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("LOGIGUARD_DIAG").ok().as_deref() == Some("1"))
+    *ENABLED.get_or_init(|| std::env::var("NETKEEP_DIAG").ok().as_deref() == Some("1"))
 }
 
-/// Emit a diagnostics line when `LOGIGUARD_DIAG=1`.
+/// Emit a diagnostics line when `NETKEEP_DIAG=1`.
 #[macro_export]
 macro_rules! diag {
     ($($arg:tt)*) => {

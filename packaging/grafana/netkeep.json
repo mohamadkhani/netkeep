@@ -1,5 +1,5 @@
 {
-  "description": "LogiGuard firewall daemon metrics",
+  "description": "Netkeep firewall daemon metrics",
   "editable": true,
   "graphTooltip": 1,
   "links": [],
@@ -23,10 +23,10 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_packets_received_total[1m])", "legendFormat": "received", "refId": "A" },
-        { "expr": "rate(logiguard_packets_accepted_total[1m])", "legendFormat": "accepted ({{reason}})", "refId": "B" },
-        { "expr": "rate(logiguard_packets_dropped_total[1m])", "legendFormat": "dropped ({{reason}})", "refId": "C" },
-        { "expr": "rate(logiguard_packets_parse_failed_total[1m])", "legendFormat": "parse failed", "refId": "D" }
+        { "expr": "rate(netkeep_packets_received_total[1m])", "legendFormat": "received", "refId": "A" },
+        { "expr": "rate(netkeep_packets_accepted_total[1m])", "legendFormat": "accepted ({{reason}})", "refId": "B" },
+        { "expr": "rate(netkeep_packets_dropped_total[1m])", "legendFormat": "dropped ({{reason}})", "refId": "C" },
+        { "expr": "rate(netkeep_packets_parse_failed_total[1m])", "legendFormat": "parse failed", "refId": "D" }
       ]
     },
     {
@@ -36,8 +36,8 @@
       "datasource": { "type": "prometheus", "uid": "$datasource" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
       "targets": [
-        { "expr": "sum(increase(logiguard_packets_accepted_total[5m]))", "legendFormat": "Accepted", "refId": "A" },
-        { "expr": "sum(increase(logiguard_packets_dropped_total[5m]))", "legendFormat": "Dropped", "refId": "B" }
+        { "expr": "sum(increase(netkeep_packets_accepted_total[5m]))", "legendFormat": "Accepted", "refId": "A" },
+        { "expr": "sum(increase(netkeep_packets_dropped_total[5m]))", "legendFormat": "Dropped", "refId": "B" }
       ]
     },
     {
@@ -53,9 +53,9 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_packet_processing_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
-        { "expr": "logiguard_packet_processing_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
-        { "expr": "logiguard_packet_processing_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+        { "expr": "netkeep_packet_processing_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "netkeep_packet_processing_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "netkeep_packet_processing_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
       ]
     },
     {
@@ -71,7 +71,7 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_packets_accepted_total[1m])", "legendFormat": "{{reason}}", "refId": "A" }
+        { "expr": "rate(netkeep_packets_accepted_total[1m])", "legendFormat": "{{reason}}", "refId": "A" }
       ]
     },
     {
@@ -90,9 +90,9 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_verdict_cache_entries", "legendFormat": "verdict cache", "refId": "A" },
-        { "expr": "logiguard_proc_attr_cache_entries{cache=\"ip\"}", "legendFormat": "proc attr (IP)", "refId": "B" },
-        { "expr": "logiguard_proc_attr_cache_entries{cache=\"domain\"}", "legendFormat": "proc attr (domain)", "refId": "C" }
+        { "expr": "netkeep_verdict_cache_entries", "legendFormat": "verdict cache", "refId": "A" },
+        { "expr": "netkeep_proc_attr_cache_entries{cache=\"ip\"}", "legendFormat": "proc attr (IP)", "refId": "B" },
+        { "expr": "netkeep_proc_attr_cache_entries{cache=\"domain\"}", "legendFormat": "proc attr (domain)", "refId": "C" }
       ]
     },
     {
@@ -108,7 +108,7 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_verdict_cache_evictions_total[1m])", "legendFormat": "{{reason}}", "refId": "A" }
+        { "expr": "rate(netkeep_verdict_cache_evictions_total[1m])", "legendFormat": "{{reason}}", "refId": "A" }
       ]
     },
     {
@@ -134,7 +134,7 @@
       },
       "targets": [
         {
-          "expr": "rate(logiguard_packets_accepted_total{reason=\"cache_hit\"}[5m]) / rate(logiguard_packets_received_total[5m])",
+          "expr": "rate(netkeep_packets_accepted_total{reason=\"cache_hit\"}[5m]) / rate(netkeep_packets_received_total[5m])",
           "legendFormat": "hit rate",
           "refId": "A"
         }
@@ -159,7 +159,7 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_process_resolved_total[1m])", "legendFormat": "{{result}}", "refId": "A" }
+        { "expr": "rate(netkeep_process_resolved_total[1m])", "legendFormat": "{{result}}", "refId": "A" }
       ]
     },
     {
@@ -175,8 +175,8 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_proc_resolver_cache_hits_total[1m])", "legendFormat": "hits", "refId": "A" },
-        { "expr": "rate(logiguard_proc_resolver_cache_misses_total[1m])", "legendFormat": "misses", "refId": "B" }
+        { "expr": "rate(netkeep_proc_resolver_cache_hits_total[1m])", "legendFormat": "hits", "refId": "A" },
+        { "expr": "rate(netkeep_proc_resolver_cache_misses_total[1m])", "legendFormat": "misses", "refId": "B" }
       ]
     },
     {
@@ -192,9 +192,9 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_proc_resolver_resolve_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
-        { "expr": "logiguard_proc_resolver_resolve_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
-        { "expr": "logiguard_proc_resolver_resolve_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+        { "expr": "netkeep_proc_resolver_resolve_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "netkeep_proc_resolver_resolve_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "netkeep_proc_resolver_resolve_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
       ]
     },
     {
@@ -222,7 +222,7 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_pending_decisions", "legendFormat": "pending", "refId": "A" }
+        { "expr": "netkeep_pending_decisions", "legendFormat": "pending", "refId": "A" }
       ]
     },
     {
@@ -238,11 +238,11 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_pending_created_total[1m])", "legendFormat": "created ({{protocol}})", "refId": "A" },
-        { "expr": "rate(logiguard_pending_resolved_total[1m])", "legendFormat": "resolved ({{action}})", "refId": "B" },
-        { "expr": "rate(logiguard_pending_expired_total[1m])", "legendFormat": "expired", "refId": "C" },
-        { "expr": "rate(logiguard_pending_deduplicated_total[1m])", "legendFormat": "deduped ({{type}})", "refId": "D" },
-        { "expr": "rate(logiguard_pending_overflow_total[1m])", "legendFormat": "overflow ({{policy}})", "refId": "E" }
+        { "expr": "rate(netkeep_pending_created_total[1m])", "legendFormat": "created ({{protocol}})", "refId": "A" },
+        { "expr": "rate(netkeep_pending_resolved_total[1m])", "legendFormat": "resolved ({{action}})", "refId": "B" },
+        { "expr": "rate(netkeep_pending_expired_total[1m])", "legendFormat": "expired", "refId": "C" },
+        { "expr": "rate(netkeep_pending_deduplicated_total[1m])", "legendFormat": "deduped ({{type}})", "refId": "D" },
+        { "expr": "rate(netkeep_pending_overflow_total[1m])", "legendFormat": "overflow ({{policy}})", "refId": "E" }
       ]
     },
     {
@@ -255,7 +255,7 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_pending_decisions", "legendFormat": "active pending", "refId": "A" }
+        { "expr": "netkeep_pending_decisions", "legendFormat": "active pending", "refId": "A" }
       ]
     },
     {
@@ -277,9 +277,9 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_policy_evaluations_total[1m])", "legendFormat": "evaluations", "refId": "A" },
-        { "expr": "rate(logiguard_policy_resolved_total[1m])", "legendFormat": "resolved ({{action}})", "refId": "B" },
-        { "expr": "rate(logiguard_policy_no_match_total[1m])", "legendFormat": "no match", "refId": "C" }
+        { "expr": "rate(netkeep_policy_evaluations_total[1m])", "legendFormat": "evaluations", "refId": "A" },
+        { "expr": "rate(netkeep_policy_resolved_total[1m])", "legendFormat": "resolved ({{action}})", "refId": "B" },
+        { "expr": "rate(netkeep_policy_no_match_total[1m])", "legendFormat": "no match", "refId": "C" }
       ]
     },
     {
@@ -295,9 +295,9 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_policy_evaluation_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
-        { "expr": "logiguard_policy_evaluation_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
-        { "expr": "logiguard_policy_evaluation_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+        { "expr": "netkeep_policy_evaluation_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "netkeep_policy_evaluation_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "netkeep_policy_evaluation_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
       ]
     },
     {
@@ -323,7 +323,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(logiguard_policy_resolved_total[5m])) / sum(rate(logiguard_policy_evaluations_total[5m]))",
+          "expr": "sum(rate(netkeep_policy_resolved_total[5m])) / sum(rate(netkeep_policy_evaluations_total[5m]))",
           "legendFormat": "match rate",
           "refId": "A"
         }
@@ -348,7 +348,7 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_control_requests_total[1m])", "legendFormat": "{{type}}", "refId": "A" }
+        { "expr": "rate(netkeep_control_requests_total[1m])", "legendFormat": "{{type}}", "refId": "A" }
       ]
     },
     {
@@ -364,8 +364,8 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_control_immediate_verdicts_total[1m])", "legendFormat": "immediate ({{action}})", "refId": "A" },
-        { "expr": "rate(logiguard_control_pending_created_total[1m])", "legendFormat": "pending created", "refId": "B" }
+        { "expr": "rate(netkeep_control_immediate_verdicts_total[1m])", "legendFormat": "immediate ({{action}})", "refId": "A" },
+        { "expr": "rate(netkeep_control_pending_created_total[1m])", "legendFormat": "pending created", "refId": "B" }
       ]
     },
     {
@@ -387,8 +387,8 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_dns_snoop_packets_total[1m])", "legendFormat": "packets", "refId": "A" },
-        { "expr": "rate(logiguard_dns_snoop_entries_learned_total[1m])", "legendFormat": "entries learned", "refId": "B" }
+        { "expr": "rate(netkeep_dns_snoop_packets_total[1m])", "legendFormat": "packets", "refId": "A" },
+        { "expr": "rate(netkeep_dns_snoop_entries_learned_total[1m])", "legendFormat": "entries learned", "refId": "B" }
       ]
     },
     {
@@ -404,9 +404,9 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_dns_snoop_parse_success_total[1m])", "legendFormat": "success", "refId": "A" },
-        { "expr": "rate(logiguard_dns_snoop_parse_failed_total[1m])", "legendFormat": "failed", "refId": "B" },
-        { "expr": "rate(logiguard_dns_snoop_parse_empty_total[1m])", "legendFormat": "empty", "refId": "C" }
+        { "expr": "rate(netkeep_dns_snoop_parse_success_total[1m])", "legendFormat": "success", "refId": "A" },
+        { "expr": "rate(netkeep_dns_snoop_parse_failed_total[1m])", "legendFormat": "failed", "refId": "B" },
+        { "expr": "rate(netkeep_dns_snoop_parse_empty_total[1m])", "legendFormat": "empty", "refId": "C" }
       ]
     },
     {
@@ -432,7 +432,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(logiguard_dns_snoop_parse_success_total[5m])) / sum(rate(logiguard_dns_snoop_packets_total[5m]))",
+          "expr": "sum(rate(netkeep_dns_snoop_parse_success_total[5m])) / sum(rate(netkeep_dns_snoop_packets_total[5m]))",
           "legendFormat": "success rate",
           "refId": "A"
         }
@@ -451,9 +451,9 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_dns_snoop_parse_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
-        { "expr": "logiguard_dns_snoop_parse_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
-        { "expr": "logiguard_dns_snoop_parse_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+        { "expr": "netkeep_dns_snoop_parse_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "netkeep_dns_snoop_parse_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "netkeep_dns_snoop_parse_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
       ]
     },
     {
@@ -475,10 +475,10 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_sni_extraction_attempts_total[1m])", "legendFormat": "attempts ({{kind}})", "refId": "A" },
-        { "expr": "rate(logiguard_sni_extraction_success_total[1m])", "legendFormat": "success ({{source}})", "refId": "B" },
-        { "expr": "rate(logiguard_sni_extraction_missed_total[1m])", "legendFormat": "missed ({{kind}})", "refId": "C" },
-        { "expr": "rate(logiguard_sni_extraction_skipped_total[1m])", "legendFormat": "skipped (not eligible)", "refId": "D" }
+        { "expr": "rate(netkeep_sni_extraction_attempts_total[1m])", "legendFormat": "attempts ({{kind}})", "refId": "A" },
+        { "expr": "rate(netkeep_sni_extraction_success_total[1m])", "legendFormat": "success ({{source}})", "refId": "B" },
+        { "expr": "rate(netkeep_sni_extraction_missed_total[1m])", "legendFormat": "missed ({{kind}})", "refId": "C" },
+        { "expr": "rate(netkeep_sni_extraction_skipped_total[1m])", "legendFormat": "skipped (not eligible)", "refId": "D" }
       ]
     },
     {
@@ -494,7 +494,7 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_domain_resolved_total[1m])", "legendFormat": "{{source}}", "refId": "A" }
+        { "expr": "rate(netkeep_domain_resolved_total[1m])", "legendFormat": "{{source}}", "refId": "A" }
       ]
     },
     {
@@ -520,7 +520,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(logiguard_sni_extraction_success_total[5m])) / sum(rate(logiguard_sni_extraction_attempts_total[5m]))",
+          "expr": "sum(rate(netkeep_sni_extraction_success_total[5m])) / sum(rate(netkeep_sni_extraction_attempts_total[5m]))",
           "legendFormat": "success rate",
           "refId": "A"
         }
@@ -539,9 +539,9 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_sni_extraction_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
-        { "expr": "logiguard_sni_extraction_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
-        { "expr": "logiguard_sni_extraction_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+        { "expr": "netkeep_sni_extraction_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "netkeep_sni_extraction_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "netkeep_sni_extraction_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
       ]
     },
     {
@@ -569,11 +569,11 @@
         ]
       },
       "targets": [
-        { "expr": "sum(rate(logiguard_sni_extraction_success_total[1m]))", "legendFormat": "SNI success/sec", "refId": "A" },
-        { "expr": "sum(rate(logiguard_dns_snoop_parse_success_total[1m]))", "legendFormat": "DNS parse success/sec", "refId": "B" },
-        { "expr": "sum(rate(logiguard_dns_snoop_entries_learned_total[1m]))", "legendFormat": "DNS entries learned/sec", "refId": "C" },
-        { "expr": "sum(rate(logiguard_sni_extraction_success_total[5m])) / sum(rate(logiguard_sni_extraction_attempts_total[5m]))", "legendFormat": "SNI success rate", "refId": "D" },
-        { "expr": "sum(rate(logiguard_dns_snoop_parse_success_total[5m])) / sum(rate(logiguard_dns_snoop_packets_total[5m]))", "legendFormat": "DNS parse success rate", "refId": "E" }
+        { "expr": "sum(rate(netkeep_sni_extraction_success_total[1m]))", "legendFormat": "SNI success/sec", "refId": "A" },
+        { "expr": "sum(rate(netkeep_dns_snoop_parse_success_total[1m]))", "legendFormat": "DNS parse success/sec", "refId": "B" },
+        { "expr": "sum(rate(netkeep_dns_snoop_entries_learned_total[1m]))", "legendFormat": "DNS entries learned/sec", "refId": "C" },
+        { "expr": "sum(rate(netkeep_sni_extraction_success_total[5m])) / sum(rate(netkeep_sni_extraction_attempts_total[5m]))", "legendFormat": "SNI success rate", "refId": "D" },
+        { "expr": "sum(rate(netkeep_dns_snoop_parse_success_total[5m])) / sum(rate(netkeep_dns_snoop_packets_total[5m]))", "legendFormat": "DNS parse success rate", "refId": "E" }
       ]
     },
     {
@@ -595,14 +595,14 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_packet_processing_duration{quantile=\"0.5\"}", "legendFormat": "packet", "refId": "A" },
-        { "expr": "logiguard_flow_classification_duration{quantile=\"0.5\"}", "legendFormat": "classification", "refId": "B" },
-        { "expr": "logiguard_registration_duration{quantile=\"0.5\"}", "legendFormat": "registration", "refId": "C" },
-        { "expr": "logiguard_decision_slow_path_duration{quantile=\"0.5\"}", "legendFormat": "slow path", "refId": "D" },
-        { "expr": "logiguard_policy_evaluation_duration{quantile=\"0.5\"}", "legendFormat": "policy", "refId": "E" },
-        { "expr": "logiguard_proc_resolver_resolve_duration{quantile=\"0.5\"}", "legendFormat": "proc resolve", "refId": "F" },
-        { "expr": "logiguard_sni_extraction_duration{quantile=\"0.5\"}", "legendFormat": "SNI extract", "refId": "G" },
-        { "expr": "logiguard_dns_snoop_parse_duration{quantile=\"0.5\"}", "legendFormat": "DNS parse", "refId": "H" }
+        { "expr": "netkeep_packet_processing_duration{quantile=\"0.5\"}", "legendFormat": "packet", "refId": "A" },
+        { "expr": "netkeep_flow_classification_duration{quantile=\"0.5\"}", "legendFormat": "classification", "refId": "B" },
+        { "expr": "netkeep_registration_duration{quantile=\"0.5\"}", "legendFormat": "registration", "refId": "C" },
+        { "expr": "netkeep_decision_slow_path_duration{quantile=\"0.5\"}", "legendFormat": "slow path", "refId": "D" },
+        { "expr": "netkeep_policy_evaluation_duration{quantile=\"0.5\"}", "legendFormat": "policy", "refId": "E" },
+        { "expr": "netkeep_proc_resolver_resolve_duration{quantile=\"0.5\"}", "legendFormat": "proc resolve", "refId": "F" },
+        { "expr": "netkeep_sni_extraction_duration{quantile=\"0.5\"}", "legendFormat": "SNI extract", "refId": "G" },
+        { "expr": "netkeep_dns_snoop_parse_duration{quantile=\"0.5\"}", "legendFormat": "DNS parse", "refId": "H" }
       ]
     },
     {
@@ -618,12 +618,12 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_packet_processing_duration{quantile=\"0.95\"}", "legendFormat": "packet p95", "refId": "A" },
-        { "expr": "logiguard_packet_processing_duration{quantile=\"0.99\"}", "legendFormat": "packet p99", "refId": "B" },
-        { "expr": "logiguard_decision_slow_path_duration{quantile=\"0.95\"}", "legendFormat": "slow path p95", "refId": "C" },
-        { "expr": "logiguard_decision_slow_path_duration{quantile=\"0.99\"}", "legendFormat": "slow path p99", "refId": "D" },
-        { "expr": "logiguard_flow_classification_duration{quantile=\"0.95\"}", "legendFormat": "classification p95", "refId": "E" },
-        { "expr": "logiguard_registration_duration{quantile=\"0.95\"}", "legendFormat": "registration p95", "refId": "F" }
+        { "expr": "netkeep_packet_processing_duration{quantile=\"0.95\"}", "legendFormat": "packet p95", "refId": "A" },
+        { "expr": "netkeep_packet_processing_duration{quantile=\"0.99\"}", "legendFormat": "packet p99", "refId": "B" },
+        { "expr": "netkeep_decision_slow_path_duration{quantile=\"0.95\"}", "legendFormat": "slow path p95", "refId": "C" },
+        { "expr": "netkeep_decision_slow_path_duration{quantile=\"0.99\"}", "legendFormat": "slow path p99", "refId": "D" },
+        { "expr": "netkeep_flow_classification_duration{quantile=\"0.95\"}", "legendFormat": "classification p95", "refId": "E" },
+        { "expr": "netkeep_registration_duration{quantile=\"0.95\"}", "legendFormat": "registration p95", "refId": "F" }
       ]
     },
     {
@@ -645,7 +645,7 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(logiguard_flows_classified_total[1m])", "legendFormat": "{{protocol}}", "refId": "A" }
+        { "expr": "rate(netkeep_flows_classified_total[1m])", "legendFormat": "{{protocol}}", "refId": "A" }
       ]
     },
     {
@@ -661,9 +661,9 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_flow_classification_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
-        { "expr": "logiguard_flow_classification_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
-        { "expr": "logiguard_flow_classification_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
+        { "expr": "netkeep_flow_classification_duration{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "A" },
+        { "expr": "netkeep_flow_classification_duration{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "B" },
+        { "expr": "netkeep_flow_classification_duration{quantile=\"0.99\"}", "legendFormat": "p99", "refId": "C" }
       ]
     },
     {
@@ -679,14 +679,14 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "logiguard_control_request_duration{quantile=\"0.5\"}", "legendFormat": "p50 {{type}}", "refId": "A" },
-        { "expr": "logiguard_control_request_duration{quantile=\"0.95\"}", "legendFormat": "p95 {{type}}", "refId": "B" }
+        { "expr": "netkeep_control_request_duration{quantile=\"0.5\"}", "legendFormat": "p50 {{type}}", "refId": "A" },
+        { "expr": "netkeep_control_request_duration{quantile=\"0.95\"}", "legendFormat": "p95 {{type}}", "refId": "B" }
       ]
     }
   ],
   "refresh": "10s",
   "schemaVersion": 39,
-  "tags": ["logiguard", "firewall"],
+  "tags": ["netkeep", "firewall"],
   "templating": {
     "list": [
       {
@@ -708,7 +708,7 @@
   "time": { "from": "now-15m", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
-  "title": "LogiGuard",
-  "uid": "logiguard",
+  "title": "Netkeep",
+  "uid": "netkeep",
   "version": 1
 }

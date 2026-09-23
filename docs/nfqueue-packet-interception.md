@@ -1,6 +1,6 @@
 # Packet Interception with NFQUEUE
 
-This document explains how NFQUEUE works, how LogiGuard uses it, the full path a packet travels from kernel to userspace verdict, and why this approach is Linux-only.
+This document explains how NFQUEUE works, how Netkeep uses it, the full path a packet travels from kernel to userspace verdict, and why this approach is Linux-only.
 
 ---
 
@@ -32,7 +32,7 @@ nftables OUTPUT hook  (hook priority -150)
          │  kernel holds packet in queue
          │  blocks application retransmission
          ▼
-  logiguard-daemon (userspace)
+  netkeep-daemon (userspace)
     │  recv() from /dev/nfnetlink_queue
     │  parse IP packet bytes
     │  FIN or RST flag? → evict 5-tuple verdict cache, Accept
@@ -55,7 +55,7 @@ nftables OUTPUT hook  (hook priority -150)
 
 ## nftables Setup
 
-LogiGuard programs nftables on startup via `nft` (shelled out). The rules use the `inet` family to cover both IPv4 and IPv6 in one table.
+Netkeep programs nftables on startup via `nft` (shelled out). The rules use the `inet` family to cover both IPv4 and IPv6 in one table.
 
 ### Chains and priorities
 
@@ -92,7 +92,7 @@ The three-chain dance works around this by putting the mark write **inside a lat
 ### Key rules (simplified)
 
 ```nftables
-table inet logiguard {
+table inet netkeep {
 
   # Save our routing mark into conntrack before proxy tools overwrite it.
   # Only for traffic going to physical NICs (not through throne-tun).
@@ -175,7 +175,7 @@ The daemon itself makes outbound network connections:
 - **DNS forwarder** — system DNS fallback (`forward_udp`), device-egress DNS (`resolve_via_bindtodevice`), proxy-egress DNS (`dns_over_socks`).
 - **TCP relay** — proxy connects (`connect_via_proxy_target`), device fallback connects (`connect_plain`).
 
-Without a bypass mark, these connections pass through `output_early` unmarked, hit the `queue num N` rule, and get intercepted by NFQUEUE. The process resolver correctly identifies them as belonging to `logiguard-daemon` — but that's the wrong attribution. The real application that triggered the connection is hidden behind the relay.
+Without a bypass mark, these connections pass through `output_early` unmarked, hit the `queue num N` rule, and get intercepted by NFQUEUE. The process resolver correctly identifies them as belonging to `netkeep-daemon` — but that's the wrong attribution. The real application that triggered the connection is hidden behind the relay.
 
 The fix stamps `SO_MARK(DAEMON_BYPASS_MARK)` on all daemon-originated sockets. The nftables `output_early` chain has an explicit accept rule for this mark value, placed before `queue num N`, so the daemon's own traffic bypasses NFQUEUE entirely.
 
@@ -189,7 +189,7 @@ The fix stamps `SO_MARK(DAEMON_BYPASS_MARK)` on all daemon-originated sockets. T
 
 ## Userspace Side: the `nfq` Crate
 
-LogiGuard uses the pure-Rust [`nfq`](https://crates.io/crates/nfq) crate (no libnetfilter_queue dependency).
+Netkeep uses the pure-Rust [`nfq`](https://crates.io/crates/nfq) crate (no libnetfilter_queue dependency).
 
 ```rust
 let mut queue = Queue::open()?;
@@ -212,7 +212,7 @@ loop {
 
 NFQUEUE delivers the **IP layer** of the packet — no Ethernet header. For IPv4 the buffer starts with the IP header (`version=4`, IHL, total_length…). For IPv6 it starts with the IPv6 fixed header.
 
-LogiGuard uses `etherparse::SlicedPacket::from_ip()` to parse the IP and transport headers from raw bytes. The `transport.payload()` field gives the TCP/UDP application data.
+Netkeep uses `etherparse::SlicedPacket::from_ip()` to parse the IP and transport headers from raw bytes. The `transport.payload()` field gives the TCP/UDP application data.
 
 ---
 
@@ -223,7 +223,7 @@ LogiGuard uses `etherparse::SlicedPacket::from_ip()` to parse the IP and transpo
 | `Accept` | Forwards packet to next hook / NIC | Connection proceeds |
 | `Drop` | Discards packet silently | Application sees timeout / retransmit |
 
-There is no "reject with ICMP" option in NFQUEUE verdicts — only accept or drop. LogiGuard drops unknown flows; the application retransmits after the user makes a decision. When the user allows, subsequent packets match an allow rule and are accepted immediately.
+There is no "reject with ICMP" option in NFQUEUE verdicts — only accept or drop. Netkeep drops unknown flows; the application retransmits after the user makes a decision. When the user allows, subsequent packets match an allow rule and are accepted immediately.
 
 ---
 
@@ -276,15 +276,15 @@ This is safe: accepting SYN/ACK does not let application data through; the clien
 
 ## Routing Mark Coexistence
 
-Logiguard uses `SO_MARK` on its own relay sockets to force them through specific routing tables (for VPN/device routing). These marks must survive other tools (e.g. throne, sing-box) that also use `SO_MARK` or `iptables -j MARK`.
+Netkeep uses `SO_MARK` on its own relay sockets to force them through specific routing tables (for VPN/device routing). These marks must survive other tools (e.g. throne, sing-box) that also use `SO_MARK` or `iptables -j MARK`.
 
 The solution uses **conntrack marks** as stable per-connection storage:
 
-1. `output_nat` (priority -199, runs first): saves LogiGuard's fwmark into `ct mark` before any proxy can overwrite it.
+1. `output_nat` (priority -199, runs first): saves Netkeep's fwmark into `ct mark` before any proxy can overwrite it.
 2. Proxy runs at priority 0, overwrites `meta mark`.
 3. `output_early` (priority -150): reads `ct mark`, restores `meta mark`, accepts the packet so it is not re-queued.
 
-The routing decision therefore sees LogiGuard's mark, not the proxy's. The `LOGIGUARD_ROUTE_MARK_BASE` env var (default 20000) sets the threshold — any mark ≥ this value belongs to LogiGuard.
+The routing decision therefore sees Netkeep's mark, not the proxy's. The `NETKEEP_ROUTE_MARK_BASE` env var (default 20000) sets the threshold — any mark ≥ this value belongs to Netkeep.
 
 ---
 
@@ -418,7 +418,7 @@ A cross-platform firewall daemon would need:
 - **macOS:** `NEFilterDataProvider` for flow-level control (host/port/process, no raw bytes); or a TUN-based approach for raw packet access
 - **Windows:** WinDivert for raw packets; or WFP callout driver for deep kernel integration
 
-LogiGuard currently targets Linux only. Platform abstractions would live behind the `NftablesBootstrap`, `PacketSource`, and `VerdictSink` traits in the `enforcer` crate — the decision engine and policy layer are already platform-agnostic.
+Netkeep currently targets Linux only. Platform abstractions would live behind the `NftablesBootstrap`, `PacketSource`, and `VerdictSink` traits in the `enforcer` crate — the decision engine and policy layer are already platform-agnostic.
 
 ---
 
@@ -438,7 +438,7 @@ The netlink socket between the kernel and `NfqueueProcessor` / `DnsSnoopWorker` 
 
 ### ENOENT recovery flow
 
-`ENOENT` means the kernel no longer has a queue configuration matching our binding — typically because someone (systemd, network manager, or the user) flushed the `inet logiguard` nftables table, or the TUN interface that the INPUT chain referenced was removed.
+`ENOENT` means the kernel no longer has a queue configuration matching our binding — typically because someone (systemd, network manager, or the user) flushed the `inet netkeep` nftables table, or the TUN interface that the INPUT chain referenced was removed.
 
 Retrying `recv()` on the same socket is useless — the kernel won't deliver packets to a dead binding. The `run_loop()` method takes a `recover(queue_num)` callback that:
 

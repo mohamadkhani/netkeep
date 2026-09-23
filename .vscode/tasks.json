@@ -4,7 +4,7 @@
         {
             "label": "build-daemon",
             "type": "shell",
-            "command": "cargo build -p logiguard-daemon",
+            "command": "cargo build -p netkeep-daemon",
             "group": "build",
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -13,7 +13,7 @@
         {
             "label": "build-gpui",
             "type": "shell",
-            "command": "cargo build -p logiguard-gpui",
+            "command": "cargo build -p netkeep-gpui",
             "group": "build",
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -22,7 +22,7 @@
         {
             "label": "build-emulator",
             "type": "shell",
-            "command": "cargo build -p logiguard-emulator",
+            "command": "cargo build -p netkeep-emulator",
             "group": "build",
             "options": {
                 "cwd": "${workspaceFolder}"

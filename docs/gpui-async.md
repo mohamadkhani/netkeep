@@ -335,7 +335,7 @@ fn start_polling(state: Entity<AppState>, cx: &mut App) {
 }
 ```
 
-This is the pattern used in LogiGuard GPUI app for polling daemon every 1 second.
+This is the pattern used in Netkeep GPUI app for polling daemon every 1 second.
 
 ## Testing Async
 

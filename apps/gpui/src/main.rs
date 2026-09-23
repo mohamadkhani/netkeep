@@ -22,19 +22,19 @@ use tray::{spawn_tray, TrayAction};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    diag_log(&format!("logiguard-gpui starting, args={:?}", args));
+    diag_log(&format!("netkeep-gpui starting, args={:?}", args));
 
     if let Some(idx) = args.iter().position(|a| a == "--pending-id") {
         let pending_id = args.get(idx + 1).expect("--pending-id requires a value");
         run_gui(pending_id.to_string());
     } else if args.iter().any(|a| a == "--headless-monitor") {
         // Legacy: poll only (no tray). Useful for automated tests.
-        let socket_path = std::env::var("LOGIGUARD_SOCKET_PATH")
+        let socket_path = std::env::var("NETKEEP_SOCKET_PATH")
             .unwrap_or_else(|_| daemon::SOCKET_PATH.to_string());
-        let gui_command = std::env::var("LOGIGUARD_GUI_COMMAND").unwrap_or_else(|_| {
+        let gui_command = std::env::var("NETKEEP_GUI_COMMAND").unwrap_or_else(|_| {
             std::env::current_exe()
                 .map(|e| e.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "logiguard-gpui".to_string())
+                .unwrap_or_else(|_| "netkeep-gpui".to_string())
         });
         monitor::poll_decision_spawner(socket_path, gui_command);
     } else {
@@ -42,13 +42,13 @@ fn main() {
     }
 }
 
-/// Append a diagnostic line to `/tmp/logiguard-tray.log`. The tray monitor is
+/// Append a diagnostic line to `/tmp/netkeep-tray.log`. The tray monitor is
 /// typically launched via a desktop file whose stderr is not visible, so
 /// `eprintln!` output would be lost. Check the file when debugging tray behavior.
 fn diag_log(msg: &str) {
     use std::io::Write;
-    let path = std::env::var("LOGIGUARD_TRAY_LOG")
-        .unwrap_or_else(|_| "/tmp/logiguard-tray.log".to_string());
+    let path = std::env::var("NETKEEP_TRAY_LOG")
+        .unwrap_or_else(|_| "/tmp/netkeep-tray.log".to_string());
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -61,19 +61,19 @@ fn diag_log(msg: &str) {
 
 fn run_tray_monitor() {
     let socket_path =
-        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| daemon::SOCKET_PATH.to_string());
-    let gui_command = std::env::var("LOGIGUARD_GUI_COMMAND").unwrap_or_else(|_| {
+        std::env::var("NETKEEP_SOCKET_PATH").unwrap_or_else(|_| daemon::SOCKET_PATH.to_string());
+    let gui_command = std::env::var("NETKEEP_GUI_COMMAND").unwrap_or_else(|_| {
         std::env::current_exe()
             .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "logiguard-gpui".to_string())
+            .unwrap_or_else(|_| "netkeep-gpui".to_string())
     });
 
     diag_log(&format!(
-        "logiguard-gpui: ksni tray + pending monitor, socket {socket_path}"
+        "netkeep-gpui: ksni tray + pending monitor, socket {socket_path}"
     ));
     #[cfg(target_os = "linux")]
     diag_log(
-        "logiguard-gpui: GNOME hides legacy tray icons unless the shell extension          \"AppIndicator and KStatusNotifierItem Support\" (or equivalent) is enabled.",
+        "netkeep-gpui: GNOME hides legacy tray icons unless the shell extension          \"AppIndicator and KStatusNotifierItem Support\" (or equivalent) is enabled.",
     );
 
     // Sync the tray icon with the current NFQUEUE state on startup.
@@ -156,7 +156,7 @@ fn run_tray_monitor() {
                                             ..Default::default()
                                         },
                                         |window, cx| {
-                                            window.set_app_id("logiguard");
+                                            window.set_app_id("netkeep");
                                             let view =
                                                 cx.new(|cx| SettingsApp::new(state, window, cx));
                                             cx.new(|cx| Root::new(view, window, cx))

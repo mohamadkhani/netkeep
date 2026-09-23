@@ -33,13 +33,13 @@ use state_store::{
 };
 use tokio::sync::broadcast;
 
-const DEFAULT_SOCKET_PATH: &str = "/tmp/logiguard.sock";
-const DEFAULT_DB_RELATIVE: &str = ".config/logiguard/logiguard.db";
+const DEFAULT_SOCKET_PATH: &str = "/tmp/netkeep.sock";
+const DEFAULT_DB_RELATIVE: &str = ".config/netkeep/netkeep.db";
 const DEFAULT_TIMEOUT_SECS: u64 = 100;
 const DEFAULT_PENDING_LIMIT: usize = 100;
 const ROUTED_CONNECT_TIMEOUT_SECS: u64 = 8;
-const DEVICE_ROUTE_FALLBACK_ENV: &str = "LOGIGUARD_DEVICE_ROUTE_FALLBACK";
-const ROUTE_MARK_BASE_ENV: &str = "LOGIGUARD_ROUTE_MARK_BASE";
+const DEVICE_ROUTE_FALLBACK_ENV: &str = "NETKEEP_DEVICE_ROUTE_FALLBACK";
+const ROUTE_MARK_BASE_ENV: &str = "NETKEEP_ROUTE_MARK_BASE";
 
 struct RoutePolicyState {
     next_mark: u32,
@@ -493,7 +493,7 @@ fn fwmark_for_route_probe(target: &RouteTarget) -> Option<u32> {
 ///
 /// `daemon_mark` is stamped via `SO_MARK` so nftables bypasses NFQUEUE for
 /// the daemon's own relay connections. Without this, the daemon's outbound
-/// packets are intercepted and attributed to "logiguard-daemon" instead of
+/// packets are intercepted and attributed to "netkeep-daemon" instead of
 /// the real application.
 fn connect_plain(addrs: &[SocketAddr], daemon_mark: u32) -> Result<TcpStream, String> {
     let mut last_err: Option<String> = None;
@@ -733,7 +733,7 @@ struct DaemonRuntime {
     /// case there's nothing to toggle).
     bootstrap: Option<Arc<dyn NftablesBootstrap>>,
     /// Queue number to use when interception is *enabled*. When `None`, the
-    /// daemon was started without `LOGIGUARD_NFQUEUE` and the tray toggle
+    /// daemon was started without `NETKEEP_NFQUEUE` and the tray toggle
     /// can't bring interception up on its own — there is no userspace
     /// `NfqueueProcessor` running to drain the queue, so installing
     /// `queue num N` rules would just drop every packet.
@@ -770,7 +770,7 @@ fn plan_nfqueue_toggle(
     }
     if enabled && nfqueue_num.is_none() {
         return NfqueueToggleAction::Reject(
-            "cannot enable interception: daemon was started without LOGIGUARD_NFQUEUE — without a queue number there is no NfqueueProcessor draining packets, so adding `queue num N` rules would drop every flow. Set LOGIGUARD_NFQUEUE (e.g. 0) in the systemd unit and restart logiguardd.".to_string(),
+            "cannot enable interception: daemon was started without NETKEEP_NFQUEUE — without a queue number there is no NfqueueProcessor draining packets, so adding `queue num N` rules would drop every flow. Set NETKEEP_NFQUEUE (e.g. 0) in the systemd unit and restart netkeepd.".to_string(),
         );
     }
     NfqueueToggleAction::Apply {
@@ -893,8 +893,8 @@ fn main() {
     metrics::start_metrics_server();
 
     let socket_path =
-        std::env::var("LOGIGUARD_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
-    let db_path = std::env::var("LOGIGUARD_DB_PATH").unwrap_or_else(|_| {
+        std::env::var("NETKEEP_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
+    let db_path = std::env::var("NETKEEP_DB_PATH").unwrap_or_else(|_| {
         std::env::var("HOME")
             .map(|h| format!("{h}/{DEFAULT_DB_RELATIVE}"))
             .unwrap_or_else(|_| format!("/root/{DEFAULT_DB_RELATIVE}"))
@@ -909,11 +909,11 @@ fn main() {
         }
     }
     let default_timeout_secs =
-        parse_env_u64("LOGIGUARD_DEFAULT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
-    let tcp_timeout_secs = parse_env_u64("LOGIGUARD_TCP_TIMEOUT_SECS", default_timeout_secs);
-    let udp_timeout_secs = parse_env_u64("LOGIGUARD_UDP_TIMEOUT_SECS", default_timeout_secs);
-    let quic_timeout_secs = parse_env_u64("LOGIGUARD_QUIC_TIMEOUT_SECS", default_timeout_secs);
-    let other_timeout_secs = parse_env_u64("LOGIGUARD_OTHER_TIMEOUT_SECS", default_timeout_secs);
+        parse_env_u64("NETKEEP_DEFAULT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
+    let tcp_timeout_secs = parse_env_u64("NETKEEP_TCP_TIMEOUT_SECS", default_timeout_secs);
+    let udp_timeout_secs = parse_env_u64("NETKEEP_UDP_TIMEOUT_SECS", default_timeout_secs);
+    let quic_timeout_secs = parse_env_u64("NETKEEP_QUIC_TIMEOUT_SECS", default_timeout_secs);
+    let other_timeout_secs = parse_env_u64("NETKEEP_OTHER_TIMEOUT_SECS", default_timeout_secs);
     let route_mark_base: u32 = std::env::var(ROUTE_MARK_BASE_ENV)
         .ok()
         .and_then(|s| s.parse().ok())
@@ -933,7 +933,7 @@ fn main() {
         }
     };
     // Ensure non-root clients (GPUI/CLI) can connect even when daemon runs as root.
-    // This avoids recurring "Permission denied (os error 13)" on /tmp/logiguard.sock.
+    // This avoids recurring "Permission denied (os error 13)" on /tmp/netkeep.sock.
     if let Err(err) = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666)) {
         eprintln!("failed to set socket permissions on {socket_path}: {err}");
         std::process::exit(1);
@@ -1036,8 +1036,8 @@ fn main() {
         }
     });
 
-    // Parse optional NFQUEUE config (set LOGIGUARD_NFQUEUE=<queue_num>).
-    let nfqueue_num: Option<u16> = std::env::var("LOGIGUARD_NFQUEUE")
+    // Parse optional NFQUEUE config (set NETKEEP_NFQUEUE=<queue_num>).
+    let nfqueue_num: Option<u16> = std::env::var("NETKEEP_NFQUEUE")
         .ok()
         .and_then(|s| s.trim().parse().ok());
 
@@ -1046,8 +1046,8 @@ fn main() {
     let dns_cache = SniDnsCache::new();
 
     // Start eBPF DNS tracker + DNS forwarder if enabled.
-    // Set LOGIGUARD_DNS_FORWARDER=1 to enable (requires root + CAP_BPF).
-    if std::env::var("LOGIGUARD_DNS_FORWARDER")
+    // Set NETKEEP_DNS_FORWARDER=1 to enable (requires root + CAP_BPF).
+    if std::env::var("NETKEEP_DNS_FORWARDER")
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
@@ -1190,12 +1190,12 @@ fn main() {
     // Always install the nftables protection chains — they preserve our route
     // mark across other tools' marking chains (e.g. throne, sing-box) so that
     // device-routed relay connections actually leave via the requested NIC.
-    // NFQUEUE rules are only added when LOGIGUARD_NFQUEUE is set.
+    // NFQUEUE rules are only added when NETKEEP_NFQUEUE is set.
     let bs: Arc<dyn NftablesBootstrap> = Arc::new(SystemNftablesBootstrap);
     if !proxy_redirects.is_empty() && nfqueue_num.is_none() {
         eprintln!(
-            "warning: transparent proxy is listening but LOGIGUARD_NFQUEUE is unset — \
-             outbound traffic will not be marked for proxy redirect (set LOGIGUARD_NFQUEUE, e.g. 0)"
+            "warning: transparent proxy is listening but NETKEEP_NFQUEUE is unset — \
+             outbound traffic will not be marked for proxy redirect (set NETKEEP_NFQUEUE, e.g. 0)"
         );
     }
 
@@ -1355,14 +1355,14 @@ mod tests {
 
     #[test]
     fn enable_rejected_when_no_queue_configured() {
-        // No LOGIGUARD_NFQUEUE → no NfqueueProcessor draining the queue.
+        // No NETKEEP_NFQUEUE → no NfqueueProcessor draining the queue.
         // Adding `queue num N` rules now would drop every packet, so we
         // refuse with an actionable error message and leave nftables alone.
         let action = plan_nfqueue_toggle(true, None, true);
         match action {
             NfqueueToggleAction::Reject(msg) => {
                 assert!(
-                    msg.contains("LOGIGUARD_NFQUEUE"),
+                    msg.contains("NETKEEP_NFQUEUE"),
                     "error message must point operators at the env var, got: {msg}"
                 );
             }
@@ -1387,7 +1387,7 @@ mod tests {
 
     #[test]
     fn enable_applies_with_configured_queue() {
-        // The happy path: production systemd unit sets LOGIGUARD_NFQUEUE=0.
+        // The happy path: production systemd unit sets NETKEEP_NFQUEUE=0.
         // Enabling re-applies nftables WITH `queue num 0` rules so the
         // already-running processor starts receiving packets again.
         assert_eq!(

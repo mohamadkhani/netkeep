@@ -1,16 +1,16 @@
-# OpenSnitch vs LogiGuard: Detailed Comparison & Analysis
+# OpenSnitch vs Netkeep: Detailed Comparison & Analysis
 
 **Date:** 2026-05-06  
-**Prepared for:** LogiGuard Development  
+**Prepared for:** Netkeep Development  
 **Purpose:** Architectural and feature comparison to identify learning opportunities
 
 ---
 
 ## Executive Summary
 
-OpenSnitch is a mature, battle-tested application firewall (13.6k GitHub stars, 5+ years development). LogiGuard is a Rust-first rewrite focusing on security, simplicity, and modern architecture.
+OpenSnitch is a mature, battle-tested application firewall (13.6k GitHub stars, 5+ years development). Netkeep is a Rust-first rewrite focusing on security, simplicity, and modern architecture.
 
-**Key Takeaway:** OpenSnitch excels at flexibility and enterprise features. LogiGuard excels at type safety and deterministic behavior. Together, they suggest a powerful feature roadmap.
+**Key Takeaway:** OpenSnitch excels at flexibility and enterprise features. Netkeep excels at type safety and deterministic behavior. Together, they suggest a powerful feature roadmap.
 
 ---
 
@@ -38,7 +38,7 @@ OpenSnitch is a mature, battle-tested application firewall (13.6k GitHub stars, 
   (kernel)  (OS)    (kernel firewall)
 ```
 
-### LogiGuard Architecture
+### Netkeep Architecture
 ```
 ┌─────────────────────────────────────────┐
 │ GPUI App (Rust)                         │
@@ -64,7 +64,7 @@ OpenSnitch is a mature, battle-tested application firewall (13.6k GitHub stars, 
 
 ## Key Technical Differences
 
-| Aspect | OpenSnitch | LogiGuard |
+| Aspect | OpenSnitch | Netkeep |
 |--------|-----------|-----------|
 | **Daemon Language** | Go | Rust |
 | **UI Language** | Python (PyQt5) | Rust (GPUI) |
@@ -123,7 +123,7 @@ OpenSnitch is a mature, battle-tested application firewall (13.6k GitHub stars, 
 
 ---
 
-### LogiGuard Rules
+### Netkeep Rules
 
 **Storage:** SQLite database
 
@@ -187,7 +187,7 @@ enum DestinationMatcher {
 
 ---
 
-### LogiGuard Current Workflow
+### Netkeep Current Workflow
 
 **1. Default (Immediate)**
 - Unknown flow → pending decision
@@ -204,7 +204,7 @@ enum DestinationMatcher {
 
 ## Feature Comparison Matrix
 
-| Feature | OpenSnitch | LogiGuard | Priority |
+| Feature | OpenSnitch | Netkeep | Priority |
 |---------|-----------|-----------|----------|
 | Basic allow/deny | ✅ | ✅ | Core |
 | Pending queue | ✅ (30s) | ✅ (100 cap) | Core |
@@ -226,14 +226,14 @@ enum DestinationMatcher {
 
 ---
 
-## What LogiGuard Can Learn from OpenSnitch
+## What Netkeep Can Learn from OpenSnitch
 
 ### 1. Learning Mode Workflow ⭐⭐⭐
 **Priority:** High (Phase 5)
 
 OpenSnitch's strategy: Start permissive (observe), then transition to restrictive (enforce).
 
-**Implementation suggestion for LogiGuard:**
+**Implementation suggestion for Netkeep:**
 ```
 enum FirewallMode {
   Learning,        // Allow all, log everything (observation)
@@ -251,7 +251,7 @@ enum FirewallMode {
 
 OpenSnitch supports: `simple`, `regexp`, `network`, `range`, `lists`
 
-**LogiGuard could add:**
+**Netkeep could add:**
 ```rust
 enum DestinationMatcher {
   // Current
@@ -286,11 +286,11 @@ enum ProcessMatcher {
 
 **Example:**
 ```bash
-# Current LogiGuard
-logiguard add-rule --action Deny --process python
+# Current Netkeep
+netkeep add-rule --action Deny --process python
 
 # Proposed with args
-logiguard add-rule --action Allow --process "firefox" --args "--safe-mode"
+netkeep add-rule --action Allow --process "firefox" --args "--safe-mode"
 ```
 
 ### 4. Rule Re-enforcement Atomicity ⭐
@@ -318,7 +318,7 @@ ControlService::tick() {
 
 OpenSnitch exports to Grafana/Loki and ELK Stack.
 
-**LogiGuard could add:**
+**Netkeep could add:**
 ```rust
 enum ExportTarget {
   Syslog(String),              // localhost:514
@@ -335,7 +335,7 @@ FlowRepository::log_to_siem(flow_event, action)?;
 
 OpenSnitch handles both inbound and outbound (though inbound is experimental).
 
-**LogiGuard currently:** Outbound only. Could extend with:
+**Netkeep currently:** Outbound only. Could extend with:
 ```rust
 enum TrafficDirection {
   Outbound,
@@ -357,7 +357,7 @@ OpenSnitch has centralized dashboard for multiple machines.
 
 ---
 
-## What LogiGuard Does Better
+## What Netkeep Does Better
 
 ### 1. Type-Safe Rust ⭐⭐⭐
 **Advantage:** Memory safety, no GC pauses, no data races
@@ -366,7 +366,7 @@ OpenSnitch:
 - Go: GC pauses (unpredictable latency)
 - Python UI: GIL contention (single-threaded)
 
-LogiGuard:
+Netkeep:
 - Rust: No GC, compile-time safety guarantees
 - Deterministic performance: suitable for security-critical code
 
@@ -375,7 +375,7 @@ LogiGuard:
 
 OpenSnitch: Fixed 30 seconds for all protocols
 
-LogiGuard:
+Netkeep:
 ```rust
 // Configurable per protocol
 TCP: 100s    // Can retry, tolerate delays
@@ -393,12 +393,12 @@ Other: 3s    // Safer default
 
 **Why OpenSnitch doesn't have it:** Go binary starts faster; Rust adds safety checks.
 
-**Why LogiGuard has it:** Prevents privilege escalation before daemon initializes.
+**Why Netkeep has it:** Prevents privilege escalation before daemon initializes.
 
 ### 4. Wildcard Domain Semantics ⭐⭐
 **Advantage:** Prevents apex spoofing
 
-LogiGuard:
+Netkeep:
 ```rust
 // Rules
 "*.example.com" ≠ "example.com"  // ✅ Must be explicit
@@ -418,7 +418,7 @@ OpenSnitch:
 - Python GIL (slower UI responsiveness)
 - Deployment more complex
 
-LogiGuard:
+Netkeep:
 - Single Rust binary
 - Compiles to native code
 - ~10x smaller deployment footprint
@@ -432,7 +432,7 @@ JSON file → Go unmarshaling → Python pickle → Python display
 // Multiple type conversions, error surface
 ```
 
-LogiGuard:
+Netkeep:
 ```
 SQLite → Rust struct → JSON RPC → Rust GPUI rendering
 // Single type system throughout
@@ -441,7 +441,7 @@ SQLite → Rust struct → JSON RPC → Rust GPUI rendering
 ### 7. Async-First Architecture ⭐⭐
 **Advantage:** Prepared for scalability
 
-LogiGuard: Built on async Tokio (ready for thousands of pending decisions)
+Netkeep: Built on async Tokio (ready for thousands of pending decisions)
 
 OpenSnitch: Thread pools + Python GIL (doesn't scale beyond single machine)
 
@@ -480,7 +480,7 @@ OpenSnitch: Thread pools + Python GIL (doesn't scale beyond single machine)
 - **Memory footprint:** Go runtime ~50MB, Python ~100MB+
 - **Latency:** Varies (GC pauses, lock contention)
 
-### LogiGuard
+### Netkeep
 - **Rule matching:** O(n) linear scan, priority-descending precedence (faster in practice: early match)
 - **UI responsiveness:** Native Rust, no GIL
 - **Memory footprint:** ~5MB total (daemon + UI)
@@ -497,7 +497,7 @@ OpenSnitch: Thread pools + Python GIL (doesn't scale beyond single machine)
 - ⚠️ GC pauses could bypass timeouts
 - ⭐ Supports inbound + outbound
 
-### LogiGuard
+### Netkeep
 - ⚠️ New codebase (not battle-tested)
 - ✅ Rust memory safety (no buffer overflows, no use-after-free)
 - ✅ Fail-close boot gate (prevents privilege escalation window)
@@ -515,12 +515,12 @@ systemctl start opensnitch
 opensnitch-ui  # Starts Python GUI
 ```
 
-### LogiGuard
+### Netkeep
 ```bash
 cargo build --release
-sudo cp target/release/logiguard-daemon /usr/local/bin/
-sudo systemctl start logiguard-daemon
-./logiguard-gpui  # Native binary
+sudo cp target/release/netkeep-daemon /usr/local/bin/
+sudo systemctl start netkeep-daemon
+./netkeep-gpui  # Native binary
 ```
 
 ---
@@ -533,7 +533,7 @@ sudo systemctl start logiguard-daemon
 - Require flexibility in rule operators (regex, ranges, blocklists)
 - Willing to accept Python/Go runtime overhead for feature richness
 
-### When to Use LogiGuard
+### When to Use Netkeep
 - Security-critical environment where determinism matters
 - Single-machine deployment (home lab, workstation)
 - Prefer type-safe Rust codebase
@@ -542,13 +542,13 @@ sudo systemctl start logiguard-daemon
 - Prefer native UI (no Python runtime)
 
 ### Hybrid Approach
-Consider LogiGuard MVP as foundation, borrow OpenSnitch's:
+Consider Netkeep MVP as foundation, borrow OpenSnitch's:
 - ✅ Learning mode workflow (observation → restriction)
 - ✅ Advanced operators (regex, ranges, lists)
 - ✅ Rule suggestion engine (from observed patterns)
 - ✅ SIEM export infrastructure
 
-**Timeline:** LogiGuard MVP complete. Roadmap through Phase 5 should address all OpenSnitch capabilities while maintaining Rust safety advantages.
+**Timeline:** Netkeep MVP complete. Roadmap through Phase 5 should address all OpenSnitch capabilities while maintaining Rust safety advantages.
 
 ---
 
@@ -565,7 +565,7 @@ func main() {
 }
 ```
 
-### LogiGuard Daemon Entry
+### Netkeep Daemon Entry
 ```rust
 #[tokio::main]
 async fn main() {
@@ -593,7 +593,7 @@ for rule in rules:
 return DEFAULT_DENY
 ```
 
-**LogiGuard:**
+**Netkeep:**
 ```rust
 let rules = repo.list_enabled();
 // Already sorted by priority DESC (built into matcher)
@@ -608,5 +608,5 @@ Some(RuleAction::Ask)  // Unknown flow
 ---
 
 **Document prepared:** 2026-05-06  
-**Comparison based on:** OpenSnitch main branch, LogiGuard develop branch  
-**Next review:** After LogiGuard Phase 2 completion
+**Comparison based on:** OpenSnitch main branch, Netkeep develop branch  
+**Next review:** After Netkeep Phase 2 completion

@@ -1,4 +1,4 @@
-# LogiGuard Development Guide
+# Netkeep Development Guide
 
 ## Documentation Reference Rules
 
@@ -101,7 +101,7 @@ See [`docs/gpui-components.md`](docs/gpui-components.md) → Export Map for the 
 - Storage: SQLite
 - Recovery: physical-console-only emergency unlock; boot blocks until daemon healthy
 
-### Linux packages required to build `logiguard-gpui`
+### Linux packages required to build `netkeep-gpui`
 
 The system tray is a vendored **ksni** crate (pure-Rust SNI over `zbus`) — it links no GTK or libappindicator. The remaining system-library needs come from GPUI itself (font-kit, GPU, input). On Linux you need at least:
 
@@ -131,13 +131,13 @@ See [`docs/architecture.md`](docs/architecture.md) for full component diagrams, 
 | `crates/enforcer` | nftables + NFQUEUE integration + verdict bridge |
 | `crates/state-store` | SQLite repositories and migrations |
 | `crates/control-api` | Unix socket protocol schema |
-| `apps/daemon` | `logiguardd` — root systemd daemon |
-| `apps/cli` | `logiguard-cli` — operator interface |
-| `apps/gpui` | `logiguard-gpui` — GPUI decision UI + tray + settings |
+| `apps/daemon` | `netkeepd` — root systemd daemon |
+| `apps/cli` | `netkeep-cli` — operator interface |
+| `apps/gpui` | `netkeep-gpui` — GPUI decision UI + tray + settings |
 
 ### Daemon–UI Communication
 
-Bidirectional Unix socket at `/tmp/logiguard.sock`. JSON-lines transport. See [`docs/unix-sockets.md`](docs/unix-sockets.md).
+Bidirectional Unix socket at `/tmp/netkeep.sock`. JSON-lines transport. See [`docs/unix-sockets.md`](docs/unix-sockets.md).
 
 ### Data Model Summary
 
@@ -190,7 +190,7 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 ## 4) Open Bugs / Follow-ups
 
 - [x] **Settings window not resizable** — fixed since 2026-05-13 (session 21). Root view now wraps everything in `gpui_component::window_border()` so the resize edges + cursor change work on Linux compositors that use client-side decorations (notably GNOME / Mutter, which refuses xdg-decoration server-side requests). Also explicitly requests `WindowDecorations::Client` and sets `window_min_size = 640×420` so the user can't accidentally collapse the table headers.
-- [x] **NFQUEUE tray toggle unreliable** — fixed since 2026-05-13 (session 21). The previous handler just flipped a status bit in `ControlService` and never touched the kernel; the toggle was a no-op. Now `SetNfqueueEnabled` re-applies the nftables protection chains via `NftablesBootstrap::setup(queue, route_mark_base)` — `Some(n)` adds `queue num n` rules, `None` removes them. The cached flag is only committed *after* nftables actually applied. Gate logic is in the pure `plan_nfqueue_toggle` helper with 4 new unit tests covering the (bootstrap present, queue configured, enabled requested) matrix, including the case where the daemon was started without `LOGIGUARD_NFQUEUE` (rejected with an actionable error pointing the operator at the systemd unit). Workspace 126 → 130 tests.
+- [x] **NFQUEUE tray toggle unreliable** — fixed since 2026-05-13 (session 21). The previous handler just flipped a status bit in `ControlService` and never touched the kernel; the toggle was a no-op. Now `SetNfqueueEnabled` re-applies the nftables protection chains via `NftablesBootstrap::setup(queue, route_mark_base)` — `Some(n)` adds `queue num n` rules, `None` removes them. The cached flag is only committed *after* nftables actually applied. Gate logic is in the pure `plan_nfqueue_toggle` helper with 4 new unit tests covering the (bootstrap present, queue configured, enabled requested) matrix, including the case where the daemon was started without `NETKEEP_NFQUEUE` (rejected with an actionable error pointing the operator at the systemd unit). Workspace 126 → 130 tests.
 - [x] **Auto-seeded interface egresses polluting "Route via" selector** — fixed 2026-05-13. Daemon was calling `detect_egresses()` on every startup and upserting one Egress per local interface into the DB. The decision dialog's "Route via" showed all of them alongside user-defined ones (e.g. "TUN: throne-tun", "LAN: enp3s0"). Daemon now only ensures `eg-default` exists; per-interface availability is checked at routing time by `first_available_target()`.
 - [x] **`AwaitPendingDecision` returned `route_target: None` for Route actions** — fixed 2026-05-13. `DecisionEngine.resolved` stored only `RuleAction`; when the emulator polled `AwaitPendingDecision` after the UI had resolved via `ResolvePendingWithRule`, it received `route_target: None` and routed to the wrong interface on the first request. Second request hit the now-existing rule via `RegisterUnknownFlow` and routed correctly. Fix: `resolved` map stores `(RuleAction, Option<egress_id>)`; `resolve_pending()` takes `egress_id`; `take_resolved()` returns both; `AwaitPendingDecision` calls `resolve_route_target()` before responding. `sweep_pending()` also passes `egress_id` so sweep-resolved flows get the same treatment.
 - [ ] **Tray toggle should be single item** — currently two separate enable/disable menu items; should be one checked/unchecked toggle
@@ -199,7 +199,7 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 - [x] **Decision dialog clips content with many egresses** — fixed 2026-05-13. Window height was hardcoded at 580px; replaced with dynamic estimate (~600px base + 28px per egress row, capped at 90% of display). Root container no longer uses `h_full()`/`overflow_hidden()`.
 - [x] **Default route not first in "Route via" selector** — fixed 2026-05-13. Egresses from the daemon are sorted alphabetically by id; `eg-default` can come after `eg-eth0`. Now sorted: system default first, then available, then unavailable.
 - [x] **Settings window doesn't focus when re-clicked from tray** — fully fixed 2026-07-15. Root cause: GNOME's AppIndicator extension mints the xdg-activation token inside the compositor and delivers it via the SNI `ProvideXdgActivationToken` method, which the old `tray-icon`/libappindicator did not implement. Fix: migrated the tray to a vendored, patched **ksni** (`crates/ksni/`) that implements `ProvideXdgActivationToken`; the token is stashed and fed to GPUI's `Window::activate_with_token` (GitHub GPUI fork `mohamadkhani/zed`, rev `c612da65`). Tray + settings now share one GPUI process. (Earlier notes about GTK `GdkAppLaunchContext` / `XDG_ACTIVATION_TOKEN` over a Unix socket were superseded — an app cannot mint an authoritative token for its own background window.) Details: [`docs/tray-window-focus-wayland.md`](docs/tray-window-focus-wayland.md).
-- [x] **Daemon's own connections attributed to "logiguard-daemon"** — fixed 2026-06-04. The daemon's outbound sockets (DNS forwarder system fallback, TCP relay, proxy connects) were not marked with `SO_MARK`, so nftables queued them to NFQUEUE. The process resolver correctly identified them as belonging to `logiguard-daemon` — but that's the wrong process; the real application that triggered the connection was hidden behind the relay. Fix: added `DAEMON_BYPASS_MARK` (19998, below `ROUTE_MARK_BASE` to avoid triggering policy routing) stamped via `SO_MARK` on all daemon-originated sockets. A new nftables `output_early` accept rule for this mark bypasses NFQUEUE entirely. See [`docs/nfqueue-packet-interception.md`](docs/nfqueue-packet-interception.md) → Daemon bypass mark.
+- [x] **Daemon's own connections attributed to "netkeep-daemon"** — fixed 2026-06-04. The daemon's outbound sockets (DNS forwarder system fallback, TCP relay, proxy connects) were not marked with `SO_MARK`, so nftables queued them to NFQUEUE. The process resolver correctly identified them as belonging to `netkeep-daemon` — but that's the wrong process; the real application that triggered the connection was hidden behind the relay. Fix: added `DAEMON_BYPASS_MARK` (19998, below `ROUTE_MARK_BASE` to avoid triggering policy routing) stamped via `SO_MARK` on all daemon-originated sockets. A new nftables `output_early` accept rule for this mark bypasses NFQUEUE entirely. See [`docs/nfqueue-packet-interception.md`](docs/nfqueue-packet-interception.md) → Daemon bypass mark.
 
 ## 5) Definition of Done (MVP)
 
@@ -249,7 +249,7 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 - [x] 93 tests passing
 
 ### 2026-05-06 (session 4)
-- [x] `logiguard-gpui` GPUI app with `AppState`, `DecisionApp` root view, reactive re-render
+- [x] `netkeep-gpui` GPUI app with `AppState`, `DecisionApp` root view, reactive re-render
 - [x] Background polling task; decision card with countdown, scope toggle, ALLOW/DENY
 - [x] Deep Slate dark theme
 
@@ -264,7 +264,7 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 
 ### 2026-05-08 (session 9)
 - [x] Daemon-side routed TCP relay (`OpenRoutedTcp`); per-egress DNS resolution
-- [x] Daemon sets `/tmp/logiguard.sock` permissions to `0666`
+- [x] Daemon sets `/tmp/netkeep.sock` permissions to `0666`
 
 ### 2026-05-09 (routing hardening)
 - [x] Policy tie-break: `(specificity, action_rank, rule.id)` for deterministic resolution
@@ -284,7 +284,7 @@ Key types: `Rule`, `FlowContext`, `PendingDecision`, `Egress`, `RouteTarget`, `P
 
 ### 2026-05-11 (throne bypass fix)
 - [x] `output_nat` nftables chain to bypass throne transparent proxy for device-routed connections
-- [x] Configurable `ROUTE_MARK_BASE` via `LOGIGUARD_ROUTE_MARK_BASE`
+- [x] Configurable `ROUTE_MARK_BASE` via `NETKEEP_ROUTE_MARK_BASE`
 
 ### 2026-05-11 (session 11 — egress/proxy form dialogs)
 - [x] Add/Edit Egress and Proxy form dialogs with custom design-system modal header/footer
@@ -383,19 +383,19 @@ Two long-standing follow-up items from `## 4) Open Bugs / Follow-ups` (lines 172
   - **No new tests** — GPUI window plumbing isn't unit-testable from this side; the build + manual resize confirms the fix.
 
 - [x] **NFQUEUE tray toggle unreliable.**
-  - **Root cause.** The `SetNfqueueEnabled { enabled }` handler in `apps/daemon/src/main.rs` just forwarded the request to `ControlService::handle`, which set an `AtomicBool` and returned `Ok`. Nothing about nftables, the kernel, or the running `NfqueueProcessor` changed. `Health` *reported* the new flag, so the GUI thought the toggle had worked, but actual interception was unchanged. The "unreliable" symptom was really "always a no-op" — depending on whether `LOGIGUARD_NFQUEUE` was set at boot, the user saw either always-on or always-off, never actually toggled.
+  - **Root cause.** The `SetNfqueueEnabled { enabled }` handler in `apps/daemon/src/main.rs` just forwarded the request to `ControlService::handle`, which set an `AtomicBool` and returned `Ok`. Nothing about nftables, the kernel, or the running `NfqueueProcessor` changed. `Health` *reported* the new flag, so the GUI thought the toggle had worked, but actual interception was unchanged. The "unreliable" symptom was really "always a no-op" — depending on whether `NETKEEP_NFQUEUE` was set at boot, the user saw either always-on or always-off, never actually toggled.
   - **Fix.** The handler now does what its name implies:
     - New `DaemonRuntime { bootstrap, nfqueue_num, route_mark_base }` plumbs the boot config to `handle_client` instead of free-floating parameters.
     - New pure helper `plan_nfqueue_toggle(bootstrap_present, nfqueue_num, enabled) -> NfqueueToggleAction` decides whether to re-apply nftables (`Apply { queue }`) or refuse with an actionable error (`Reject(msg)`). Splitting the gate from the side effect makes the (bootstrap, queue, enabled) matrix testable without faking a `UnixStream`.
-    - On `Apply`, the handler calls `bootstrap.setup(queue, route_mark_base)` (which is idempotent — it tears down and re-applies the whole `inet logiguard` table), and *only on success* commits the cached flag in `ControlService`. A kernel failure can't leave `Health` lying about whether interception is on.
+    - On `Apply`, the handler calls `bootstrap.setup(queue, route_mark_base)` (which is idempotent — it tears down and re-applies the whole `inet netkeep` table), and *only on success* commits the cached flag in `ControlService`. A kernel failure can't leave `Health` lying about whether interception is on.
     - On `Reject`, no state changes anywhere. Two reject paths today:
       - `bootstrap_present = false`: daemon failed to install nftables at boot (usually not root). Error suggests `nft list ruleset`.
-      - `enabled = true && nfqueue_num = None`: daemon was started without `LOGIGUARD_NFQUEUE`, so no `NfqueueProcessor` is running. Adding `queue num N` rules with nobody draining the queue would *drop every packet* (no `bypass` flag in the rules), which is far worse than refusing the toggle. Error points the operator at the systemd unit.
+      - `enabled = true && nfqueue_num = None`: daemon was started without `NETKEEP_NFQUEUE`, so no `NfqueueProcessor` is running. Adding `queue num N` rules with nobody draining the queue would *drop every packet* (no `bypass` flag in the rules), which is far worse than refusing the toggle. Error points the operator at the systemd unit.
   - **Tests:** 4 new unit tests in `apps/daemon/src/main.rs::tests`, the first tests this binary has ever had:
     - `toggle_rejected_when_bootstrap_missing` — both directions reject if nftables didn't install.
     - `enable_rejected_when_no_queue_configured` — and the error message names the env var.
     - `disable_always_applies_with_no_queue` — disabling is always safe.
-    - `enable_applies_with_configured_queue` — the production systemd happy path (`LOGIGUARD_NFQUEUE=0`).
+    - `enable_applies_with_configured_queue` — the production systemd happy path (`NETKEEP_NFQUEUE=0`).
   - Workspace **126 → 130 tests** passing, no regressions.
 
 - [x] **Documentation:** updated the two open-bug entries in `## 4) Open Bugs / Follow-ups` to `[x]` with a one-line summary each, refreshed test counts.
@@ -481,8 +481,8 @@ Five independent improvements in one session, all in the process-identification 
   - Old: `[0, 3, 8]ms` (3 attempts, 11 ms worst case). New: `[0, 5, 15, 40]ms` (4 attempts, 60 ms worst case). Covers Electron/JVM/sandbox wrappers where the kernel `/proc/net` lag is longer. Only the first SYN of each connection enters NFQUEUE, so this blocking cost is paid at most once per connection.
   - **File:** `crates/flow-classifier/src/proc_resolver.rs`.
 
-- [x] **DB path moved to `~/.config/logiguard/logiguard.db`.**
-  - Old default `/tmp/logiguard.db` was lost on reboot. New default is the XDG config directory. `~` is resolved at runtime via `$HOME` env var (Rust doesn't expand shell tildes). Parent directory is created with `fs::create_dir_all` on startup. Override still available via `LOGIGUARD_DB_PATH`.
+- [x] **DB path moved to `~/.config/netkeep/netkeep.db`.**
+  - Old default `/tmp/netkeep.db` was lost on reboot. New default is the XDG config directory. `~` is resolved at runtime via `$HOME` env var (Rust doesn't expand shell tildes). Parent directory is created with `fs::create_dir_all` on startup. Override still available via `NETKEEP_DB_PATH`.
   - **File:** `apps/daemon/src/main.rs`.
 
 - [x] **Initial egress seeding (LAN + TUN) on fresh DB.**
@@ -555,8 +555,8 @@ Closes the last significant gap in domain attribution: UDP/QUIC flows and non-HT
 - [x] **nftables change (`crates/enforcer/src/lib.rs`).**
   - When `queue_num` is `Some(q)` and `q < u16::MAX`, `NftablesBootstrap::setup` now also adds:
     ```
-    add chain inet logiguard input_dns { type filter hook input priority 0; policy accept; }
-    add rule inet logiguard input_dns udp sport 53 queue num {q+1} bypass
+    add chain inet netkeep input_dns { type filter hook input priority 0; policy accept; }
+    add rule inet netkeep input_dns udp sport 53 queue num {q+1} bypass
     ```
   - With `bypass`: if `DnsSnoopWorker` is not running, DNS responses pass through instantly (no latency regression, no DNS failure risk).
 
@@ -664,7 +664,7 @@ Root cause was compound — five interacting failure modes had to be solved toge
 
 - [x] **Verification:** `curl --max-time 10 -v https://www.digikala.com` against a `Route via eg-lan-enp3s0` rule with the VPN tun up. Full TLS 1.3 handshake (Client Hello → Server Hello → certs → CERT verify → Finished → change_cipher → Finished) completes. Conntrack records the SNAT mapping `10.34.158.72:port → 192.168.7.7:port` for the connection lifetime.
 
-- [x] **Side observation worth recording (no fix this session):** if logiguard is first started while a VPN is up, `seed_initial_egresses()` uses `ip route get 8.8.8.8` to identify the "LAN" interface and gets the VPN tun. The seeded "LAN" egress then points at the VPN device — confusing for the user. Recorded in `docs/architecture.md` design decision #15 as a known gotcha; a future fix should prefer `/sys/class/net/<iface>/type == 1` (ethernet) over `65534` (tun) when seeding.
+- [x] **Side observation worth recording (no fix this session):** if netkeep is first started while a VPN is up, `seed_initial_egresses()` uses `ip route get 8.8.8.8` to identify the "LAN" interface and gets the VPN tun. The seeded "LAN" egress then points at the VPN device — confusing for the user. Recorded in `docs/architecture.md` design decision #15 as a known gotcha; a future fix should prefer `/sys/class/net/<iface>/type == 1` (ethernet) over `65534` (tun) when seeding.
 
 - [x] **Documentation:**
   - `docs/nfqueue-packet-interception.md`: chain table rewritten with all 7 chains; rationale block "Why three OUTPUT chains for one routing decision" explaining the kernel-side limitation; simplified rules block updated; SYN classification section added; new "End-to-end Route Action Flow" diagram; new "Fail-closed Routing Tables" section.
@@ -711,7 +711,7 @@ The daemon crashed when the kernel invalidated the NFQUEUE binding (nftables tab
   - `EINTR` / `ENOBUFS` / `EWOULDBLOCK`: simple retry with backoff on the same socket (self-correcting).
   - Fatal errors (`EBADF`, etc.): terminate the loop as before.
 
-- [x] **`run_loop()` now accepts `queue_num` and `recover` callback.** The daemon passes `|q| bootstrap.setup(Some(q), route_mark_base)` for both the main NFQUEUE processor and the DNS snoop worker. This re-creates the full `inet logiguard` nftables table (idempotent) including `queue num N` rules.
+- [x] **`run_loop()` now accepts `queue_num` and `recover` callback.** The daemon passes `|q| bootstrap.setup(Some(q), route_mark_base)` for both the main NFQUEUE processor and the DNS snoop worker. This re-creates the full `inet netkeep` nftables table (idempotent) including `queue num N` rules.
 
 - [x] **`reopen()` unbinds before opening.** `queue.unbind(queue_num)` releases the kernel binding, then the old socket is dropped, then a fresh `Queue::open()` + `bind()` claims the now-free binding.
 
@@ -762,7 +762,7 @@ Bug fixes for the NFQUEUE transparent proxy path. The transparent proxy was acce
 - [x] **`IP_TRANSPARENT` socket option.** The transparent proxy listener was a plain `TcpListener::bind()`. Linux requires `IP_TRANSPARENT` on the listening socket for nftables `REDIRECT` to deliver connections. Fix: `bind_transparent_listener()` uses `socket2` + `libc::setsockopt(SOL_IP, IP_TRANSPARENT=19)`.
 - [x] **IPv6 `SO_ORIGINAL_DST`.** Only `SOL_IP` was tried for original-destination lookup. IPv6 connections would fail. Fix: try `SOL_IP` first, fall back to `IPPROTO_IPV6`.
 - [x] **NFQUEUE re-queuing proxy-marked packets.** `PROXY_REDIRECT_MARK` (below `ROUTE_MARK_BASE`) was not matched by any bypass rule, so follow-on data segments were re-queued and could be dropped. Fix: `meta mark {PROXY_REDIRECT_MARK} accept` before the `queue num` rule.
-- [x] **Silent misconfiguration warning.** When transparent proxy starts but `LOGIGUARD_NFQUEUE` is unset, daemon now prints a warning.
+- [x] **Silent misconfiguration warning.** When transparent proxy starts but `NETKEEP_NFQUEUE` is unset, daemon now prints a warning.
 
 - [x] **Tests:** 180 passing (no new tests; existing tests cover the unchanged protocol logic).
 
@@ -831,13 +831,13 @@ Review: [`plans/code-review-session-35-37.md`](plans/code-review-session-35-37.m
   - Uses `SOCK_EVENTS` BPF HashMap (16384 entries) keyed by `(src_ip[16], src_port, protocol)`
 - [x] **Userspace SockTracker loader** (`dns-tracker/src/sock_tracker.rs`): Loads BPF program, attaches hooks, provides `lookup_pid()`. Implements `flow_classifier::SocketTracker` trait.
 - [x] **SocketTracker trait** (`flow-classifier/src/lib.rs`): New trait for dependency inversion — `flow-classifier` defines the trait, `dns-tracker` implements it. Avoids circular dependencies.
-- [x] **ProcProcessResolver integration** (`proc_resolver.rs`): New Step 0 — check eBPF map before SOCK_DIAG. Metrics: `logiguard.proc.resolver.ebpf.hits` / `misses`.
+- [x] **ProcProcessResolver integration** (`proc_resolver.rs`): New Step 0 — check eBPF map before SOCK_DIAG. Metrics: `netkeep.proc.resolver.ebpf.hits` / `misses`.
 - [x] **Daemon integration** (`main.rs`): Loads `SockTracker` at startup, passes to `ProcProcessResolver::with_sock_tracker()`. Graceful fallback on eBPF load failure.
 - [x] **xtask build**: Updated to build both `dns-tracker-ebpf` and `sock-tracker-ebpf` binaries.
 - [x] **Tests**: 4 new tests for `build_sock_key()` (IPv4→mapped IPv6, IPv6 raw, QUIC→UDP protocol, Other→0). All 180 workspace tests pass.
 - [x] **Documentation**: Updated `process-resolver.md`, `process-attribution-races.md` (Layer −1).
 - [x] **DNS forwarder retry logic** (`forwarder.rs`): `forward_udp()` now retries up to 2 times on timeout (EAGAIN) with 3s per-attempt timeout. Previously a single 8s attempt with no retry — standard DNS clients retry because UDP is unreliable.
-- [x] **DNS tracker wildcard fallback** (`tracker.rs`): `DnsTracker::lookup()` now tries `0.0.0.0` (INADDR_ANY) key when the specific-IP lookup fails. Auto-bound UDP sockets have `skc_rcv_saddr = 0.0.0.0` even when the actual packet source IP is `127.0.0.1`. This fixed the DNS forwarder attributing queries to `logiguard-daemon` instead of the real client (e.g. `chromium`).
+- [x] **DNS tracker wildcard fallback** (`tracker.rs`): `DnsTracker::lookup()` now tries `0.0.0.0` (INADDR_ANY) key when the specific-IP lookup fails. Auto-bound UDP sockets have `skc_rcv_saddr = 0.0.0.0` even when the actual packet source IP is `127.0.0.1`. This fixed the DNS forwarder attributing queries to `netkeep-daemon` instead of the real client (e.g. `chromium`).
 
 ### 2026-06-05 (session 38 — proxy/egress connectivity test modal)
 

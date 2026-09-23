@@ -83,7 +83,7 @@ pub fn show_decision_dialog(item: PendingDecision, mut egresses: Vec<Egress>) {
                     // an oversized, bottom-clipped window.
                     window_bounds: Some(gpui::WindowBounds::Maximized(restore_bounds)),
                     titlebar: Some(gpui::TitlebarOptions {
-                        title: Some(SharedString::from("LogiGuard - Connection Decision")),
+                        title: Some(SharedString::from("Netkeep - Connection Decision")),
                         appears_transparent: false,
                         ..Default::default()
                     }),

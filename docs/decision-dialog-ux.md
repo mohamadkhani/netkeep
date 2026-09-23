@@ -1,6 +1,6 @@
 # Decision Dialog UX Specification
 
-This document defines the interaction design of the LogiGuard connection decision dialog — the window shown when an unknown flow is intercepted and the user must decide whether to allow or deny it.
+This document defines the interaction design of the Netkeep connection decision dialog — the window shown when an unknown flow is intercepted and the user must decide whether to allow or deny it.
 
 The reference visual is `design/decision_dialog_window.html`.
 

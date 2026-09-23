@@ -1,0 +1,15 @@
+post_install() {
+  echo 'Netkeep: enable and start the daemon with:'
+  echo '  systemctl enable --now netkeepd.service'
+  echo 'Optional: set NETKEEP_NFQUEUE in the unit for packet interception.'
+  echo 'Optional: set NETKEEP_DNS_FORWARDER=1 and nameserver 127.0.0.1 for egress DNS (see docs/dns-forwarder.md).'
+  gtk-update-icon-cache -q -t -f usr/share/icons/hicolor 2>/dev/null || true
+}
+
+post_upgrade() {
+  gtk-update-icon-cache -q -t -f usr/share/icons/hicolor 2>/dev/null || true
+}
+
+post_remove() {
+  gtk-update-icon-cache -q -t -f usr/share/icons/hicolor 2>/dev/null || true
+}

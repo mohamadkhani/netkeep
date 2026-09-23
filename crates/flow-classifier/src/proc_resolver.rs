@@ -93,7 +93,7 @@ impl ProcProcessResolver {
         // This eliminates all TOCTOU races.
         if let Some(ref tracker) = self.sock_tracker {
             if let Some(tracked) = tracker.lookup_pid(ip, port, protocol) {
-                counter!("logiguard.proc.resolver.ebpf.hits").increment(1);
+                counter!("netkeep.proc.resolver.ebpf.hits").increment(1);
                 diag!(
                     "{proto_str} {ip}:{port} ebpf pid={} src={}",
                     tracked.pid,
@@ -101,7 +101,7 @@ impl ProcProcessResolver {
                 );
                 return Some(tracked.pid);
             }
-            counter!("logiguard.proc.resolver.ebpf.misses").increment(1);
+            counter!("netkeep.proc.resolver.ebpf.misses").increment(1);
             diag!("{proto_str} {ip}:{port} ebpf miss");
         }
 
@@ -185,7 +185,7 @@ impl ProcessResolver for ProcProcessResolver {
             // typical for a recycled port reused across users.
             match (&tracked, sk_uid) {
                 (Some(t), Some(uid)) if t.uid != uid => {
-                    counter!("logiguard.proc.resolver.ebpf.uid_mismatch").increment(1);
+                    counter!("netkeep.proc.resolver.ebpf.uid_mismatch").increment(1);
                     diag!(
                         "{proto_str} {ip}:{src_port} ebpf uid-mismatch \
                          (entry uid={} vs packet uid={uid}) — entry rejected",
@@ -218,7 +218,7 @@ impl ProcessResolver for ProcProcessResolver {
                     _ => true,
                 };
                 if pid_matches && now.duration_since(entry.inserted_at) < CACHE_TTL {
-                    counter!("logiguard.proc.resolver.cache.hits").increment(1);
+                    counter!("netkeep.proc.resolver.cache.hits").increment(1);
                     diag!(
                         "{proto_str} {ip}:{src_port} cache-hit name={:?} pid={:?} \
                          ebpf_pid={:?} age_ms={}",
@@ -227,7 +227,7 @@ impl ProcessResolver for ProcProcessResolver {
                         tracked_pid.as_ref().map(|t| t.pid),
                         now.duration_since(entry.inserted_at).as_millis()
                     );
-                    histogram!("logiguard.proc.resolver.resolve.duration")
+                    histogram!("netkeep.proc.resolver.resolve.duration")
                         .record(resolve_start.elapsed().as_secs_f64());
                     return Some(ProcessInfo {
                         name: entry.name.clone(),
@@ -235,7 +235,7 @@ impl ProcessResolver for ProcProcessResolver {
                         app_name: entry.app_name.clone(),
                     });
                 }
-                counter!("logiguard.proc.resolver.cache.stale_pid").increment(1);
+                counter!("netkeep.proc.resolver.cache.stale_pid").increment(1);
                 diag!(
                     "{proto_str} {ip}:{src_port} cache-stale-pid cached={:?} \
                      ebpf_pid={:?} — bypassing cache",
@@ -245,11 +245,11 @@ impl ProcessResolver for ProcProcessResolver {
             }
         }
 
-        counter!("logiguard.proc.resolver.cache.misses").increment(1);
+        counter!("netkeep.proc.resolver.cache.misses").increment(1);
 
         let pid = match tracked_pid {
             Some(ref tracked) => {
-                counter!("logiguard.proc.resolver.ebpf.hits").increment(1);
+                counter!("netkeep.proc.resolver.ebpf.hits").increment(1);
                 tracked.pid
             }
             None => self.find_pid(ip, src_port, protocol)?,
@@ -338,7 +338,7 @@ impl ProcessResolver for ProcProcessResolver {
             );
         }
 
-        histogram!("logiguard.proc.resolver.resolve.duration")
+        histogram!("netkeep.proc.resolver.resolve.duration")
             .record(resolve_start.elapsed().as_secs_f64());
         Some(info)
     }

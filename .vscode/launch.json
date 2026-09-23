@@ -7,11 +7,11 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "logiguard-daemon (debug)",
-            "program": "${workspaceFolder}/target/debug/logiguard-daemon",
+            "name": "netkeep-daemon (debug)",
+            "program": "${workspaceFolder}/target/debug/netkeep-daemon",
             "args": [],
             "env": {
-                "LOGIGUARD_ROUTE_MARK_BASE": "20000",
+                "NETKEEP_ROUTE_MARK_BASE": "20000",
                 "RUST_LOG": "debug"
             },
             "initCommands": [
@@ -23,8 +23,8 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "logiguard-gpui (debug)",
-            "program": "${workspaceFolder}/target/debug/logiguard-gpui",
+            "name": "netkeep-gpui (debug)",
+            "program": "${workspaceFolder}/target/debug/netkeep-gpui",
             "args": [],
             "env": {
                 "RUST_LOG": "debug"
@@ -35,8 +35,8 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "logiguard-emulator (debug)",
-            "program": "${workspaceFolder}/target/debug/logiguard-emulator",
+            "name": "netkeep-emulator (debug)",
+            "program": "${workspaceFolder}/target/debug/netkeep-emulator",
             "args": [],
             "env": {
                 "RUST_LOG": "debug"
@@ -47,11 +47,11 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "logiguard-daemon (run)",
-            "program": "${workspaceFolder}/target/debug/logiguard-daemon",
+            "name": "netkeep-daemon (run)",
+            "program": "${workspaceFolder}/target/debug/netkeep-daemon",
             "args": [],
             "env": {
-                "LOGIGUARD_ROUTE_MARK_BASE": "20000",
+                "NETKEEP_ROUTE_MARK_BASE": "20000",
                 "RUST_LOG": "debug"
             },
             "cwd": "${workspaceFolder}",
@@ -60,8 +60,8 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "logiguard-gpui (run)",
-            "program": "${workspaceFolder}/target/debug/logiguard-gpui",
+            "name": "netkeep-gpui (run)",
+            "program": "${workspaceFolder}/target/debug/netkeep-gpui",
             "args": [],
             "env": {
                 "RUST_LOG": "debug"
@@ -72,8 +72,8 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "logiguard-emulator (run)",
-            "program": "${workspaceFolder}/target/debug/logiguard-emulator",
+            "name": "netkeep-emulator (run)",
+            "program": "${workspaceFolder}/target/debug/netkeep-emulator",
             "args": [],
             "env": {
                 "RUST_LOG": "debug"
@@ -84,28 +84,28 @@
     ],
     "compounds": [
         {
-            "name": "logiguard-all (run)",
+            "name": "netkeep-all (run)",
             "configurations": [
-                "logiguard-daemon (run)",
-                "logiguard-gpui (run)",
-                "logiguard-emulator (run)"
+                "netkeep-daemon (run)",
+                "netkeep-gpui (run)",
+                "netkeep-emulator (run)"
             ],
             "stopAll": true
         },
         {
-            "name": "logiguard-daemon+gpui (run)",
+            "name": "netkeep-daemon+gpui (run)",
             "configurations": [
-                "logiguard-daemon (run)",
-                "logiguard-gpui (run)"
+                "netkeep-daemon (run)",
+                "netkeep-gpui (run)"
             ],
             "stopAll": true
         },
         {
-            "name": "logiguard-all (debug)",
+            "name": "netkeep-all (debug)",
             "configurations": [
-                "logiguard-daemon (debug)",
-                "logiguard-gpui (debug)",
-                "logiguard-emulator (debug)"
+                "netkeep-daemon (debug)",
+                "netkeep-gpui (debug)",
+                "netkeep-emulator (debug)"
             ],
             "stopAll": true
         }

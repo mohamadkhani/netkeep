@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use metrics_exporter_prometheus::PrometheusBuilder;
 
 const DEFAULT_METRICS_PORT: u16 = 9090;
-const METRICS_PORT_ENV: &str = "LOGIGUARD_METRICS_PORT";
+const METRICS_PORT_ENV: &str = "NETKEEP_METRICS_PORT";
 
 pub fn start_metrics_server() {
     let port: u16 = std::env::var(METRICS_PORT_ENV)

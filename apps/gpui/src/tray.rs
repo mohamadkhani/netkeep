@@ -34,7 +34,7 @@ pub enum TrayAction {
     Quit,
 }
 
-/// LogiGuard's SNI tray.
+/// Netkeep's SNI tray.
 pub struct LogiTray {
     /// Last token delivered by the host before a click; consumed by menu handlers.
     pub token: SharedToken,
@@ -60,10 +60,10 @@ impl LogiTray {
 
 impl Tray for LogiTray {
     fn id(&self) -> String {
-        "logiguard".into()
+        "netkeep".into()
     }
     fn title(&self) -> String {
-        "LogiGuard".into()
+        "Netkeep".into()
     }
     fn category(&self) -> Category {
         Category::SystemServices
@@ -88,7 +88,7 @@ impl Tray for LogiTray {
     }
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "LogiGuard".into(),
+            title: "Netkeep".into(),
             description: if self.nfqueue_enabled {
                 "Network interception enabled".into()
             } else {

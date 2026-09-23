@@ -112,7 +112,7 @@ impl<R: Repository> ControlService<R> {
     }
 
     /// Report the actual interception state. The daemon calls this after the
-    /// NFQUEUE processor starts (LOGIGUARD_NFQUEUE set) so Health reflects
+    /// NFQUEUE processor starts (NETKEEP_NFQUEUE set) so Health reflects
     /// reality for clients like the tray, instead of the default `false`.
     pub fn set_nfqueue_state(&mut self, enabled: bool, nfqueue_num: Option<u16>) {
         self.nfqueue_enabled.store(enabled, Ordering::Relaxed);
@@ -310,7 +310,7 @@ impl<R: Repository> ControlService<R> {
             ControlRequest::TestProxyHttp { .. } => "test_proxy_http",
             ControlRequest::TestProxyDns { .. } => "test_proxy_dns",
         };
-        counter!("logiguard.control.requests", "type" => request_type).increment(1);
+        counter!("netkeep.control.requests", "type" => request_type).increment(1);
         let handle_start = Instant::now();
 
         let response = match request {
@@ -335,7 +335,7 @@ impl<R: Repository> ControlService<R> {
             ControlRequest::ListRules => {
                 // Preserve the repository's priority-descending order
                 // — it is the actual evaluation order, and both the settings
-                // table and `logiguard rules list` present rules in it.
+                // table and `netkeep rules list` present rules in it.
                 ControlResponse::RuleList(self.repo.list_rules())
             }
             ControlRequest::DeleteRule { id } => {
@@ -371,7 +371,7 @@ impl<R: Repository> ControlService<R> {
                                 action: resolved.action,
                                 route_target,
                             };
-                            histogram!("logiguard.control.request.duration", "type" => request_type)
+                            histogram!("netkeep.control.request.duration", "type" => request_type)
                                 .record(handle_start.elapsed().as_secs_f64());
                             return response;
                         }
@@ -527,7 +527,7 @@ impl<R: Repository> ControlService<R> {
                         let response = ControlResponse::Error(
                             "cannot delete the system default egress".to_string(),
                         );
-                        histogram!("logiguard.control.request.duration", "type" => request_type)
+                        histogram!("netkeep.control.request.duration", "type" => request_type)
                             .record(handle_start.elapsed().as_secs_f64());
                         return response;
                     }
@@ -546,7 +546,7 @@ impl<R: Repository> ControlService<R> {
                 if name.is_empty() {
                     let response =
                         ControlResponse::Error("proxy name must not be empty".to_string());
-                    histogram!("logiguard.control.request.duration", "type" => request_type)
+                    histogram!("netkeep.control.request.duration", "type" => request_type)
                         .record(handle_start.elapsed().as_secs_f64());
                     return response;
                 }
@@ -558,7 +558,7 @@ impl<R: Repository> ControlService<R> {
                 if name_taken {
                     let response =
                         ControlResponse::Error(format!("proxy name '{name}' is already in use"));
-                    histogram!("logiguard.control.request.duration", "type" => request_type)
+                    histogram!("netkeep.control.request.duration", "type" => request_type)
                         .record(handle_start.elapsed().as_secs_f64());
                     return response;
                 }
@@ -618,7 +618,7 @@ impl<R: Repository> ControlService<R> {
                 }
             }
         };
-        histogram!("logiguard.control.request.duration", "type" => request_type)
+        histogram!("netkeep.control.request.duration", "type" => request_type)
             .record(handle_start.elapsed().as_secs_f64());
         response
     }
@@ -818,7 +818,7 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                         RuleAction::Route => "route",
                         RuleAction::Ask => unreachable!(),
                     };
-                    counter!("logiguard.control.immediate_verdicts", "action" => action_str)
+                    counter!("netkeep.control.immediate_verdicts", "action" => action_str)
                         .increment(1);
                     let route_target = if resolved.action == RuleAction::Route {
                         self.resolve_route_target(&resolved.egress_id)
@@ -850,7 +850,7 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
             && flow.destination_port == 443
             && flow.tcp_syn
         {
-            counter!("logiguard.control.deferred_sni").increment(1);
+            counter!("netkeep.control.deferred_sni").increment(1);
             return FlowDecision::DeferSni;
         }
         match self
@@ -866,7 +866,7 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                 FlowDecision::Immediate(action, None)
             }
             DecisionOutcome::Pending(p) => {
-                counter!("logiguard.control.pending_created").increment(1);
+                counter!("netkeep.control.pending_created").increment(1);
                 self.record_event(&flow, FlowState::Pending, now_secs);
                 self.repo.upsert_pending(&p);
                 FlowDecision::Pending {

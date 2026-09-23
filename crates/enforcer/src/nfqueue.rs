@@ -303,7 +303,7 @@ where
             match self.queue.recv() {
                 Ok(mut msg) => {
                     backoff_ms = 100;
-                    counter!("logiguard.packets.received").increment(1);
+                    counter!("netkeep.packets.received").increment(1);
 
                     let start = Instant::now();
 
@@ -314,7 +314,7 @@ where
 
                     let (verdict, fwmark) = match parse_raw_packet(msg.get_payload()) {
                         None => {
-                            counter!("logiguard.packets.parse_failed").increment(1);
+                            counter!("netkeep.packets.parse_failed").increment(1);
                             (Verdict::Drop, None)
                         }
                         Some(mut raw) => {
@@ -323,14 +323,14 @@ where
                             let forwarded = msg.get_hook() == NF_INET_FORWARD;
                             raw.forwarded = forwarded;
                             if forwarded {
-                                counter!("logiguard.packets.received", "hook" => "forward")
+                                counter!("netkeep.packets.received", "hook" => "forward")
                                     .increment(1);
                             }
                             self.decide(&raw, now_secs)
                         }
                     };
 
-                    histogram!("logiguard.packet.processing_duration")
+                    histogram!("netkeep.packet.processing_duration")
                         .record(start.elapsed().as_secs_f64());
 
                     if let Some(mark) = fwmark {
@@ -408,7 +408,7 @@ where
     fn decide(&mut self, raw: &RawPacket, now_secs: u64) -> (Verdict, Option<u32>) {
         // Always pass loopback and DNS through without touching the cache.
         if is_loopback(&raw.dst_ip) || raw.dst_port == 53 {
-            counter!("logiguard.packets.accepted", "reason" => "loopback").increment(1);
+            counter!("netkeep.packets.accepted", "reason" => "loopback").increment(1);
             return (Verdict::Accept, None);
         }
 
@@ -417,7 +417,7 @@ where
         // process resolver cannot match port-less packets and NDP in particular
         // must never be blocked.
         if matches!(raw.protocol, TransportProtocol::Other) {
-            counter!("logiguard.packets.accepted", "reason" => "icmp").increment(1);
+            counter!("netkeep.packets.accepted", "reason" => "icmp").increment(1);
             return (Verdict::Accept, None);
         }
 
@@ -433,7 +433,7 @@ where
         // that a future connection reusing the same 5-tuple gets a fresh decision.
         if raw.tcp_fin || raw.tcp_rst {
             if self.decided.remove(&key).is_some() {
-                counter!("logiguard.verdict.cache.evictions", "reason" => "fin_rst").increment(1);
+                counter!("netkeep.verdict.cache.evictions", "reason" => "fin_rst").increment(1);
             }
             return (Verdict::Accept, None);
         }
@@ -457,7 +457,7 @@ where
         if raw.tcp_payload_empty && !raw.tcp_syn {
             if let Some(cached) = self.decided.get(&key) {
                 if cached.expires_at > now_secs {
-                    counter!("logiguard.packets.accepted", "reason" => "pure_ack").increment(1);
+                    counter!("netkeep.packets.accepted", "reason" => "pure_ack").increment(1);
                     let v = if cached.accept {
                         Verdict::Accept
                     } else {
@@ -473,7 +473,7 @@ where
         // Fast path: return cached verdict if still valid.
         if let Some(cached) = self.decided.get(&key) {
             if cached.expires_at > now_secs {
-                counter!("logiguard.packets.accepted", "reason" => "cache_hit").increment(1);
+                counter!("netkeep.packets.accepted", "reason" => "cache_hit").increment(1);
                 let v = if cached.accept {
                     Verdict::Accept
                 } else {
@@ -567,9 +567,9 @@ where
             flow_name,
             verdict_label(&decision),
         );
-        histogram!("logiguard.registration.duration")
+        histogram!("netkeep.registration.duration")
             .record(register_start.elapsed().as_secs_f64());
-        histogram!("logiguard.decision.slow_path.duration")
+        histogram!("netkeep.decision.slow_path.duration")
             .record(slow_start.elapsed().as_secs_f64());
 
         // Only cache definitive decisions. Pending/Ask flows must NOT be cached:
@@ -602,7 +602,7 @@ where
                 self.decided.retain(|_, v| v.expires_at > now_secs);
                 let evicted = before - self.decided.len();
                 if evicted > 0 {
-                    counter!("logiguard.verdict.cache.evictions", "reason" => "expiry_sweep")
+                    counter!("netkeep.verdict.cache.evictions", "reason" => "expiry_sweep")
                         .increment(evicted as u64);
                 }
             }
@@ -616,32 +616,32 @@ where
             );
         }
 
-        gauge!("logiguard.verdict.cache.entries").set(self.decided.len() as f64);
+        gauge!("netkeep.verdict.cache.entries").set(self.decided.len() as f64);
         let (ip_entries, domain_entries) = self.attr_cache.len();
-        gauge!("logiguard.proc.attr.cache.entries", "cache" => "ip").set(ip_entries as f64);
-        gauge!("logiguard.proc.attr.cache.entries", "cache" => "domain").set(domain_entries as f64);
+        gauge!("netkeep.proc.attr.cache.entries", "cache" => "ip").set(ip_entries as f64);
+        gauge!("netkeep.proc.attr.cache.entries", "cache" => "domain").set(domain_entries as f64);
 
         match &decision {
             FlowDecision::Immediate(RuleAction::Allow, _) => {
-                counter!("logiguard.packets.accepted", "reason" => "rule_allow").increment(1);
+                counter!("netkeep.packets.accepted", "reason" => "rule_allow").increment(1);
             }
             FlowDecision::Immediate(RuleAction::Route, Some(_)) => {
-                counter!("logiguard.packets.accepted", "reason" => "rule_route").increment(1);
+                counter!("netkeep.packets.accepted", "reason" => "rule_route").increment(1);
             }
             FlowDecision::DeferSni => {
-                counter!("logiguard.packets.accepted", "reason" => "defer_sni").increment(1);
+                counter!("netkeep.packets.accepted", "reason" => "defer_sni").increment(1);
             }
             FlowDecision::Immediate(RuleAction::Deny, _) => {
-                counter!("logiguard.packets.dropped", "reason" => "rule_deny").increment(1);
+                counter!("netkeep.packets.dropped", "reason" => "rule_deny").increment(1);
             }
             FlowDecision::Pending { .. } => {
-                counter!("logiguard.packets.dropped", "reason" => "pending").increment(1);
+                counter!("netkeep.packets.dropped", "reason" => "pending").increment(1);
             }
             FlowDecision::Immediate(RuleAction::Route, None) => {
-                counter!("logiguard.packets.dropped", "reason" => "no_target").increment(1);
+                counter!("netkeep.packets.dropped", "reason" => "no_target").increment(1);
             }
             FlowDecision::Immediate(RuleAction::Ask, _) => {
-                counter!("logiguard.packets.dropped", "reason" => "ask").increment(1);
+                counter!("netkeep.packets.dropped", "reason" => "ask").increment(1);
             }
         }
 
@@ -711,35 +711,35 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
                     None
                 } else if is_tls_clienthello_packet(payload) {
                     let extract_start = Instant::now();
-                    counter!("logiguard.sni.extraction.attempts", "kind" => "tls").increment(1);
+                    counter!("netkeep.sni.extraction.attempts", "kind" => "tls").increment(1);
                     let hint = if let Some(sni) = extract_tls_sni(payload) {
-                        counter!("logiguard.sni.extraction.success", "source" => "tls")
+                        counter!("netkeep.sni.extraction.success", "source" => "tls")
                             .increment(1);
                         Some(sni)
                     } else {
-                        counter!("logiguard.sni.extraction.missed", "kind" => "tls").increment(1);
+                        counter!("netkeep.sni.extraction.missed", "kind" => "tls").increment(1);
                         None
                     };
-                    histogram!("logiguard.sni.extraction.duration")
+                    histogram!("netkeep.sni.extraction.duration")
                         .record(extract_start.elapsed().as_secs_f64());
                     hint
                 } else if starts_with_http_method(payload) {
                     let extract_start = Instant::now();
-                    counter!("logiguard.sni.extraction.attempts", "kind" => "http").increment(1);
+                    counter!("netkeep.sni.extraction.attempts", "kind" => "http").increment(1);
                     let hint = if let Some(host) = extract_http_host(payload) {
-                        counter!("logiguard.sni.extraction.success", "source" => "http_host")
+                        counter!("netkeep.sni.extraction.success", "source" => "http_host")
                             .increment(1);
                         Some(host)
                     } else {
-                        counter!("logiguard.sni.extraction.missed", "kind" => "http").increment(1);
+                        counter!("netkeep.sni.extraction.missed", "kind" => "http").increment(1);
                         None
                     };
-                    histogram!("logiguard.sni.extraction.duration")
+                    histogram!("netkeep.sni.extraction.duration")
                         .record(extract_start.elapsed().as_secs_f64());
                     hint
                 } else {
                     // Encrypted TLS app data, ServerHello, SSH, etc. — not extractable.
-                    counter!("logiguard.sni.extraction.skipped").increment(1);
+                    counter!("netkeep.sni.extraction.skipped").increment(1);
                     None
                 };
                 (

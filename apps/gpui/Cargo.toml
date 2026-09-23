@@ -1,5 +1,5 @@
 [package]
-name = "logiguard-gpui"
+name = "netkeep-gpui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
