@@ -2,7 +2,9 @@
 
 **Every connection asks the keeper.**
 
-Netkeep is a per-application network firewall for Linux. When an app opens a connection you haven't seen before, Netkeep intercepts it, shows you who is calling where, and lets you **allow**, **deny**, or **route** it — once, for the session, or permanently.
+Netkeep is network control for Linux. It sees every connection your apps make — attributed to the process, the domain, and the address — and gives you the say: **allow**, **deny**, or **route** it, matched by app, domain, IP/CIDR, or port, scoped to once, the session, or permanently. Unknown connections open a decision dialog: who is calling, where, and what to do about it.
+
+Where a firewall only answers yes or no, Netkeep goes further: any rule can **reroute** matching traffic through a SOCKS5/HTTP/Shadowsocks proxy, a TUN device, or a network interface — with DNS resolved through the same path. Decide not just *whether* an app talks, but *where it talks through*.
 
 Think *Little Snitch* or *OpenSnitch*, built in Rust with kernel-level enforcement and domain-level awareness.
 
@@ -13,6 +15,17 @@ Think *Little Snitch* or *OpenSnitch*, built in Rust with kernel-level enforceme
 3. **Decide** — the decision engine matches rules by process, domain, IP/CIDR, and port. Unknown flows open a decision dialog with a countdown (auto-deny).
 4. **Enforce** — verdicts are issued back to the kernel. `Route` verdicts can steer matching traffic through a SOCKS5/HTTP/Shadowsocks proxy, a TUN device, or a network interface — with egress-aware DNS forwarding so names resolve through the same path.
 5. **Fail close** — if the daemon dies, the firewall closes instead of opening.
+
+## Routing: rule-bound egress
+
+The differentiating feature. Rules don't just allow or deny — they can bind traffic to an **egress**:
+
+- **Route targets:** SOCKS5 proxy, HTTP CONNECT proxy, Shadowsocks, TUN device, or a named network interface
+- **Fallback chains:** an egress holds an ordered target list; the first available target wins at enforcement time
+- **Egress-aware DNS:** the built-in DNS forwarder resolves names through the same egress as the TCP traffic, so routed apps never leak queries to the local resolver
+- **Per scope:** route one app, one domain, one CIDR, or one port — chosen per rule like any other action
+
+Example: send `spotify` through the Shadowsocks proxy, keep `ssh` on the wire, and drop everything else — all in rules, no iptables scripts.
 
 ## Components
 
