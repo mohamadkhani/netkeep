@@ -1,6 +1,6 @@
 [Unit]
 Description=Netkeep network authorization daemon
-Documentation=https://github.com/mohammadreza-khani/netkeep
+Documentation=https://github.com/mohamadkhani/netkeep
 After=network-pre.target
 Wants=network-pre.target
 

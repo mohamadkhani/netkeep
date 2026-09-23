@@ -2,7 +2,7 @@
 
 Network flow authorization system for Linux: intercept unknown flows, prompt user, enforce rules.
 
-**Repository:** https://github.com/mohammadreza-khani/netkeep
+**Repository:** https://github.com/mohamadkhani/netkeep
 **Language:** Rust
 **Platforms:** Linux desktop first
 **Status:** Phase 4+ (GPUI UI + settings window with Table/Dialog + proxy support)

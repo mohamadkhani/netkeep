@@ -16,7 +16,7 @@ pkgver=0.1.0
 pkgrel=3
 pkgdesc='Linux desktop network flow authorization (daemon, CLI, GPUI tray)'
 arch=('x86_64')
-url='https://github.com/mohammadreza-khani/netkeep'
+url='https://github.com/mohamadkhani/netkeep'
 license=('Apache')
 depends=(
   'gcc-libs'
