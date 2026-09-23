@@ -21,10 +21,35 @@ Unknown connections open a decision dialog with a countdown. No answer means den
 
 nftables hands new connections to the daemon over NFQUEUE. The daemon attributes the flow, asks the decision engine, and returns a verdict to the kernel: accept, drop, mark-and-route, or *pending* while the dialog waits for you.
 
-```
-netkeep-gpui ─┐
-              ├─ Unix socket ─── netkeepd ─── NFQUEUE (nftables) ─── kernel
-netkeep-cli ──┘
+```mermaid
+flowchart LR
+    subgraph clients ["Desktop"]
+        direction TB
+        gpui["netkeep-gpui"]
+        cli["netkeep-cli"]
+    end
+
+    subgraph daemon ["netkeepd — root daemon"]
+        direction TB
+        api["Control API<br/>Unix socket"]
+        fc["Flow classifier<br/>process · SNI · DNS"]
+        de["Decision engine"]
+        db[("SQLite")]
+        dns["DNS forwarder"]
+    end
+
+    kernel["Kernel<br/>nftables + NFQUEUE"]
+    egress["Egress<br/>SOCKS5 · Shadowsocks · TUN · interface"]
+
+    gpui --> api
+    cli --> api
+    api --> de
+    de <--> db
+    kernel -- "new flows" --> fc
+    fc --> de
+    de -- "verdict: accept / deny / pending" --> kernel
+    de -- "mark-and-route" --> egress
+    dns --> egress
 ```
 
 ## Routing: rule-bound egress
