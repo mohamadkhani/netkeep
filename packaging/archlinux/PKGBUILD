@@ -52,7 +52,7 @@ prepare() {
     "${_root}/" "${srcdir}/build/"
 
   # Isolated toolchain for makepkg. The single stable toolchain (pinned via
-  # rust-toolchain.toml = 1.96.1) builds everything: the workspace, bpf-linker,
+  # rust-toolchain.toml = 1.96.0) builds everything: the workspace, bpf-linker,
   # and the eBPF programs. The eBPF step uses -Z build-std=core (unstable)
   # unlocked on stable via RUSTC_BOOTSTRAP=1 — no nightly toolchain required.
   export CARGO_HOME="${srcdir}/.cargo"

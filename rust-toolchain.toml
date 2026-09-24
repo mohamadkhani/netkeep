@@ -1,0 +1,6 @@
+# Pin the toolchain so local `just ci`, CI, and packaging all build with the
+# same rustc/clippy. CI (dtolnay/rust-toolchain) reads this file and installs
+# exactly this version. Bump deliberately: run `just ci` after upgrading.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt", "rust-src"]
