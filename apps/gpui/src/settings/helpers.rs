@@ -39,7 +39,7 @@ pub async fn fetch_and_apply(
             Ok(ControlResponse::ProxyList(proxies)),
         ) => {
             let merged = daemon::merge_egress_availability(egresses);
-            let _ = cx.update_entity(&entity, |s: &mut SettingsState, cx| {
+            cx.update_entity(&entity, |s: &mut SettingsState, cx| {
                 s.rules = rules;
                 s.egresses = merged;
                 s.proxies = proxies;
@@ -49,13 +49,13 @@ pub async fn fetch_and_apply(
             });
         }
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-            let _ = cx.update_entity(&entity, |s: &mut SettingsState, cx| {
+            cx.update_entity(&entity, |s: &mut SettingsState, cx| {
                 s.status = Some(format!("load failed: {e}"));
                 cx.notify();
             });
         }
         _ => {
-            let _ = cx.update_entity(&entity, |s: &mut SettingsState, cx| {
+            cx.update_entity(&entity, |s: &mut SettingsState, cx| {
                 s.status = Some("unexpected response from daemon".into());
                 cx.notify();
             });

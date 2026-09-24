@@ -145,7 +145,7 @@ impl TableDelegate for ProxiesDelegate {
                             .on_click(move |_, _, cx| {
                                 let proxy = proxy_test.clone();
                                 if let Some(st) = state_test.upgrade() {
-                                    let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                    cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                         s.proxy_test_request = Some(proxy);
                                         cx.notify();
                                     });
@@ -158,7 +158,7 @@ impl TableDelegate for ProxiesDelegate {
                             .on_click(move |_, _, cx| {
                                 let proxy = proxy_edit.clone();
                                 if let Some(st) = state_edit.upgrade() {
-                                    let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                    cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                         s.proxy_edit_request = Some(proxy);
                                         cx.notify();
                                     });
@@ -198,7 +198,7 @@ impl TableDelegate for ProxiesDelegate {
                                     })
                                     .await;
                                 if let Some(st) = weak.upgrade() {
-                                    let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                    cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                         match res {
                                             Ok(ControlResponse::Ok) => {
                                                 if let Some(p) = s
@@ -246,29 +246,26 @@ impl TableDelegate for ProxiesDelegate {
                                         })
                                         .await;
                                     if let Some(st) = weak.upgrade() {
-                                        let _ =
-                                            cx.update_entity(&st, |s: &mut SettingsState, cx| {
-                                                match res {
-                                                    Ok(ControlResponse::Ok) => {
-                                                        s.proxies.retain(|p| p.id != pid_cmp);
-                                                        s.status = Some("Proxy removed.".into());
-                                                    }
-                                                    Ok(ControlResponse::Error(msg)) => {
-                                                        s.status =
-                                                            Some(format!("delete failed: {msg}"));
-                                                    }
-                                                    Err(e) => {
-                                                        s.status =
-                                                            Some(format!("delete failed: {e}"));
-                                                    }
-                                                    _ => {
-                                                        s.status = Some(
-                                                            "unexpected delete response".into(),
-                                                        );
-                                                    }
+                                        cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                            match res {
+                                                Ok(ControlResponse::Ok) => {
+                                                    s.proxies.retain(|p| p.id != pid_cmp);
+                                                    s.status = Some("Proxy removed.".into());
                                                 }
-                                                cx.notify();
-                                            });
+                                                Ok(ControlResponse::Error(msg)) => {
+                                                    s.status =
+                                                        Some(format!("delete failed: {msg}"));
+                                                }
+                                                Err(e) => {
+                                                    s.status = Some(format!("delete failed: {e}"));
+                                                }
+                                                _ => {
+                                                    s.status =
+                                                        Some("unexpected delete response".into());
+                                                }
+                                            }
+                                            cx.notify();
+                                        });
                                     }
                                 })
                                 .detach();

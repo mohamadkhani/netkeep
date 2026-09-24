@@ -68,23 +68,23 @@ impl RulesFilter {
                     return false;
                 }
                 if let Some(a) = self.action {
-                    let matches = match (&r.action, a) {
+                    let matches = matches!(
+                        (&r.action, a),
                         (RuleAction::Allow, ActionFilter::Allow)
-                        | (RuleAction::Deny, ActionFilter::Deny)
-                        | (RuleAction::Ask, ActionFilter::Ask) => true,
-                        (RuleAction::Route { .. }, ActionFilter::Route) => true,
-                        _ => false,
-                    };
+                            | (RuleAction::Deny, ActionFilter::Deny)
+                            | (RuleAction::Ask, ActionFilter::Ask)
+                            | (RuleAction::Route, ActionFilter::Route)
+                    );
                     if !matches {
                         return false;
                     }
                 }
                 if let Some(d) = self.duration {
-                    let matches = match (r.duration, d) {
+                    let matches = matches!(
+                        (r.duration, d),
                         (RuleDuration::Permanent, DurationFilter::Permanent)
-                        | (RuleDuration::UntilRestart, DurationFilter::UntilRestart) => true,
-                        _ => false,
-                    };
+                            | (RuleDuration::UntilRestart, DurationFilter::UntilRestart)
+                    );
                     if !matches {
                         return false;
                     }

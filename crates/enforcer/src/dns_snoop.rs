@@ -56,7 +56,7 @@ impl DnsSnoopWorker {
                             counter!("netkeep.dns.snoop.parse_success").increment(1);
                             let count = entries.len() as u64;
                             for (ip, domain) in entries {
-                                self.dns_cache.insert(&ip.to_string(), &domain);
+                                self.dns_cache.insert(ip.to_string(), domain);
                             }
                             counter!("netkeep.dns.snoop.entries_learned").increment(count);
                         }

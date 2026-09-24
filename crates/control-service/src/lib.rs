@@ -31,6 +31,9 @@ impl PolicyLogKey {
     }
 }
 
+/// Callback returning the fwmark to use for a `RouteTarget`, if any.
+type RouteMarkFn = Box<dyn Fn(&RouteTarget) -> Option<u32> + Send>;
+
 pub struct ControlService<R: Repository> {
     repo: R,
     decision_engine: DecisionEngine,
@@ -45,7 +48,7 @@ pub struct ControlService<R: Repository> {
     nfqueue_num: Option<u16>,
     /// Lazily install and return the fwmark for a RouteTarget.
     /// Set by the daemon to call `ensure_route_mark`; None in tests.
-    route_mark_fn: Option<Box<dyn Fn(&RouteTarget) -> Option<u32> + Send>>,
+    route_mark_fn: Option<RouteMarkFn>,
     /// Suppress repeated `policy:` stderr lines for the same flow identity.
     policy_log_dedup: HashMap<PolicyLogKey, u64>,
 }
@@ -399,9 +402,9 @@ impl<R: Repository> ControlService<R> {
                         self.repo.upsert_pending(&p);
                         // NEW: Send push notification to subscribers
                         let decision = p.clone();
-                        let _ = self
-                            .notification_tx
-                            .send(PushNotification::PendingCreated { decision });
+                        let _ = self.notification_tx.send(PushNotification::PendingCreated {
+                            decision: *decision,
+                        });
                         ControlResponse::PendingCreated {
                             pending_id: p.id,
                             created_at_secs: p.created_at_secs,

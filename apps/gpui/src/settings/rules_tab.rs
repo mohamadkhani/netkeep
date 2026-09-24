@@ -159,7 +159,7 @@ impl TableDelegate for RulesDelegate {
                     RuleAction::Allow => ("ALLOW", colors::green()),
                     RuleAction::Deny => ("DENY", colors::error()),
                     RuleAction::Ask => ("ASK", colors::orange()),
-                    RuleAction::Route { .. } => ("ROUTE", colors::primary()),
+                    RuleAction::Route => ("ROUTE", colors::primary()),
                 };
                 badge(label, if dimmed { colors::muted() } else { color })
             }
@@ -177,7 +177,7 @@ impl TableDelegate for RulesDelegate {
                 };
                 Label::new(display_name)
                     .text_size(px(12.))
-                    .text_color(if route_is_empty(&rule) || dimmed {
+                    .text_color(if route_is_empty(rule) || dimmed {
                         colors::muted()
                     } else {
                         colors::text()
@@ -267,7 +267,7 @@ impl TableDelegate for RulesDelegate {
                                     })
                                     .await;
                                 if let Some(st) = sw.upgrade() {
-                                    let _ = cx.update_entity(&st, |s, cx| {
+                                    cx.update_entity(&st, |s, cx| {
                                         if let Some(x) = s.rules.iter_mut().find(|x| x.id == tid) {
                                             x.enabled = !x.enabled;
                                         }
@@ -296,7 +296,7 @@ impl TableDelegate for RulesDelegate {
                                         })
                                         .await;
                                     if let Some(st) = sw.upgrade() {
-                                        let _ = cx.update_entity(&st, |s, cx| {
+                                        cx.update_entity(&st, |s, cx| {
                                             s.rules.retain(|r| r.id != rid_cmp);
                                             cx.notify();
                                         });

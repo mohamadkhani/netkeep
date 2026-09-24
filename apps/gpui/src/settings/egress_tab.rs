@@ -199,7 +199,7 @@ impl TableDelegate for EgressDelegate {
                             move |_, _, cx| {
                                 let egress = egress_for_test.clone();
                                 if let Some(st) = state_test.upgrade() {
-                                    let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                    cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                         s.egress_test_request = Some(egress);
                                         cx.notify();
                                     });
@@ -216,7 +216,7 @@ impl TableDelegate for EgressDelegate {
                             move |_, _, cx| {
                                 let egress = egress_edit.clone();
                                 if let Some(st) = state_edit.upgrade() {
-                                    let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                    cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                         s.egress_edit_request = Some(egress);
                                         cx.notify();
                                     });
@@ -243,31 +243,28 @@ impl TableDelegate for EgressDelegate {
                                         })
                                         .await;
                                     if let Some(st) = weak.upgrade() {
-                                        let _ =
-                                            cx.update_entity(&st, |s: &mut SettingsState, cx| {
-                                                match res {
-                                                    Ok(ControlResponse::Ok) => {
-                                                        s.egresses.retain(|e| e.id != eid_cmp);
-                                                        s.load_generation =
-                                                            s.load_generation.saturating_add(1);
-                                                        s.status = Some("Egress removed.".into());
-                                                    }
-                                                    Ok(ControlResponse::Error(msg)) => {
-                                                        s.status =
-                                                            Some(format!("delete failed: {msg}"));
-                                                    }
-                                                    Err(e) => {
-                                                        s.status =
-                                                            Some(format!("delete failed: {e}"));
-                                                    }
-                                                    _ => {
-                                                        s.status = Some(
-                                                            "unexpected delete response".into(),
-                                                        );
-                                                    }
+                                        cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                                            match res {
+                                                Ok(ControlResponse::Ok) => {
+                                                    s.egresses.retain(|e| e.id != eid_cmp);
+                                                    s.load_generation =
+                                                        s.load_generation.saturating_add(1);
+                                                    s.status = Some("Egress removed.".into());
                                                 }
-                                                cx.notify();
-                                            });
+                                                Ok(ControlResponse::Error(msg)) => {
+                                                    s.status =
+                                                        Some(format!("delete failed: {msg}"));
+                                                }
+                                                Err(e) => {
+                                                    s.status = Some(format!("delete failed: {e}"));
+                                                }
+                                                _ => {
+                                                    s.status =
+                                                        Some("unexpected delete response".into());
+                                                }
+                                            }
+                                            cx.notify();
+                                        });
                                     }
                                 })
                                 .detach();

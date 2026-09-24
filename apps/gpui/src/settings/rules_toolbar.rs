@@ -26,6 +26,9 @@ use crate::components::action_btn;
 
 use super::rules_filter::RulesFilter;
 
+/// Clear-button callback: resets filter state, search input, and facets.
+type OnClear = Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>;
+
 /// The four facet select states (plain string items, "Any" = index 0).
 #[derive(Clone)]
 pub struct FacetSelects {
@@ -44,7 +47,7 @@ pub struct RulesToolbar<'a> {
     pub total: usize,
     /// Called with (window, cx) when CLEAR is clicked — resets filter state,
     /// search input, and facet selects.
-    pub on_clear: Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>,
+    pub on_clear: OnClear,
 }
 
 impl<'a> RulesToolbar<'a> {

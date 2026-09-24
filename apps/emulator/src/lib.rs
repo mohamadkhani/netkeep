@@ -187,18 +187,16 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
             now_secs: current_unix_secs(),
         },
     )
-    .map_err(|e| {
+    .inspect_err(|_| {
         let _ = fail_reply(&mut stream);
-        e
     })?;
     match response {
         ControlResponse::ImmediateVerdict {
             action: RuleAction::Allow,
             ..
         } => {
-            let upstream = connect_upstream(&host, port, None, socket_path).map_err(|e| {
+            let upstream = connect_upstream(&host, port, None, socket_path).inspect_err(|_| {
                 let _ = fail_reply(&mut stream);
-                e
             })?;
             success_reply(&mut stream)?;
             relay_bidirectional(stream, upstream)
@@ -209,9 +207,8 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
             ..
         } => {
             let upstream = connect_upstream(&host, port, route_target.as_ref(), socket_path)
-                .map_err(|e| {
+                .inspect_err(|_| {
                     let _ = fail_reply(&mut stream);
-                    e
                 })?;
             success_reply(&mut stream)?;
             relay_bidirectional(stream, upstream)
@@ -261,9 +258,8 @@ fn wait_for_pending_and_continue(
                 pending_id: pending_id.to_string(),
             },
         )
-        .map_err(|e| {
+        .inspect_err(|_| {
             let _ = fail_reply(&mut stream);
-            e
         })?;
         match poll {
             ControlResponse::PendingStillWaiting { .. } => {
@@ -277,10 +273,10 @@ fn wait_for_pending_and_continue(
                 action: RuleAction::Allow,
                 ..
             } => {
-                let upstream = connect_upstream(&host, port, None, socket_path).map_err(|e| {
-                    let _ = fail_reply(&mut stream);
-                    e
-                })?;
+                let upstream =
+                    connect_upstream(&host, port, None, socket_path).inspect_err(|_| {
+                        let _ = fail_reply(&mut stream);
+                    })?;
                 success_reply(&mut stream)?;
                 return relay_bidirectional(stream, upstream);
             }
@@ -295,9 +291,8 @@ fn wait_for_pending_and_continue(
                 ..
             } => {
                 let upstream = connect_upstream(&host, port, route_target.as_ref(), socket_path)
-                    .map_err(|e| {
+                    .inspect_err(|_| {
                         let _ = fail_reply(&mut stream);
-                        e
                     })?;
                 success_reply(&mut stream)?;
                 return relay_bidirectional(stream, upstream);

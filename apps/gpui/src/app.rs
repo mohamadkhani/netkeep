@@ -105,12 +105,6 @@ impl Render for DecisionApp {
         let mono_font = Theme::global(cx).mono_font_family.clone();
 
         let remaining = item.deadline_at_secs.saturating_sub(now);
-        let process = item
-            .flow
-            .process_name
-            .clone()
-            .unwrap_or_else(|| "unknown".into());
-        let proto = format!("{:?}", item.flow.protocol).to_uppercase();
         let closing = state.closing;
 
         // The window is a transparent full-work-area overlay (maximized).
@@ -163,17 +157,7 @@ impl Render for DecisionApp {
             )
             .blur_radius(px(40.))])
             .child(components::decision_header(remaining))
-            .child(components::flow_info_section(
-                &process,
-                &item.flow.app_name,
-                &proto,
-                item.flow.destination_port,
-                &item.flow.destination_domain,
-                &item.flow.destination_ip,
-                item.flow.direction,
-                &item.flow.device_label,
-                mono_font,
-            ))
+            .child(components::flow_info_section(&item.flow, mono_font))
             .child(components::action_footer(components::ActionFooterProps {
                 pending_id: item.id.clone(),
                 flow: item.flow.clone(),

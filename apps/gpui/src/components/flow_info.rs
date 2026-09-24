@@ -1,20 +1,19 @@
-use core_types::FlowDirection;
+use core_types::{FlowContext, FlowDirection};
 use gpui::{div, px, FontWeight, IntoElement, ParentElement, SharedString, Styled};
 use gpui_component::{h_flex, v_flex};
 
 use crate::colors;
 
-pub fn flow_info_section(
-    process_name: &str,
-    app_name: &Option<String>,
-    protocol: &str,
-    port: u16,
-    domain: &Option<String>,
-    ip: &str,
-    direction: FlowDirection,
-    device_label: &Option<String>,
-    mono_font_family: SharedString,
-) -> gpui::AnyElement {
+pub fn flow_info_section(flow: &FlowContext, mono_font_family: SharedString) -> gpui::AnyElement {
+    let process_name = flow.process_name.as_deref().unwrap_or("unknown");
+    let app_name = &flow.app_name;
+    let protocol = format!("{:?}", flow.protocol).to_uppercase();
+    let port = flow.destination_port;
+    let domain = &flow.destination_domain;
+    let ip = flow.destination_ip.as_str();
+    let direction = flow.direction;
+    let device_label = &flow.device_label;
+
     let destination = domain.as_deref().unwrap_or("(unknown)");
 
     let direction_str = match direction {
@@ -50,7 +49,7 @@ pub fn flow_info_section(
         // Protocol row
         .child(grid_row(
             label_element("PROTOCOL", ui_font.clone()),
-            protocol_value(protocol, port, mono_font_family.clone()),
+            protocol_value(&protocol, port, mono_font_family.clone()),
         ))
         // Direction row
         .child(grid_row(

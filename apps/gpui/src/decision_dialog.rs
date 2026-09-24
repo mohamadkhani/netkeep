@@ -32,11 +32,8 @@ pub fn show_decision_dialog(item: PendingDecision, mut egresses: Vec<Egress>) {
             _ => a.id.cmp(&b.id),
         },
     });
-    let process_scope = if item.flow.process_name.is_some() {
-        ProcessScope::Specific
-    } else {
-        ProcessScope::Specific // locked: shown as "unknown", cannot switch to All
-    };
+    // Locked: shown as "unknown", cannot switch to All.
+    let process_scope = ProcessScope::Specific;
     let dest_scope = if item.flow.destination_domain.is_some() {
         DestScope::DomainExact
     } else {

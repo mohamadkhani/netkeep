@@ -295,8 +295,10 @@ fn shield_icon(color_rgb: u32) -> Icon {
 /// Spawn the SNI tray service on a dedicated tokio runtime thread.
 ///
 /// Returns the receiver for tray actions plus:
-///   - `state_tx`: send a new NFQUEUE-enabled bool to refresh the tray icon.
-///   - `stop_tx`: signal the tray service to shut down.
+///
+/// - `state_tx`: send a new NFQUEUE-enabled bool to refresh the tray icon.
+/// - `stop_tx`: signal the tray service to shut down.
+///
 /// The thread lives until `stop_tx` is dropped or signalled.
 pub fn spawn_tray(
     nfqueue_enabled: bool,

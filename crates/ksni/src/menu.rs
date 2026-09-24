@@ -8,6 +8,15 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use zbus::zvariant::{OwnedValue, Str, Type, Value};
 
+/// Callback invoked when a menu item is clicked.
+type OnClicked<T> = Box<dyn Fn(&mut T, usize) + Send>;
+
+/// A set of updated properties plus a list of removed property names.
+type MenuDiff = (
+    HashMap<Cow<'static, str>, OwnedValue>,
+    Vec<Cow<'static, str>>,
+);
+
 // pub struct Properties {
 //     /// Tells if the menus are in a normal state or they believe that they
 //     /// could use some attention.  Cases for showing them would be if help
@@ -354,7 +363,6 @@ impl<T: 'static> From<CheckmarkItem<T>> for RawMenuItem<T> {
             on_clicked: Box::new(move |this: &mut T, _id| {
                 (activate)(this);
             }),
-            ..Default::default()
         }
     }
 }
@@ -404,7 +412,7 @@ pub struct RadioGroup<T> {
     ///     }
     /// }
     /// ```
-    pub select: Box<dyn Fn(&mut T, usize) + Send>,
+    pub select: OnClicked<T>,
     /// List of radio items
     pub options: Vec<RadioItem>,
 }
@@ -511,7 +519,7 @@ pub(crate) struct RawMenuItem<T> {
     /// How the menuitem feels the information it's displaying to the
     /// user should be presented.
     disposition: Disposition,
-    pub on_clicked: Box<dyn Fn(&mut T, usize) + Send>,
+    pub on_clicked: OnClicked<T>,
 }
 
 macro_rules! if_not_default_then_insert {
@@ -635,13 +643,7 @@ impl<T> RawMenuItem<T> {
         properties
     }
 
-    pub(crate) fn diff(
-        &self,
-        other: &Self,
-    ) -> Option<(
-        HashMap<Cow<'static, str>, OwnedValue>,
-        Vec<Cow<'static, str>>,
-    )> {
+    pub(crate) fn diff(&self, other: &Self) -> Option<MenuDiff> {
         let default = Self::default();
         let mut updated_props: HashMap<Cow<'static, str>, OwnedValue> = HashMap::new();
         let mut removed_props: Vec<Cow<'static, str>> = Vec::new();
@@ -919,7 +921,7 @@ pub(crate) fn menu_flatten<T: 'static>(
                     result[parent_index].1.push(index);
                 }
                 MenuItem::SubMenu(mut item) => {
-                    let submenu = std::mem::replace(&mut item.submenu, Default::default());
+                    let submenu = std::mem::take(&mut item.submenu);
                     let index = result.len();
                     result.push((item.into(), Vec::with_capacity(submenu.len())));
                     result[parent_index].1.push(index);
@@ -952,7 +954,6 @@ pub(crate) fn menu_flatten<T: 'static>(
                             on_clicked: Box::new(move |this: &mut T, id| {
                                 (on_selected.lock().unwrap())(this, id - offset);
                             }),
-                            ..Default::default()
                         };
                         let index = result.len();
                         result.push((item, Vec::new()));

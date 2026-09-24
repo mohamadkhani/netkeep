@@ -32,7 +32,7 @@ pub(crate) async fn run<T: Tray>(
 
     // for those `expect`, see: https://github.com/dbus2/zbus/issues/403
     let conn = zbus::connection::Builder::session()
-        .map_err(|e| Error::Dbus(e))?
+        .map_err(Error::Dbus)?
         .internal_executor(false) // avoid extra thread when async-io enabled
         .serve_at(SNI_PATH, sni_obj)
         .expect("SNI_PATH should be valid")
@@ -40,7 +40,7 @@ pub(crate) async fn run<T: Tray>(
         .expect("MENU_PATH should be valid")
         .build()
         .await
-        .map_err(|e| Error::Dbus(e))?;
+        .map_err(Error::Dbus)?;
 
     if cfg!(feature = "async-io") {
         let executor = conn.executor().clone();
@@ -115,7 +115,7 @@ pub(crate) async fn run<T: Tray>(
         && !snw_object
             .is_status_notifier_host_registered()
             .await
-            .map_err(|e| Error::Dbus(e))?
+            .map_err(Error::Dbus)?
     {
         return Err(Error::WontShow);
     }
@@ -126,7 +126,7 @@ pub(crate) async fn run<T: Tray>(
     let mut name_changed_signal = dbus_object
         .receive_name_owner_changed_with_args(&[(0, "org.kde.StatusNotifierWatcher")])
         .await
-        .map_err(|e| Error::Dbus(e))?;
+        .map_err(Error::Dbus)?;
 
     let service_loop = async move {
         loop {
@@ -342,8 +342,8 @@ impl<T: Tray> Service<T> {
     }
 
     async fn update(&mut self, conn: &Connection) -> zbus::Result<()> {
-        self.update_properties(&conn).await?;
-        self.update_menu(&conn).await
+        self.update_properties(conn).await?;
+        self.update_menu(conn).await
     }
 
     // Return None if item not exists
@@ -468,22 +468,19 @@ impl<T: Tray> Service<T> {
         _data: OwnedValue,
         _timestamp: u32,
     ) -> zbus::fdo::Result<()> {
-        match event_id {
-            "clicked" => {
-                if id == 0 {
-                    return Err(zbus::fdo::Error::InvalidArgs(
-                        "root menu item is not clickable".to_string(),
-                    ));
-                }
-                let index = self
-                    .id2index(id)
-                    .ok_or_else(|| zbus::fdo::Error::InvalidArgs("id not found".to_string()))?;
-                (self.flattened_menu[index].0.on_clicked)(&mut self.tray, index);
-                if do_update {
-                    self.update(&conn).await?;
-                }
+        if event_id == "clicked" {
+            if id == 0 {
+                return Err(zbus::fdo::Error::InvalidArgs(
+                    "root menu item is not clickable".to_string(),
+                ));
             }
-            _ => (),
+            let index = self
+                .id2index(id)
+                .ok_or_else(|| zbus::fdo::Error::InvalidArgs("id not found".to_string()))?;
+            (self.flattened_menu[index].0.on_clicked)(&mut self.tray, index);
+            if do_update {
+                self.update(conn).await?;
+            }
         }
         Ok(())
     }

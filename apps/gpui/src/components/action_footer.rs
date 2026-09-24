@@ -66,8 +66,6 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
 
     let pid_deny = pending_id.clone();
     let pid_allow = pending_id.clone();
-    let flow_allow = flow.clone();
-    let flow_deny = flow.clone();
     let dest_allow = dest_matcher.clone();
     let dest_deny = dest_matcher.clone();
     let proc_allow = rule_process_name.clone();
@@ -139,26 +137,26 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
                 .w_full()
                 .gap(px(10.))
                 .child(allow_button(
-                    pid_allow,
-                    make_permanent,
-                    flow_allow,
+                    ActionButton {
+                        pid: pid_allow,
+                        make_permanent,
+                        dest_matcher: dest_allow,
+                        rule_process_name: proc_allow,
+                        rule_process_exe: proc_exe_allow,
+                        disabled: is_too_broad,
+                        state: state_weak.clone(),
+                    },
                     selected_egress,
-                    dest_allow,
-                    proc_allow,
-                    proc_exe_allow,
-                    is_too_broad,
-                    state_weak.clone(),
                 ))
-                .child(deny_button(
-                    pid_deny,
+                .child(deny_button(ActionButton {
+                    pid: pid_deny,
                     make_permanent,
-                    flow_deny,
-                    dest_deny,
-                    proc_deny,
-                    proc_exe_deny,
-                    is_too_broad,
-                    state_weak.clone(),
-                )),
+                    dest_matcher: dest_deny,
+                    rule_process_name: proc_deny,
+                    rule_process_exe: proc_exe_deny,
+                    disabled: is_too_broad,
+                    state: state_weak.clone(),
+                })),
         )
         .into_any_element()
 }
@@ -174,7 +172,11 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
 fn domain_apex(domain: &str) -> String {
     let dot_count = domain.chars().filter(|&c| c == '.').count();
     if dot_count >= 2 {
-        domain.splitn(2, '.').nth(1).unwrap_or(domain).to_string()
+        domain
+            .split_once('.')
+            .map(|x| x.1)
+            .unwrap_or(domain)
+            .to_string()
     } else {
         domain.to_string()
     }
@@ -406,8 +408,9 @@ fn rule_summary_line(
             while octets.len() < 4 {
                 octets.push("0".to_string());
             }
-            for i in (*n as usize)..4 {
-                octets[i] = "0".to_string();
+            let start = (*n as usize).min(octets.len());
+            for octet in &mut octets[start..] {
+                *octet = "0".to_string();
             }
             let prefix = n * 8;
             if *n == 4 {
@@ -636,8 +639,9 @@ fn build_dest_matcher(flow: &FlowContext, dest_scope: &DestScope) -> Destination
             while octets.len() < 4 {
                 octets.push("0".to_string());
             }
-            for i in (*n as usize)..4 {
-                octets[i] = "0".to_string();
+            let start = (*n as usize).min(octets.len());
+            for octet in &mut octets[start..] {
+                *octet = "0".to_string();
             }
             let prefix = n * 8;
             if *n == 4 {
@@ -649,17 +653,27 @@ fn build_dest_matcher(flow: &FlowContext, dest_scope: &DestScope) -> Destination
     }
 }
 
-fn allow_button(
+/// Shared arguments for the ALLOW and DENY action buttons.
+struct ActionButton {
     pid: String,
     make_permanent: bool,
-    _flow: FlowContext,
-    selected_egress: Egress,
     dest_matcher: DestinationMatcher,
     rule_process_name: Option<String>,
     rule_process_exe: Option<String>,
     disabled: bool,
     state: WeakEntity<AppState>,
-) -> gpui::AnyElement {
+}
+
+fn allow_button(button: ActionButton, selected_egress: Egress) -> gpui::AnyElement {
+    let ActionButton {
+        pid,
+        make_permanent,
+        dest_matcher,
+        rule_process_name,
+        rule_process_exe,
+        disabled,
+        state,
+    } = button;
     let is_default = selected_egress.is_system_default;
     let egress_id = if is_default {
         None
@@ -778,16 +792,16 @@ fn allow_button(
         .into_any_element()
 }
 
-fn deny_button(
-    pid: String,
-    make_permanent: bool,
-    _flow: FlowContext,
-    dest_matcher: DestinationMatcher,
-    rule_process_name: Option<String>,
-    rule_process_exe: Option<String>,
-    disabled: bool,
-    state: WeakEntity<AppState>,
-) -> gpui::AnyElement {
+fn deny_button(button: ActionButton) -> gpui::AnyElement {
+    let ActionButton {
+        pid,
+        make_permanent,
+        dest_matcher,
+        rule_process_name,
+        rule_process_exe,
+        disabled,
+        state,
+    } = button;
     div()
         .id("deny-btn")
         .flex_1()

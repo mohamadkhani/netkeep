@@ -181,7 +181,7 @@ fn run_tray_monitor() {
                             });
                         }
                         TrayAction::Quit => {
-                            let _ = app.update(|cx| cx.quit());
+                            app.update(|cx| cx.quit());
                         }
                     }
                 }

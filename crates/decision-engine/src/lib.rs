@@ -14,7 +14,9 @@ pub enum OverflowPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecisionOutcome {
     Immediate(RuleAction),
-    Pending(PendingDecision),
+    /// Boxed to keep the enum small: `RuleAction` is tiny, `PendingDecision`
+    /// carries a full `FlowContext`.
+    Pending(Box<PendingDecision>),
 }
 
 /// Stable identity for a logical flow, independent of ephemeral src_port or
@@ -104,7 +106,7 @@ impl DecisionEngine {
         if let Some(existing_id) = self.pending_by_flow.get(&key) {
             if let Some(existing) = self.pending.get(existing_id) {
                 counter!("netkeep.pending.deduplicated", "type" => "exact").increment(1);
-                return DecisionOutcome::Pending(existing.clone());
+                return DecisionOutcome::Pending(Box::new(existing.clone()));
             }
         }
 
@@ -150,12 +152,12 @@ impl DecisionEngine {
                     let new_key = FlowKey::from(&existing.flow);
                     self.pending_by_flow.insert(new_key, existing_id.clone());
                     counter!("netkeep.pending.deduplicated", "type" => "name_upgrade").increment(1);
-                    return DecisionOutcome::Pending(existing.clone());
+                    return DecisionOutcome::Pending(Box::new(existing.clone()));
                 }
             }
             if let Some(existing) = self.pending.get(&existing_id) {
                 counter!("netkeep.pending.deduplicated", "type" => "symmetric").increment(1);
-                return DecisionOutcome::Pending(existing.clone());
+                return DecisionOutcome::Pending(Box::new(existing.clone()));
             }
         }
 
@@ -189,7 +191,7 @@ impl DecisionEngine {
         self.pending.insert(id, decision.clone());
         counter!("netkeep.pending.created", "protocol" => proto_str).increment(1);
         gauge!("netkeep.pending.decisions").set(self.pending.len() as f64);
-        DecisionOutcome::Pending(decision)
+        DecisionOutcome::Pending(Box::new(decision))
     }
 
     pub fn resolve_pending(
@@ -230,7 +232,8 @@ impl DecisionEngine {
         let expired: Vec<String> = self
             .pending
             .iter()
-            .filter_map(|(k, v)| (v.deadline_at_secs <= now_secs).then(|| k.clone()))
+            .filter(|(_, v)| v.deadline_at_secs <= now_secs)
+            .map(|(k, _)| k.clone())
             .collect();
         let count = expired.len() as u64;
         for id in &expired {

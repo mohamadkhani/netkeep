@@ -87,8 +87,8 @@ impl fmt::Display for Status {
 }
 
 impl Status {
-    pub(crate) fn to_menu_status(&self) -> crate::menu::Status {
-        match *self {
+    pub(crate) fn to_menu_status(self) -> crate::menu::Status {
+        match self {
             Self::Active | Self::Passive => crate::menu::Status::Normal,
             Self::NeedsAttention => crate::menu::Status::Notice,
         }
@@ -120,33 +120,14 @@ pub struct ToolTip {
 ///
 /// # Example
 ///
-/// A static inlined icon using [image crate]:
-///
 /// ```
 /// # use std::sync::LazyLock;
-/// # use image::GenericImageView;
-/// #
-/// static ICON: LazyLock<ksni::Icon> = LazyLock::new(|| {
-///     let img = image::load_from_memory_with_format(
-///         include_bytes!("../examples/custom_icon.png"),
-///         image::ImageFormat::Png,
-///     )
-///     .expect("valid image");
-///     let (width, height) = img.dimensions();
-///     let mut data = img.into_rgba8().into_vec();
-///     assert_eq!(data.len() % 4, 0);
-///     for pixel in data.chunks_exact_mut(4) {
-///         pixel.rotate_right(1) // rgba to argb
-///     }
-///     ksni::Icon {
-///         width: width as i32,
-///         height: height as i32,
-///         data,
-///     }
+/// static ICON: LazyLock<ksni::Icon> = LazyLock::new(|| ksni::Icon {
+///     width: 1,
+///     height: 1,
+///     data: vec![0, 0, 0, 0], // single transparent pixel, ARGB order
 /// });
 /// ```
-///
-/// [image crate]: https://crates.io/crates/image/
 #[derive(Clone, Debug, Hash, Type, Value, Serialize)]
 pub struct Icon {
     pub width: i32,

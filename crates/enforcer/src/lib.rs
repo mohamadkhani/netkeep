@@ -359,15 +359,9 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             // Exclude loopback traffic: skip both the loopback interface and the
             // 127.0.0.0/8 address range (defense-in-depth; the Rust processor also
             // filters loopback as a second layer).
-            script.push_str(&format!(
-                "add rule inet netkeep output_early oifname \"lo\" accept\n",
-            ));
-            script.push_str(&format!(
-                "add rule inet netkeep output_early ip daddr 127.0.0.0/8 accept\n",
-            ));
-            script.push_str(&format!(
-                "add rule inet netkeep output_early ip6 daddr ::1 accept\n",
-            ));
+            script.push_str("add rule inet netkeep output_early oifname \"lo\" accept\n");
+            script.push_str("add rule inet netkeep output_early ip daddr 127.0.0.0/8 accept\n");
+            script.push_str("add rule inet netkeep output_early ip6 daddr ::1 accept\n");
             // IPv4-mapped loopback (::ffff:127.0.0.0/8) — not matched by `ip daddr` or `::1`.
             script.push_str(
                 "add rule inet netkeep output_early ip6 daddr ::ffff:7f00:0000/104 accept\n",
@@ -448,12 +442,8 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             );
             // Exclude loopback from forward chain
             script.push_str("add rule inet netkeep forward oifname \"lo\" accept\n");
-            script.push_str(&format!(
-                "add rule inet netkeep forward ip daddr 127.0.0.0/8 accept\n",
-            ));
-            script.push_str(&format!(
-                "add rule inet netkeep forward ip6 daddr ::1 accept\n",
-            ));
+            script.push_str("add rule inet netkeep forward ip daddr 127.0.0.0/8 accept\n");
+            script.push_str("add rule inet netkeep forward ip6 daddr ::1 accept\n");
             script
                 .push_str("add rule inet netkeep forward ip6 daddr ::ffff:7f00:0000/104 accept\n");
             script.push_str("add rule inet netkeep forward meta l4proto icmp accept\n");
@@ -692,7 +682,7 @@ fn connected_prefixes_for_device(dev: &str) -> Vec<String> {
 
 impl RouteManager for SystemRouteManager {
     fn add_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String> {
-        let table_id = 10000 + fwmark as u32;
+        let table_id = 10000 + fwmark;
         let dev = device_name(target);
         let fwmark_s = fwmark.to_string();
         let table_s = table_id.to_string();
@@ -782,7 +772,7 @@ impl RouteManager for SystemRouteManager {
     }
 
     fn remove_route(&self, target: &RouteTarget, fwmark: u32) -> Result<(), String> {
-        let table_id = 10000 + fwmark as u32;
+        let table_id = 10000 + fwmark;
         let fwmark_s = fwmark.to_string();
         let table_s = table_id.to_string();
         run_ip(&["route", "flush", "table", &table_s]).ok();

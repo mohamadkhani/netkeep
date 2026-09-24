@@ -157,7 +157,7 @@ impl SettingsApp {
             |this, _, event: &gpui_component::input::InputEvent, _, cx| {
                 if let gpui_component::input::InputEvent::Change = event {
                     let text = this.rules_search_input.read(cx).value().to_string();
-                    let _ = cx.update_entity(&this.state, |s, cx| {
+                    cx.update_entity(&this.state, |s, cx| {
                         s.rules_filter.search = text;
                         cx.notify();
                     });
@@ -214,7 +214,7 @@ impl SettingsApp {
                 move |this, _, event: &SelectEvent<Vec<String>>, _, cx| {
                     if let SelectEvent::Confirm(Some(label)) = event {
                         let label = label.clone();
-                        let _ = cx.update_entity(&this.state, |s, cx| {
+                        cx.update_entity(&this.state, |s, cx| {
                             apply(&label, &mut s.rules_filter);
                             cx.notify();
                         });
@@ -228,7 +228,7 @@ impl SettingsApp {
             |this, _, event: &SelectEvent<Vec<String>>, _, cx| {
                 if let SelectEvent::Confirm(Some(label)) = event {
                     let label = label.clone();
-                    let _ = cx.update_entity(&this.state, |s, cx| {
+                    cx.update_entity(&this.state, |s, cx| {
                         s.rules_filter.route = match label.as_str() {
                             "Any" => None,
                             "Unrouted" => Some(rules_filter::RouteFilter::Unrouted),
@@ -283,7 +283,7 @@ impl SettingsApp {
             // Drain rule edit request → open pre-filled rule form.
             let rule_edit = this.state.read(cx).rule_edit_request.clone();
             if let Some(rule) = rule_edit {
-                let _ = cx.update_entity(&this.state, |s, _cx| {
+                cx.update_entity(&this.state, |s, _cx| {
                     s.rule_edit_request = None;
                 });
                 this.open_rule_form_dialog(Some(rule), window, cx);
@@ -293,7 +293,7 @@ impl SettingsApp {
             // Drain egress edit request → open pre-filled egress form.
             let egress_edit = this.state.read(cx).egress_edit_request.clone();
             if let Some(egress) = egress_edit {
-                let _ = cx.update_entity(&this.state, |s, _cx| {
+                cx.update_entity(&this.state, |s, _cx| {
                     s.egress_edit_request = None;
                     // intentionally no cx.notify() — would re-enter this observer
                 });
@@ -304,7 +304,7 @@ impl SettingsApp {
             // Drain proxy edit request → open pre-filled proxy form.
             let proxy_edit = this.state.read(cx).proxy_edit_request.clone();
             if let Some(proxy) = proxy_edit {
-                let _ = cx.update_entity(&this.state, |s, _cx| {
+                cx.update_entity(&this.state, |s, _cx| {
                     s.proxy_edit_request = None;
                     // intentionally no cx.notify() here to avoid re-entering this observer
                 });
@@ -315,7 +315,7 @@ impl SettingsApp {
             // Drain proxy test request → open proxy test dialog.
             let proxy_test = this.state.read(cx).proxy_test_request.clone();
             if let Some(proxy) = proxy_test {
-                let _ = cx.update_entity(&this.state, |s, _cx| {
+                cx.update_entity(&this.state, |s, _cx| {
                     s.proxy_test_request = None;
                 });
                 this.open_proxy_test_dialog(proxy, window, cx);
@@ -336,7 +336,7 @@ impl SettingsApp {
                         .cloned(),
                     _ => None,
                 });
-                let _ = cx.update_entity(&this.state, |s, _cx| {
+                cx.update_entity(&this.state, |s, _cx| {
                     s.egress_test_request = None;
                 });
                 if let Some(proxy) = proxy_config {
@@ -515,9 +515,9 @@ impl SettingsApp {
 
         window.open_dialog(cx, move |dialog, _, _cx| {
             let cur_action = action_c.lock().unwrap().clone();
-            let cur_duration = dur_c.lock().unwrap().clone();
+            let cur_duration = *dur_c.lock().unwrap();
             let cur_dtype = dtype_c.lock().unwrap().clone();
-            let cur_pprio = pprio_c.lock().unwrap().clone();
+            let cur_pprio = *pprio_c.lock().unwrap();
 
             // Action button colors
             let (ac_allow, ac_deny, ac_ask, ac_route) = match cur_action {
@@ -539,14 +539,14 @@ impl SettingsApp {
                     colors::orange(),
                     colors::muted(),
                 ),
-                RuleAction::Route { .. } => (
+                RuleAction::Route => (
                     colors::muted(),
                     colors::muted(),
                     colors::muted(),
                     colors::primary(),
                 ),
             };
-            let is_route_action = matches!(cur_action, RuleAction::Route { .. });
+            let is_route_action = matches!(cur_action, RuleAction::Route);
             // Duration button colors
             let (dc_perm, dc_sess) = match cur_duration {
                 RuleDuration::Permanent => (colors::primary(), colors::muted()),
@@ -594,16 +594,6 @@ impl SettingsApp {
             let eid = existing_id.clone();
 
             let do_save: Rc<dyn Fn(&mut gpui::App) -> bool> = {
-                let proc_i = proc_i;
-                let dest_i = dest_i;
-                let route_ok = route_ok;
-                let action_ok = action_ok;
-                let dur_ok = dur_ok;
-                let dtype_ok = dtype_ok;
-                let pprio_ok = pprio_ok;
-                let state_w = state_w;
-                let sock = sock;
-                let eid = eid;
                 Rc::new(move |cx: &mut gpui::App| -> bool {
                     let process_raw = proc_i.read(cx).value().to_string();
                     let process_name = if process_raw.trim().is_empty() {
@@ -613,7 +603,7 @@ impl SettingsApp {
                     };
                     let dest_val = dest_i.read(cx).value().trim().to_string();
                     let action = action_ok.lock().unwrap().clone();
-                    let duration = dur_ok.lock().unwrap().clone();
+                    let duration = *dur_ok.lock().unwrap();
                     let dest_type = dtype_ok.lock().unwrap().clone();
                     let destination = match dest_type.as_str() {
                         "cidr" => DestinationMatcher::Cidr(dest_val),
@@ -660,7 +650,7 @@ impl SettingsApp {
                     // the daemon seeds the correct ladder slot.
                     // Other combos are ranked by destination specificity, so
                     // plain AddRule (which seeds High) is fine.
-                    let proc_prio = pprio_ok.lock().unwrap().clone();
+                    let proc_prio = *pprio_ok.lock().unwrap();
                     cx.spawn(async move |cx| {
                         let res = cx
                             .background_executor()
@@ -677,7 +667,7 @@ impl SettingsApp {
                             })
                             .await;
                         if let Some(st) = state_wc.upgrade() {
-                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                            cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                 match res {
                                     Ok(ControlResponse::Ok) => {
                                         if editing {
@@ -1025,12 +1015,7 @@ impl SettingsApp {
             .to_string();
         let init_targets_vec: Vec<String> = existing
             .as_ref()
-            .map(|e| {
-                e.targets
-                    .iter()
-                    .map(|t| helpers::route_summary(t))
-                    .collect()
-            })
+            .map(|e| e.targets.iter().map(helpers::route_summary).collect())
             .unwrap_or_default();
         let init_dns = existing
             .as_ref()
@@ -1269,13 +1254,6 @@ impl SettingsApp {
             let eid = existing_id.clone();
 
             let do_save: Rc<dyn Fn(&mut gpui::App) -> bool> = {
-                let name_i = name_i;
-                let color_i = color_i;
-                let dns_i = dns_i;
-                let tl_ok = tl_ok;
-                let state_w = state_w;
-                let sock = sock;
-                let eid = eid;
                 Rc::new(move |cx: &mut gpui::App| -> bool {
                     let name = name_i.read(cx).value().to_string();
                     let color = color_i.read(cx).value().to_string();
@@ -1318,7 +1296,7 @@ impl SettingsApp {
                             })
                             .await;
                         if let Some(st) = state_wc.upgrade() {
-                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                            cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                 match res {
                                     Ok(ControlResponse::Ok) => {
                                         if editing {
@@ -1694,14 +1672,6 @@ impl SettingsApp {
             let auth_val = init_auth.clone();
 
             let do_save: Rc<dyn Fn(&mut gpui::App) -> bool> = {
-                let name_i = name_i;
-                let host_i = host_i;
-                let port_i = port_i;
-                let proto_for_ok = proto_for_ok;
-                let state_w = state_w;
-                let sock = sock;
-                let eid = eid;
-                let auth_val = auth_val;
                 let existing_names = existing_names.clone();
                 Rc::new(move |cx: &mut gpui::App| -> bool {
                     let name = name_i.read(cx).value().to_string();
@@ -1716,7 +1686,7 @@ impl SettingsApp {
                     let trimmed = name.trim();
                     if trimmed.is_empty() {
                         if let Some(st) = state_w.upgrade() {
-                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                            cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                 s.status = Some("proxy name must not be empty".into());
                                 cx.notify();
                             });
@@ -1725,7 +1695,7 @@ impl SettingsApp {
                     }
                     if existing_names.iter().any(|n| n == trimmed) {
                         if let Some(st) = state_w.upgrade() {
-                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                            cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                 s.status =
                                     Some(format!("proxy name '{trimmed}' is already in use"));
                                 cx.notify();
@@ -1769,7 +1739,7 @@ impl SettingsApp {
                             })
                             .await;
                         if let Some(st) = state_wc.upgrade() {
-                            let _ = cx.update_entity(&st, |s: &mut SettingsState, cx| {
+                            cx.update_entity(&st, |s: &mut SettingsState, cx| {
                                 match res {
                                     Ok(ControlResponse::Ok) => {
                                         if editing {
@@ -2171,7 +2141,7 @@ impl SettingsApp {
                                                     let sw = state_w_http.clone();
                                                     *hl.lock().unwrap() = true;
                                                     if let Some(st) = sw.upgrade() {
-                                                        let _ = cx.update_entity(&st, |_, cx| {
+                                                        cx.update_entity(&st, |_, cx| {
                                                             cx.notify();
                                                         });
                                                     }
@@ -2213,10 +2183,9 @@ impl SettingsApp {
                                                         *hr.lock().unwrap() = Some(result);
                                                         *hl.lock().unwrap() = false;
                                                         if let Some(st) = sw.upgrade() {
-                                                            let _ =
-                                                                cx.update_entity(&st, |_, cx| {
-                                                                    cx.notify();
-                                                                });
+                                                            cx.update_entity(&st, |_, cx| {
+                                                                cx.notify();
+                                                            });
                                                         }
                                                     })
                                                     .detach();
@@ -2258,7 +2227,7 @@ impl SettingsApp {
                                                     let sw = state_w_dns.clone();
                                                     *dl.lock().unwrap() = true;
                                                     if let Some(st) = sw.upgrade() {
-                                                        let _ = cx.update_entity(&st, |_, cx| {
+                                                        cx.update_entity(&st, |_, cx| {
                                                             cx.notify();
                                                         });
                                                     }
@@ -2300,10 +2269,9 @@ impl SettingsApp {
                                                         *dr.lock().unwrap() = Some(result);
                                                         *dl.lock().unwrap() = false;
                                                         if let Some(st) = sw.upgrade() {
-                                                            let _ =
-                                                                cx.update_entity(&st, |_, cx| {
-                                                                    cx.notify();
-                                                                });
+                                                            cx.update_entity(&st, |_, cx| {
+                                                                cx.notify();
+                                                            });
                                                         }
                                                     })
                                                     .detach();
@@ -2355,7 +2323,7 @@ impl Render for SettingsApp {
                     1 => SettingsTab::Egress,
                     _ => SettingsTab::Proxies,
                 };
-                let _ = cx.update_entity(&this.state, |s, cx| {
+                cx.update_entity(&this.state, |s, cx| {
                     s.active_tab = tab;
                     cx.notify();
                 });
@@ -2389,7 +2357,7 @@ impl Render for SettingsApp {
                     if self.route_items_key != egress_key {
                         let route_items: Vec<String> = std::iter::once("Any".to_string())
                             .chain(std::iter::once("Unrouted".to_string()))
-                            .chain(egress_names.into_iter())
+                            .chain(egress_names)
                             .collect();
                         self.rules_facets.route.update(cx, |st, cx| {
                             st.set_items(route_items, window, cx);
@@ -2405,7 +2373,7 @@ impl Render for SettingsApp {
                 let search_input = self.rules_search_input.clone();
                 let facets = self.rules_facets.clone();
                 let on_clear = Rc::new(move |window: &mut gpui::Window, cx: &mut gpui::App| {
-                    let _ = state_entity.update(cx, |s, cx| {
+                    state_entity.update(cx, |s, cx| {
                         s.rules_filter.clear();
                         cx.notify();
                     });
@@ -2468,7 +2436,7 @@ impl Render for SettingsApp {
                                 .cursor_pointer()
                                 .child("CLEAR FILTERS")
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    let _ = cx.update_entity(&this.state, |s, cx| {
+                                    cx.update_entity(&this.state, |s, cx| {
                                         s.rules_filter.clear();
                                         cx.notify();
                                     });
@@ -2655,7 +2623,7 @@ impl Render for SettingsApp {
             // Footer with add button
             .children(footer_el)
             // Dialog layer — must be rendered here or dialogs never appear
-            .children(gpui_component::Root::render_dialog_layer(window, &mut **cx))
+            .children(gpui_component::Root::render_dialog_layer(window, cx))
             .into_any_element()
     }
 }

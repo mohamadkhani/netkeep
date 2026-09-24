@@ -138,9 +138,9 @@ pub trait Tray: Sized + Send + 'static {
         Default::default()
     }
 
-    /// The item only support the context menu, the visualization
-    /// should prefer showing the menu or sending ContextMenu()
-    /// instead of Activate()
+    // The item only support the context menu, the visualization
+    // should prefer showing the menu or sending ContextMenu()
+    // instead of Activate()
     // fn item_is_menu() -> bool { false }
 
     /// The StatusNotifierItem can carry an icon that can be used by the
