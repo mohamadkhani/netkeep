@@ -567,8 +567,7 @@ where
             flow_name,
             verdict_label(&decision),
         );
-        histogram!("netkeep.registration.duration")
-            .record(register_start.elapsed().as_secs_f64());
+        histogram!("netkeep.registration.duration").record(register_start.elapsed().as_secs_f64());
         histogram!("netkeep.decision.slow_path.duration")
             .record(slow_start.elapsed().as_secs_f64());
 
@@ -713,8 +712,7 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
                     let extract_start = Instant::now();
                     counter!("netkeep.sni.extraction.attempts", "kind" => "tls").increment(1);
                     let hint = if let Some(sni) = extract_tls_sni(payload) {
-                        counter!("netkeep.sni.extraction.success", "source" => "tls")
-                            .increment(1);
+                        counter!("netkeep.sni.extraction.success", "source" => "tls").increment(1);
                         Some(sni)
                     } else {
                         counter!("netkeep.sni.extraction.missed", "kind" => "tls").increment(1);

@@ -84,12 +84,10 @@ fn route_target_switch_changes_observable_behavior() -> Result<(), String> {
     }
 
     let db_path = env::var("NETKEEP_DB_PATH").unwrap_or_else(|_| "/tmp/netkeep.db".to_string());
-    let proxy = env::var("NETKEEP_SOCKS_PROXY")
-        .unwrap_or_else(|_| "socks5h://127.0.0.1:1080".to_string());
-    let tun_name =
-        env::var("NETKEEP_TUN_TARGET").unwrap_or_else(|_| "X2265102_GERMN3".to_string());
-    let device_name =
-        env::var("NETKEEP_DEVICE_TARGET").unwrap_or_else(|_| "wlp0s20f3".to_string());
+    let proxy =
+        env::var("NETKEEP_SOCKS_PROXY").unwrap_or_else(|_| "socks5h://127.0.0.1:1080".to_string());
+    let tun_name = env::var("NETKEEP_TUN_TARGET").unwrap_or_else(|_| "X2265102_GERMN3".to_string());
+    let device_name = env::var("NETKEEP_DEVICE_TARGET").unwrap_or_else(|_| "wlp0s20f3".to_string());
 
     // Resolve ipmyp.ir to IP so the daemon doesn't need DNS for it.
     // The curl to ipmyp.ir still uses the domain (via SOCKS domain forwarding),

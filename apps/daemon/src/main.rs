@@ -908,8 +908,7 @@ fn main() {
             );
         }
     }
-    let default_timeout_secs =
-        parse_env_u64("NETKEEP_DEFAULT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
+    let default_timeout_secs = parse_env_u64("NETKEEP_DEFAULT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
     let tcp_timeout_secs = parse_env_u64("NETKEEP_TCP_TIMEOUT_SECS", default_timeout_secs);
     let udp_timeout_secs = parse_env_u64("NETKEEP_UDP_TIMEOUT_SECS", default_timeout_secs);
     let quic_timeout_secs = parse_env_u64("NETKEEP_QUIC_TIMEOUT_SECS", default_timeout_secs);

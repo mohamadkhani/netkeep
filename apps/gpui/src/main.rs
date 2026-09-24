@@ -47,8 +47,8 @@ fn main() {
 /// `eprintln!` output would be lost. Check the file when debugging tray behavior.
 fn diag_log(msg: &str) {
     use std::io::Write;
-    let path = std::env::var("NETKEEP_TRAY_LOG")
-        .unwrap_or_else(|_| "/tmp/netkeep-tray.log".to_string());
+    let path =
+        std::env::var("NETKEEP_TRAY_LOG").unwrap_or_else(|_| "/tmp/netkeep-tray.log".to_string());
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

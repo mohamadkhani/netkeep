@@ -454,9 +454,8 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
             script.push_str(&format!(
                 "add rule inet netkeep forward ip6 daddr ::1 accept\n",
             ));
-            script.push_str(
-                "add rule inet netkeep forward ip6 daddr ::ffff:7f00:0000/104 accept\n",
-            );
+            script
+                .push_str("add rule inet netkeep forward ip6 daddr ::ffff:7f00:0000/104 accept\n");
             script.push_str("add rule inet netkeep forward meta l4proto icmp accept\n");
             script.push_str("add rule inet netkeep forward meta l4proto icmpv6 accept\n");
             script.push_str(&format!("add rule inet netkeep forward queue num {q}\n",));
@@ -661,18 +660,22 @@ fn mask_cidr_host_bits(cidr: &str) -> Option<String> {
         } else {
             u128::MAX << (128 - len)
         };
-        Some(format!("{}/{}", std::net::Ipv6Addr::from(u128::from(addr) & mask), len))
+        Some(format!(
+            "{}/{}",
+            std::net::Ipv6Addr::from(u128::from(addr) & mask),
+            len
+        ))
     } else {
         let addr = addr.parse::<std::net::Ipv4Addr>().ok()?;
         if len > 32 {
             return None;
         }
-        let mask = if len == 0 {
-            0
-        } else {
-            u32::MAX << (32 - len)
-        };
-        Some(format!("{}/{}", std::net::Ipv4Addr::from(u32::from(addr) & mask), len))
+        let mask = if len == 0 { 0 } else { u32::MAX << (32 - len) };
+        Some(format!(
+            "{}/{}",
+            std::net::Ipv4Addr::from(u32::from(addr) & mask),
+            len
+        ))
     }
 }
 
@@ -765,15 +768,7 @@ impl RouteManager for SystemRouteManager {
                     args.push("-6");
                 }
                 args.extend([
-                    "route",
-                    "replace",
-                    &prefix,
-                    "dev",
-                    dev,
-                    "table",
-                    &table_s,
-                    "metric",
-                    "50",
+                    "route", "replace", &prefix, "dev", dev, "table", &table_s, "metric", "50",
                 ]);
                 run_ip(&args)?;
             }
@@ -1182,7 +1177,10 @@ mod tests {
             mask_cidr_host_bits("10.255.255.2/32").as_deref(),
             Some("10.255.255.2/32")
         );
-        assert_eq!(mask_cidr_host_bits("1.2.3.4/0").as_deref(), Some("0.0.0.0/0"));
+        assert_eq!(
+            mask_cidr_host_bits("1.2.3.4/0").as_deref(),
+            Some("0.0.0.0/0")
+        );
         assert_eq!(mask_cidr_host_bits("no-slash"), None);
         assert_eq!(mask_cidr_host_bits("1.2.3.4/33"), None);
         assert_eq!(mask_cidr_host_bits("::1/129"), None);

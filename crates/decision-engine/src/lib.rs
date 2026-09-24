@@ -149,8 +149,7 @@ impl DecisionEngine {
                     }
                     let new_key = FlowKey::from(&existing.flow);
                     self.pending_by_flow.insert(new_key, existing_id.clone());
-                    counter!("netkeep.pending.deduplicated", "type" => "name_upgrade")
-                        .increment(1);
+                    counter!("netkeep.pending.deduplicated", "type" => "name_upgrade").increment(1);
                     return DecisionOutcome::Pending(existing.clone());
                 }
             }
