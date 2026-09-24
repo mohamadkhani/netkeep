@@ -29,10 +29,14 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          # rust-src is needed by the eBPF build (-Z build-std=core)
-          components: rustfmt, clippy, rust-src
+      # rust-toolchain.toml is the single source of truth for the toolchain
+      # version; rustup proxies every cargo call to the pinned 1.96.0. (Do NOT
+      # use dtolnay/rust-toolchain here: it exports RUSTUP_TOOLCHAIN, which
+      # overrides rust-toolchain.toml for all later steps.)
+      - name: Install Rust toolchain
+        run: |
+          pacman -S --noconfirm rustup
+          rustup toolchain install 1.96.0 --profile minimal -c clippy,rustfmt,rust-src
 
       - name: Cache cargo
         uses: actions/cache@v4

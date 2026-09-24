@@ -297,7 +297,7 @@ fn http_connect(
     loop {
         stream.read_exact(&mut buf).map_err(map_io_err)?;
         response.push(buf[0]);
-        if response.len() >= 4 && response[response.len() - 4..] == [b'\r', b'\n', b'\r', b'\n'] {
+        if response.len() >= 4 && response[response.len() - 4..] == *b"\r\n\r\n" {
             break;
         }
         if response.len() > 8192 {
@@ -535,7 +535,7 @@ pub fn test_http_connectivity(
     loop {
         stream.read_exact(&mut buf).map_err(ProxyClientError::Io)?;
         response.push(buf[0]);
-        if response.len() >= 4 && response[response.len() - 4..] == [b'\r', b'\n', b'\r', b'\n'] {
+        if response.len() >= 4 && response[response.len() - 4..] == *b"\r\n\r\n" {
             break;
         }
         if response.len() > 8192 {
