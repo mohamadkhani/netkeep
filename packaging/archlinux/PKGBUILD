@@ -13,17 +13,19 @@
 
 pkgname=netkeep
 pkgver=0.1.0
-pkgrel=3
+pkgrel=4
 pkgdesc='Linux desktop network flow authorization (daemon, CLI, GPUI tray)'
 arch=('x86_64')
 url='https://github.com/mohamadkhani/netkeep'
-license=('Apache')
+license=('GPL-3.0-or-later')
 depends=(
   'gcc-libs'
   'glibc'
   'gtk-update-icon-cache'  # post-install icon cache refresh (standalone pkg, not gtk3)
   'hicolor-icon-theme'
   'libxkbcommon'
+  'libxcb'
+  'sqlite'  # netkeepd links system libsqlite3 (rusqlite is not bundled)
   'xdotool'
 )
 makedepends=('pkgconf' 'clang' 'llvm' 'rsync')

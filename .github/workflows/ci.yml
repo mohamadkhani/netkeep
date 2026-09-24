@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # bpf-linker 0.11 regressed (rejects memset libcalls); pin 0.10.4 —
+  # same pin as packaging/archlinux/PKGBUILD.
+  BPF_LINKER_VERSION: 0.10.4
+
+jobs:
+  ci:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      # ---------------------------------------------------------------- setup
+      # Same toolchain set as packaging/archlinux/PKGBUILD makedepends, plus
+      # the shared libs the workspace binaries link against (sqlite, xkbcommon)
+      # and the GPUI dlopen probe targets (fontconfig, freetype, vulkan).
+      - name: Install build deps
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel git clang llvm pkgconf rsync sqlite \
+            libxkbcommon libxcb fontconfig freetype2 vulkan-headers curl
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # rust-src is needed by the eBPF build (-Z build-std=core)
+          components: rustfmt, clippy, rust-src
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/bpf-linker
+            target
+            crates/dns-tracker-ebpf/target
+          key: cargo-${{ runner.os }}-${{ env.BPF_LINKER_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ env.BPF_LINKER_VERSION }}-
+
+      # Install only when the cache missed.
+      - name: Install bpf-linker
+        run: |
+          if [ ! -x ~/.cargo/bin/bpf-linker ]; then
+            cargo install bpf-linker --version "$BPF_LINKER_VERSION" --locked
+          fi
+
+      # ------------------------------------------------------------------ ci
+      # dns-tracker embeds the eBPF objects via include_bytes!, so they must
+      # exist before the workspace compiles.
+      - name: Build eBPF objects
+        run: cargo xtask build-ebpf
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # e2e tests are #[ignore]d by default: they need a running daemon
+      # (and NETKEEP_NFQUEUE for the process-detection scenario). Run them
+      # via `just e2e` against a real daemon, not in CI.
+      - name: Tests
+        run: cargo test --workspace

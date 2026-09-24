@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:        # manual trigger for testing without a tag
+
+env:
+  BPF_LINKER_VERSION: 0.10.4
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      # ---------------------------------------------------------------- setup
+      - name: Install build deps
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel git upx tar clang llvm pkgconf rsync sqlite \
+            libxkbcommon libxcb fontconfig freetype2 vulkan-headers openssh curl
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # rust-src is needed by the eBPF build (-Z build-std=core)
+          components: rust-src
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --version "$BPF_LINKER_VERSION" --locked
+
+      # --------------------------------------------------------------- build
+      # dns-tracker embeds the eBPF objects via include_bytes!, so they must
+      # be built first. xtask pins its own CARGO_TARGET_DIR internally.
+      - name: Build eBPF objects
+        run: cargo xtask build-ebpf-release
+
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked
+
+      - name: Compress binaries with UPX
+        run: |
+          upx --best --lzma \
+            target/release/netkeep-daemon \
+            target/release/netkeep-cli \
+            target/release/netkeep-gpui
+
+      # ----------------------------------------------------------- tarball
+      # Flat layout the -bin PKGBUILD (packaging/arch/netkeep-bin) installs from.
+      - name: Package release tarball
+        run: |
+          # VERSION = bare version, no leading 'v' (tag v0.1.0 -> 0.1.0)
+          VERSION="${GITHUB_REF_NAME#v}"
+          TARBALL="netkeep-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p dist
+          cp target/release/netkeep-daemon dist/netkeepd
+          cp target/release/netkeep-cli    dist/netkeep-cli
+          cp target/release/netkeep-gpui   dist/netkeep-gpui
+          cp LICENSE dist/
+          cp resources/linux/systemd/netkeepd.service dist/
+          cp resources/linux/applications/io.logicamp.Netkeep.desktop dist/
+          cp resources/linux/icons/hicolor/scalable/apps/io.logicamp.Netkeep.svg dist/
+          cp packaging/archlinux/environment.d-netkeep.conf dist/netkeep.conf
+          cp packaging/grafana/netkeep.json dist/netkeep-grafana-dashboard.json
+          ( cd dist && tar czf "../${TARBALL}" \
+              netkeepd netkeep-cli netkeep-gpui LICENSE \
+              netkeepd.service io.logicamp.Netkeep.desktop \
+              io.logicamp.Netkeep.svg netkeep.conf )
+          mv dist/netkeep-grafana-dashboard.json .
+
+      # ----------------------------------------------------------- namcap
+      # namcap lints the PKGBUILD recipes (missing depends, bad perms, wrong
+      # install paths). PLACEHOLDER sums are swapped for SKIP so namcap's
+      # checksum checks pass; CI injects the real sums only when publishing.
+      - name: Lint PKGBUILDs with namcap
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" != v* ]]; then
+            VERSION="$(grep -A5 '^\[workspace.package\]' Cargo.toml | grep -m1 '^version' | sed 's/.*"\(.*\)"/\1/')"
+          fi
+          pacman -S --noconfirm namcap
+          for pkg in packaging/arch/netkeep packaging/arch/netkeep-bin; do
+            cp "$pkg/PKGBUILD" /tmp/PKGBUILD
+            sed -i "s/^pkgver=.*/pkgver=${VERSION}/" /tmp/PKGBUILD
+            sed -i "s/'PLACEHOLDER'/'SKIP'/" /tmp/PKGBUILD
+            echo "::group::namcap $pkg"
+            namcap /tmp/PKGBUILD
+            echo "::endgroup::"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netkeep-x86_64
+          path: |
+            netkeep-*.tar.gz
+            netkeep-grafana-dashboard.json
+
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write        # to create the GitHub release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+
+  publish-aur:
+    needs: [release]
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel git openssh curl
+
+      - uses: actions/checkout@v4
+
+      # The AUR push uses an ed25519 key registered on the AUR account,
+      # stored as the AUR_SSH_PRIVATE_KEY repo secret. AUR has no per-package
+      # deploy keys, so that key is account-wide — treat it as a credential.
+      - name: Publish netkeep (source package) to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          export VERSION
+          export AUR_REPO=netkeep
+          export PKGBUILD_PATH=packaging/arch/netkeep/PKGBUILD
+          curl -fsSL "https://github.com/mohamadkhani/netkeep/archive/refs/tags/v${VERSION}.tar.gz" -o /tmp/tag-tarball.tar.gz
+          export B2SUM="$(b2sum /tmp/tag-tarball.tar.gz | awk '{print $1}')"
+          packaging/arch/publish-aur.sh
+
+      - name: Publish netkeep-bin (prebuilt package) to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          export VERSION
+          export AUR_REPO=netkeep-bin
+          export PKGBUILD_PATH=packaging/arch/netkeep-bin/PKGBUILD
+          TARBALL_URL="https://github.com/mohamadkhani/netkeep/releases/download/v${VERSION}/netkeep-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL "$TARBALL_URL" -o /tmp/release-tarball.tar.gz
+          export B2SUM="$(b2sum /tmp/release-tarball.tar.gz | awk '{print $1}')"
+          packaging/arch/publish-aur.sh
