@@ -58,10 +58,11 @@ jobs:
           fi
 
       # ------------------------------------------------------------------ ci
-      # dns-tracker embeds the eBPF objects via include_bytes!, so they must
-      # exist before the workspace compiles.
+      # dns-tracker embeds the eBPF objects via include_bytes! at the
+      # *release* path, so build the release variant (same as the PKGBUILD
+      # and the release workflow) before anything compiles the workspace.
       - name: Build eBPF objects
-        run: cargo xtask build-ebpf
+        run: cargo xtask build-ebpf-release
 
       - name: Format check
         run: cargo fmt --all -- --check
