@@ -73,5 +73,10 @@ jobs:
       # e2e tests are #[ignore]d by default: they need a running daemon
       # (and NETKEEP_NFQUEUE for the process-detection scenario). Run them
       # via `just e2e` against a real daemon, not in CI.
+      # dbus-run-session provides a private session bus for tests that
+      # touch D-Bus (e.g. the ksni fork's service tests) — the bare
+      # container has none.
       - name: Tests
-        run: cargo test --workspace
+        run: |
+          pacman -S --noconfirm dbus
+          dbus-run-session -- cargo test --workspace
