@@ -25,7 +25,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm
           pacman -S --noconfirm base-devel git clang llvm pkgconf rsync sqlite \
-            libxkbcommon libxcb fontconfig freetype2 vulkan-headers curl
+            libxkbcommon libxkbcommon-x11 libxcb fontconfig freetype2 vulkan-headers curl
 
       - uses: actions/checkout@v4
 
