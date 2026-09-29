@@ -75,11 +75,14 @@ jobs:
       # namcap lints the PKGBUILD recipes (missing depends, bad perms, wrong
       # install paths). PLACEHOLDER sums are swapped for SKIP so namcap's
       # checksum checks pass; CI injects the real sums only when publishing.
+      # The base version is used for the lint copy: makepkg rejects hyphens
+      # in pkgver, which RC tags (v0.1.0-rc.1) would otherwise trip.
       - name: Lint PKGBUILDs with namcap
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION%%-*}"
           if [[ "$GITHUB_REF_NAME" != v* ]]; then
-            VERSION="$(grep -A5 '^\[workspace.package\]' Cargo.toml | grep -m1 '^version' | sed 's/.*"\(.*\)"/\1/')"
+            VERSION="$(grep -A5 '^\[workspace.package\]' Cargo.toml | grep -m1 '^version' | sed 's/.*"\(.*\)"/\1/' | cut -d- -f1)"
           fi
           pacman -S --noconfirm namcap
           for pkg in packaging/arch/netkeep packaging/arch/netkeep-bin; do
@@ -112,13 +115,17 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # RC (and other pre-release) tags get a marked prerelease
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: artifacts/*
 
   publish-aur:
     needs: [release]
     runs-on: ubuntu-latest
     container: archlinux:latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    # AUR only ever receives stable releases: makepkg rejects hyphens in
+    # pkgver, so RC tags (v0.1.0-rc.1) cannot be published there anyway.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
     steps:
       - name: Install dependencies
         run: |
