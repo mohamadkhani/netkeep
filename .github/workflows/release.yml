@@ -94,11 +94,40 @@ jobs:
             echo "::endgroup::"
           done
 
+      # ------------------------------------------------------ arch package
+      # Build a pacman package (.pkg.tar.zst) from the release tarball —
+      # the same prebuilt bits as the netkeep-bin AUR package, no rebuild.
+      # makepkg refuses to run as root, so delegate to an unprivileged
+      # builder user. --nodeps: depends are resolved by pacman on the
+      # user's machine at install time.
+      - name: Build Arch package
+        run: |
+          pacman -S --noconfirm namcap
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKGVER="${VERSION/-rc./rc}"       # 0.1.0-rc.1 -> 0.1.0rc1
+          PKGVER="${PKGVER//-/}"            # no hyphens allowed in pkgver
+          TARBALL="netkeep-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          PKGDIR=$(mktemp -d)
+          cp packaging/arch/netkeep-bin/PKGBUILD "$PKGDIR/"
+          cp "$TARBALL" "$PKGDIR/"
+          cd "$PKGDIR"
+          sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" PKGBUILD
+          sed -i "s|^source_x86_64=.*|source_x86_64=(\"${TARBALL}\")|" PKGBUILD
+          SUM="$(b2sum "$TARBALL" | awk '{print $1}')"
+          sed -i "s/'PLACEHOLDER'/'${SUM}'/" PKGBUILD
+          id builder &>/dev/null || useradd -m builder
+          chown -R builder:builder "$PKGDIR"
+          su builder -s /bin/bash -c "cd '$PKGDIR' && makepkg -f --nodeps"
+          cp "$PKGDIR"/netkeep-bin-*.pkg.tar.zst "$GITHUB_WORKSPACE/"
+          # Report but don't block the release on namcap quirk flags.
+          namcap netkeep-bin-*.pkg.tar.zst || echo "::warning::namcap reported issues on the built package"
+
       - uses: actions/upload-artifact@v4
         with:
           name: netkeep-x86_64
           path: |
             netkeep-*.tar.gz
+            netkeep-*.pkg.tar.zst
             netkeep-grafana-dashboard.json
 
   release:
