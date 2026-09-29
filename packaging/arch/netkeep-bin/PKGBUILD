@@ -27,6 +27,9 @@ optdepends=(
 )
 provides=('netkeep')
 conflicts=('netkeep')
+# Binaries arrive UPX-packed: stripping them is impossible (no sections) and
+# there is nothing to debug-package.
+options=('!strip' '!debug')
 source_x86_64=("https://github.com/mohamadkhani/netkeep/releases/download/v${pkgver}/netkeep-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
 # Checksum is injected by CI from the built tarball (real b2sum, not SKIP).
 b2sums_x86_64=('PLACEHOLDER')
