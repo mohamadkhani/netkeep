@@ -1034,11 +1034,34 @@ mod tests {
             pid: std::sync::atomic::AtomicU32::new(first.id()),
         };
         let tracker: Arc<PortReuseTracker> = Arc::new(tracker);
+
+        let ip = "10.20.30.40";
+
+        // spawn() returns after fork but possibly before exec: in that window
+        // /proc/<pid>/exe still points at THIS test binary, so the resolved
+        // name is wrong. Poll with a fresh resolver per attempt (a miss would
+        // otherwise be cached) until the child has exec'd.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let resolver = ProcProcessResolver::with_sock_tracker(
+                Arc::clone(&tracker) as Arc<dyn crate::SocketTracker>
+            );
+            let name = resolver
+                .resolve(ip, 54321, TransportProtocol::Tcp, None)
+                .map(|p| p.name);
+            if name.as_deref() == Some("sleep") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sleep child never resolved as \"sleep\" (still in fork/exec gap?): {name:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
         let resolver = ProcProcessResolver::with_sock_tracker(
             Arc::clone(&tracker) as Arc<dyn crate::SocketTracker>
         );
-
-        let ip = "10.20.30.40";
         let first_name = resolver
             .resolve(ip, 54321, TransportProtocol::Tcp, None)
             .map(|p| p.name);
