@@ -12,10 +12,26 @@ permissions: {}
 jobs:
   add-to-project:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+      PROJECT_ID: PVT_kwHOBHHBjs4BlecR
     steps:
       - name: Add issue to Netkeep board
-        env:
-          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
         run: |
-          gh project item-add 2 --owner mohamadkhani \
-            --url "${{ github.event.issue.html_url }}"
+          ISSUE_NODE_ID=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" --jq .node_id)
+          ALREADY=$(gh api graphql \
+            -f query='query($project:ID!){ node(id:$project){ ... on ProjectV2 { items(first:100){ nodes{ content{ ... on Issue { id } } } } } } }' \
+            -f project="$PROJECT_ID" \
+            --jq ".data.node.items.nodes[].content.id" \
+            | grep -x "$ISSUE_NODE_ID" || true)
+          if [ -n "$ALREADY" ]; then
+            echo "Issue already on the board"
+            exit 0
+          fi
+          gh api graphql \
+            -f query='mutation($project:ID!,$issue:ID!){ addProjectV2ItemById(input:{projectId:$project, itemId:$issue}){ item { id } } }' \
+            -f project="$PROJECT_ID" \
+            -f issue="$ISSUE_NODE_ID" \
+            --jq '.data.addProjectV2ItemById.item.id'
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
