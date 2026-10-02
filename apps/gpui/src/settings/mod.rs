@@ -720,6 +720,9 @@ impl SettingsApp {
 
             dialog
                 .p(px(0.))
+                // The footer already has a Cancel exit; disable the Dialog's
+                // built-in ✕ so the modal does not show two exit controls.
+                .close_button(false)
                 .title(modal_header(hdr_icon, hdr_title))
                 .w(px(480.))
                 .button_props(
@@ -1334,6 +1337,9 @@ impl SettingsApp {
 
             dialog
                 .p(px(0.))
+                // The footer already has a Cancel exit; disable the Dialog's
+                // built-in ✕ so the modal does not show two exit controls.
+                .close_button(false)
                 .title(modal_header(hdr_icon, hdr_title))
                 .w(px(520.))
                 .button_props(

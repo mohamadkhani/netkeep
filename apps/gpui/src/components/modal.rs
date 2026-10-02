@@ -12,8 +12,10 @@ use crate::colors;
 //
 // Full-width title bar: icon (primary colour) + UPPERCASE label-caps title on the
 // left. Pass as `.title()` on a `Dialog` that has `.p(px(0.))` so the header
-// becomes full-bleed. The Dialog's built-in close button (enabled by default)
-// handles closing.
+// becomes full-bleed.
+// Exit affordance: dialogs with a footer Cancel should call `.close_button(false)`
+// so only one exit control is visible; dialogs without a footer keep the
+// Dialog's built-in close ✕ (enabled by default).
 
 pub fn modal_header(icon: &str, title: &str) -> impl IntoElement {
     h_flex()
