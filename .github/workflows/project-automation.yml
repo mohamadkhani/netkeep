@@ -1,0 +1,22 @@
+name: Project automation
+
+# Adds every new/reopened issue to the "Netkeep" project board.
+# Requires a repo secret PROJECT_PAT: a classic token with `project` scope
+# (repo GITHUB_TOKEN cannot write user-owned projects).
+on:
+  issues:
+    types: [opened, reopened]
+
+permissions: {}
+
+jobs:
+  add-to-project:
+    if: ${{ secrets.PROJECT_PAT != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add issue to Netkeep board
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+        run: |
+          gh project item-add 2 --owner mohamadkhani \
+            --url "${{ github.event.issue.html_url }}"
