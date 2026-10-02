@@ -230,6 +230,119 @@ impl ProxyRepository for InMemoryRuleRepository {
 }
 
 // ---------------------------------------------------------------------------
+// Schema migrations
+// ---------------------------------------------------------------------------
+
+/// Highest schema version this build knows how to produce. Bump by appending
+/// a `Migration` to `MIGRATIONS` (and, for data migrations, handling the
+/// target version in `open()`).
+const CURRENT_VERSION: i64 = 2;
+
+/// Ordered schema migrations. `target_version` must be strictly increasing;
+/// a database at version `v` runs every migration with `target_version > v`.
+///
+/// Each entry lists guarded `ALTER TABLE` statements: a statement runs only
+/// when `column` is still missing from `table`. This keeps every migration
+/// idempotent because
+/// - fresh databases skip migrations entirely (the `CREATE TABLE IF NOT
+///   EXISTS` batch above already builds the latest layout), and
+/// - legacy databases were previously migrated by best-effort `ALTER`s that
+///   may have applied some columns already.
+struct Migration {
+    target_version: i64,
+    description: &'static str,
+    columns: &'static [(&'static str, &'static str, &'static str)],
+}
+
+const MIGRATIONS: &[Migration] = &[Migration {
+    target_version: 1,
+    description: "columns added after the first release",
+    columns: &[
+        (
+            "rules",
+            "egress_id",
+            "ALTER TABLE rules ADD COLUMN egress_id TEXT NULL",
+        ),
+        (
+            "rules",
+            "process_exe",
+            "ALTER TABLE rules ADD COLUMN process_exe TEXT NULL",
+        ),
+        (
+            "rules",
+            "priority",
+            "ALTER TABLE rules ADD COLUMN priority REAL NOT NULL DEFAULT 1.0",
+        ),
+        (
+            "flow_events",
+            "source_port",
+            "ALTER TABLE flow_events ADD COLUMN source_port INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "flow_events",
+            "destination_port",
+            "ALTER TABLE flow_events ADD COLUMN destination_port INTEGER NOT NULL DEFAULT 0",
+        ),
+    ],
+}];
+
+/// Version written once the priority backfill (a data migration, not SQL)
+/// has run. Same value the pre-migration-runner code used, so databases
+/// migrated by older builds keep their version and skip the backfill.
+const PRIORITY_BACKFILL_VERSION: i64 = 2;
+
+fn table_exists(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.prepare(&format!("PRAGMA table_info({})", table))
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .map(|rows| rows.filter_map(Result::ok).any(|name| name == column))
+        })
+        .unwrap_or(false)
+}
+
+/// Bring `conn` from its current `user_version` up to `CURRENT_VERSION`.
+/// Returns the version the database was at before migrating.
+fn run_schema_migrations(conn: &Connection, had_schema: bool) -> Result<i64, String> {
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| format!("read user_version: {}", e))?;
+    if !had_schema {
+        // Fresh database: the CREATE batch already built the latest layout.
+        conn.pragma_update(None, "user_version", CURRENT_VERSION)
+            .map_err(|e| format!("set user_version: {}", e))?;
+        return Ok(version);
+    }
+    for migration in MIGRATIONS {
+        if migration.target_version <= version {
+            continue;
+        }
+        for (table, column, sql) in migration.columns {
+            if !column_exists(conn, table, column) {
+                conn.execute_batch(sql).map_err(|e| {
+                    format!(
+                        "migration v{} ({}): {}",
+                        migration.target_version, migration.description, e
+                    )
+                })?;
+            }
+        }
+        conn.pragma_update(None, "user_version", migration.target_version)
+            .map_err(|e| format!("set user_version: {}", e))?;
+    }
+    Ok(version)
+}
+
+// ---------------------------------------------------------------------------
 // SQLite implementation
 // ---------------------------------------------------------------------------
 
@@ -240,101 +353,89 @@ pub struct SqliteRuleRepository {
 impl SqliteRuleRepository {
     pub fn open(path: &str) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             CREATE TABLE IF NOT EXISTS rules (
-                 id TEXT PRIMARY KEY,
-                 enabled INTEGER NOT NULL,
-                 action INTEGER NOT NULL,
-                 duration INTEGER NOT NULL,
-                 process_name TEXT NULL,
-                 destination_kind INTEGER NOT NULL,
-                 destination_value TEXT NOT NULL,
-                 egress_id TEXT NULL,
-                 process_exe TEXT NULL,
-                 priority REAL NOT NULL DEFAULT 1.0
-             );
-             CREATE TABLE IF NOT EXISTS flow_events (
-                 id TEXT PRIMARY KEY,
-                 process_name TEXT NULL,
-                 device_label TEXT NULL,
-                 destination_ip TEXT NOT NULL,
-                 destination_domain TEXT NULL,
-                 protocol INTEGER NOT NULL,
-                 state INTEGER NOT NULL,
-                 timestamp_secs INTEGER NOT NULL,
-                 source_port INTEGER NOT NULL DEFAULT 0,
-                 destination_port INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE TABLE IF NOT EXISTS pending_decisions (
-                 id TEXT PRIMARY KEY,
-                 created_at_secs INTEGER NOT NULL,
-                 deadline_at_secs INTEGER NOT NULL,
-                 flow_json TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS egresses (
-                 id TEXT PRIMARY KEY,
-                 name TEXT NOT NULL,
-                 color TEXT NOT NULL,
-                 is_system_default INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE TABLE IF NOT EXISTS egress_targets (
-                 egress_id TEXT NOT NULL,
-                 target_kind INTEGER NOT NULL,
-                 target_value TEXT NOT NULL,
-                 PRIMARY KEY (egress_id, target_kind, target_value),
-                 FOREIGN KEY (egress_id) REFERENCES egresses(id) ON DELETE CASCADE
-             );
-             CREATE TABLE IF NOT EXISTS egress_dns_servers (
-                 egress_id TEXT NOT NULL,
-                 dns_server TEXT NOT NULL,
-                 PRIMARY KEY (egress_id, dns_server),
-                 FOREIGN KEY (egress_id) REFERENCES egresses(id) ON DELETE CASCADE
-             );
-             CREATE TABLE IF NOT EXISTS proxies (
-                 id TEXT PRIMARY KEY,
-                 name TEXT NOT NULL,
-                 protocol INTEGER NOT NULL,
-                 host TEXT NOT NULL,
-                 port INTEGER NOT NULL,
-                 auth_kind INTEGER NOT NULL DEFAULT 0,
-                 auth_username TEXT NOT NULL DEFAULT '',
-                 auth_password TEXT NOT NULL DEFAULT '',
-                 auth_method TEXT NOT NULL DEFAULT '',
-                 enabled INTEGER NOT NULL DEFAULT 1
-             );",
-        )
-        .map_err(|e| e.to_string())?;
-        // Migrations: add columns to existing DBs (ignore error if they already exist).
-        let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN egress_id TEXT NULL;");
-        let _ = conn.execute_batch("ALTER TABLE rules ADD COLUMN process_exe TEXT NULL;");
-        let _ =
-            conn.execute_batch("ALTER TABLE rules ADD COLUMN priority REAL NOT NULL DEFAULT 1.0;");
-        let _ = conn.execute_batch(
-            "ALTER TABLE flow_events ADD COLUMN source_port INTEGER NOT NULL DEFAULT 0;",
-        );
-        let _ = conn.execute_batch(
-            "ALTER TABLE flow_events ADD COLUMN destination_port INTEGER NOT NULL DEFAULT 0;",
-        );
-        // One-time backfill: rules from pre-priority DBs carry the
-        // column default 1.0; re-seed them from the hardcoded restriction
-        // ladder. Guarded by PRAGMA user_version so it runs exactly once —
-        // not on every open (a legitimately seeded first catch-all rule is
-        // also exactly 1.0, so the value alone can't be the marker).
-        const PRIORITY_MIGRATION_VERSION: i64 = 2;
-        let current_version: i64 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap_or(0);
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(|e| e.to_string())?;
+        let had_schema = table_exists(&conn, "rules");
+        conn.execute_batch(SCHEMA_SQL).map_err(|e| e.to_string())?;
+        let version_before = run_schema_migrations(&conn, had_schema)?;
         let repo = Self { conn };
-        if current_version < PRIORITY_MIGRATION_VERSION {
+        if version_before < PRIORITY_BACKFILL_VERSION {
+            // One-time backfill: rules from pre-priority DBs carry the
+            // column default 1.0; re-seed them from the hardcoded restriction
+            // ladder. Guarded by user_version so it runs exactly once —
+            // not on every open (a legitimately seeded first catch-all rule
+            // is also exactly 1.0, so the value alone can't be the marker).
             repo.backfill_priorities();
-            let _ = repo
-                .conn
-                .pragma_update(None, "user_version", PRIORITY_MIGRATION_VERSION);
+            repo.conn
+                .pragma_update(None, "user_version", PRIORITY_BACKFILL_VERSION)
+                .map_err(|e| format!("set user_version: {}", e))?;
         }
         Ok(repo)
     }
 }
+
+const SCHEMA_SQL: &str = "
+CREATE TABLE IF NOT EXISTS rules (
+    id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL,
+    action INTEGER NOT NULL,
+    duration INTEGER NOT NULL,
+    process_name TEXT NULL,
+    destination_kind INTEGER NOT NULL,
+    destination_value TEXT NOT NULL,
+    egress_id TEXT NULL,
+    process_exe TEXT NULL,
+    priority REAL NOT NULL DEFAULT 1.0
+);
+CREATE TABLE IF NOT EXISTS flow_events (
+    id TEXT PRIMARY KEY,
+    process_name TEXT NULL,
+    device_label TEXT NULL,
+    destination_ip TEXT NOT NULL,
+    destination_domain TEXT NULL,
+    protocol INTEGER NOT NULL,
+    state INTEGER NOT NULL,
+    timestamp_secs INTEGER NOT NULL,
+    source_port INTEGER NOT NULL DEFAULT 0,
+    destination_port INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS pending_decisions (
+    id TEXT PRIMARY KEY,
+    created_at_secs INTEGER NOT NULL,
+    deadline_at_secs INTEGER NOT NULL,
+    flow_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS egresses (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL,
+    is_system_default INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS egress_targets (
+    egress_id TEXT NOT NULL,
+    target_kind INTEGER NOT NULL,
+    target_value TEXT NOT NULL,
+    PRIMARY KEY (egress_id, target_kind, target_value),
+    FOREIGN KEY (egress_id) REFERENCES egresses(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS egress_dns_servers (
+    egress_id TEXT NOT NULL,
+    dns_server TEXT NOT NULL,
+    PRIMARY KEY (egress_id, dns_server),
+    FOREIGN KEY (egress_id) REFERENCES egresses(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS proxies (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    protocol INTEGER NOT NULL,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    auth_kind INTEGER NOT NULL DEFAULT 0,
+    auth_username TEXT NOT NULL DEFAULT '',
+    auth_password TEXT NOT NULL DEFAULT '',
+    auth_method TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1
+);";
 
 // --- encoding helpers ---
 
@@ -1392,5 +1493,100 @@ mod tests {
         repo.upsert_egress(&mk_egress("eg-vpn", "VPN", "#22c55e", vec![], false));
         let default = repo.get_default_egress().expect("should exist");
         assert_eq!(default.id, "eg-def");
+    }
+
+    // --- Schema migrations ---
+
+    fn user_version(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version")
+    }
+
+    #[test]
+    fn migration_fresh_db_skips_to_current_version() {
+        let file = NamedTempFile::new().expect("temp file");
+        let path = file.path().to_string_lossy().to_string();
+        let repo = SqliteRuleRepository::open(&path).expect("sqlite open");
+        assert_eq!(user_version(&repo.conn), CURRENT_VERSION);
+    }
+
+    /// Pre-release layout: rules without egress_id/process_exe/priority,
+    /// flow_events without the port columns, user_version still 0.
+    fn create_legacy_db(path: &str) {
+        let conn = Connection::open(path).expect("legacy db");
+        conn.execute_batch(
+            "CREATE TABLE rules (
+                 id TEXT PRIMARY KEY,
+                 enabled INTEGER NOT NULL,
+                 action INTEGER NOT NULL,
+                 duration INTEGER NOT NULL,
+                 process_name TEXT NULL,
+                 destination_kind INTEGER NOT NULL,
+                 destination_value TEXT NOT NULL
+             );
+             CREATE TABLE flow_events (
+                 id TEXT PRIMARY KEY,
+                 process_name TEXT NULL,
+                 device_label TEXT NULL,
+                 destination_ip TEXT NOT NULL,
+                 destination_domain TEXT NULL,
+                 protocol INTEGER NOT NULL,
+                 state INTEGER NOT NULL,
+                 timestamp_secs INTEGER NOT NULL
+             );
+             INSERT INTO rules (id, enabled, action, duration, process_name, destination_kind, destination_value)
+             VALUES ('legacy', 1, 1, 1, 'curl', 3, 'example.com');",
+        )
+        .expect("legacy schema");
+    }
+
+    #[test]
+    fn migration_legacy_db_adds_missing_columns_and_versions_up() {
+        let file = NamedTempFile::new().expect("temp file");
+        let path = file.path().to_string_lossy().to_string();
+        create_legacy_db(&path);
+
+        let mut repo = SqliteRuleRepository::open(&path).expect("sqlite open");
+        assert_eq!(user_version(&repo.conn), CURRENT_VERSION);
+        assert!(column_exists(&repo.conn, "rules", "egress_id"));
+        assert!(column_exists(&repo.conn, "rules", "process_exe"));
+        assert!(column_exists(&repo.conn, "rules", "priority"));
+        assert!(column_exists(&repo.conn, "flow_events", "source_port"));
+        assert!(column_exists(&repo.conn, "flow_events", "destination_port"));
+
+        // The legacy row survived and reads back with the new fields.
+        let rule = repo.get_rule("legacy").expect("legacy rule read");
+        assert_eq!(rule.process_name.as_deref(), Some("curl"));
+        assert_eq!(rule.egress_id, None);
+        assert_eq!(
+            rule.priority,
+            policy_engine::seed_priority(&rule, 1, core_types::ProcessPriority::High,)
+        );
+
+        // New columns are usable: attach an egress and round-trip it.
+        repo.upsert_egress(&mk_egress("eg-x", "X", "#123456", vec![], false));
+        let mut rule = rule;
+        rule.egress_id = Some("eg-x".to_string());
+        repo.upsert_rule(rule.clone());
+        assert_eq!(
+            repo.get_rule("legacy").unwrap().egress_id,
+            Some("eg-x".into())
+        );
+    }
+
+    #[test]
+    fn migration_versioned_db_keeps_priorities_and_version() {
+        let file = NamedTempFile::new().expect("temp file");
+        let path = file.path().to_string_lossy().to_string();
+        let mut repo = SqliteRuleRepository::open(&path).expect("sqlite open");
+        let mut rule = mk_rule("custom");
+        rule.priority = 777.0;
+        repo.upsert_rule(rule.clone());
+
+        // Reopen: already at CURRENT_VERSION, no backfill may touch the
+        // user's custom priority.
+        let repo = SqliteRuleRepository::open(&path).expect("sqlite reopen");
+        assert_eq!(user_version(&repo.conn), CURRENT_VERSION);
+        assert_eq!(repo.get_rule("custom").unwrap().priority, 777.0);
     }
 }

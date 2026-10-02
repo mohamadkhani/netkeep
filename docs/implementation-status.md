@@ -17,7 +17,7 @@ write-ups belong in the PR description that fixes them.
 | 0 | Foundation (workspace, toolchain, CI runner, core-types) | Done |
 | 1 | Policy + decision core (matching, precedence, pending timeout machine) | Done |
 | 2 | Enforcement (nftables + NFQUEUE, SNI/HTTP/DNS domain inference, process attribution) | Done; kernel integration tests tracked in #3 |
-| 3 | Persistence + CLI (SQLite repos, Unix-socket JSON-RPC, CLI) | Done; migrations tracked in #4 |
+| 3 | Persistence + CLI (SQLite repos, Unix-socket JSON-RPC, CLI) | Done; schema migrations via `PRAGMA user_version` runner in `state-store` |
 | 4 | GPUI interface (decision dialog, settings, tray, monitor mode) | Done |
 | 5 | Packaging & hardening (systemd user unit, boot gate, eBPF DNS forwarder shipped) | In progress → milestone "Phase 5" |
 | 7 | Web UI | Not started → milestone "Phase 7" |
@@ -120,7 +120,11 @@ CREATE TABLE pending_decisions (
 ```
 
 Plus `egresses`, `egress_targets`, `egress_dns_servers`, `proxies` tables (see
-`crates/state-store`). Schema versioning/migrations: #4.
+`crates/state-store`). Schema versioning: `PRAGMA user_version` + ordered
+idempotent migrations (`MIGRATIONS` in `crates/state-store/src/lib.rs`); fresh
+DBs are stamped at `CURRENT_VERSION` directly, legacy DBs get guarded
+`ALTER TABLE` backfills, and the priority ladder backfill stays a one-time
+data migration at version 2.
 
 ## Test Coverage
 
