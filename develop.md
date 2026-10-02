@@ -1,5 +1,16 @@
 # Netkeep Development Guide
 
+## Workflow
+
+All work is tracked in GitHub Issues (https://github.com/mohamadkhani/netkeep/issues).
+
+1. Pick or file an issue. Bug reports use the issue template.
+2. Branch as `fix/<n>-slug` or `feat/<n>-slug`.
+3. For bugs: write the failing test first, then fix.
+4. Update the relevant area doc (below) in the same PR when you learned something.
+5. PR description carries the write-up: **Root cause / Fix / Tests** for bugs.
+6. PR body ends with `Fixes #<n>` so the issue closes on merge. Squash merge to main.
+
 ## Documentation Reference Rules
 
 Read the relevant doc **before** writing code in that area. These docs record learned patterns, gotchas, and decisions not obvious from code.

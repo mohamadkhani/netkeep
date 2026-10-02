@@ -75,6 +75,8 @@ Example: send `spotify` through the Shadowsocks proxy, keep `ssh` on the wire, d
 
 **Early / work in progress.** Linux desktop first, Arch Linux as the primary target. See [`docs/`](docs/) for the architecture and [`docs/implementation-status.md`](docs/implementation-status.md) for what works today.
 
+Found a bug or want a feature? [Open an issue](https://github.com/mohamadkhani/netkeep/issues/new/choose).
+
 ## Install (Arch Linux)
 
 ```bash
@@ -115,6 +117,7 @@ netkeep-gpui                    # dialogs, rules editor, settings, tray
 - [`develop.md`](develop.md) — developer guide; read the relevant doc before touching an area
 - `just ci` — fmt + clippy (`-D warnings`) + tests
 - `just e2e` — black-box suite against a running daemon
+- Work is tracked in [Issues](https://github.com/mohamadkhani/netkeep/issues) and the project board: pick an issue, branch as `fix/<n>-slug` or `feat/<n>-slug`, open a PR with `Fixes #<n>`
 
 ## License
 

@@ -1,12 +1,11 @@
-
 # Todos
 
-## current phase
+Work is tracked on GitHub now — do not add items here.
 
-- rule modal and egress modal exit button is duplicated
-- [x] The app cursor process name detected as electron
-- Route to proxy not working
+- Issues: https://github.com/mohamadkhani/netkeep/issues
+- Milestones: https://github.com/mohamadkhani/netkeep/milestones
+- Bug: open an issue with the bug template
+- Feature: open an issue with the feature template
 
-## phase 7
-
-- web interface
+Flow: pick an issue → branch `fix/<n>-slug` or `feat/<n>-slug` → PR with `Fixes #<n>` →
+CI green → squash merge (issue auto-closes) → update the relevant `docs/*.md` in the same PR.

@@ -1,0 +1,64 @@
+name: Bug report
+description: Something in Netkeep does not work as expected
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Fill in what you can — logs and version help the most.
+
+  - type: input
+    id: version
+    attributes:
+      label: Netkeep version
+      description: Output of `netkeep-cli --version` or the pacman package version
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: desktop
+    attributes:
+      label: Desktop environment / window manager
+      options:
+        - GNOME (Wayland)
+        - GNOME (X11)
+        - KDE Plasma (Wayland)
+        - KDE Plasma (X11)
+        - Hyprland
+        - Sway
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run ...
+        2. Click ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Daemon logs
+      description: Output of `journalctl -u netkeepd --no-pager -n 100`
+      render: shell
+
+  - type: textarea
+    id: rules
+    attributes:
+      label: nftables state (only for interception problems)
+      description: Output of `sudo nft list table inet netkeep`
+      render: shell

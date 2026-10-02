@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / discussion
+    url: https://github.com/mohamadkhani/netkeep/discussions
+    about: Ask questions and propose ideas before filing an issue
