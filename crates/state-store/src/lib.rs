@@ -256,7 +256,7 @@ struct Migration {
 
 const MIGRATIONS: &[Migration] = &[Migration {
     target_version: 1,
-    description: "columns added after the first release",
+    description: "columns added during development, before v0.1.0",
     columns: &[
         (
             "rules",
