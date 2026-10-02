@@ -117,7 +117,7 @@ netkeep-gpui                    # dialogs, rules editor, settings, tray
 - [`develop.md`](develop.md) — developer guide; read the relevant doc before touching an area
 - `just ci` — fmt + clippy (`-D warnings`) + tests
 - `just e2e` — black-box suite against a running daemon
-- Work is tracked in [Issues](https://github.com/mohamadkhani/netkeep/issues) and the project board: pick an issue, branch as `fix/<n>-slug` or `feat/<n>-slug`, open a PR with `Fixes #<n>`
+- Work is tracked in [Issues](https://github.com/mohamadkhani/netkeep/issues) and the [project board](https://github.com/users/mohamadkhani/projects/2): pick an issue, branch as `fix/<n>-slug` or `feat/<n>-slug`, open a PR with `Fixes #<n>`
 
 ## License
 
