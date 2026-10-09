@@ -4,7 +4,7 @@ mod tracker;
 
 pub use forwarder::DnsForwarder;
 pub use sock_tracker::{SockTracker, TrackedProcess};
-pub use tracker::{DnsQueryInfo, DnsTracker};
+pub use tracker::{DnsQueryCandidate, DnsQueryInfo, DnsTracker};
 
 /// Shared key layout mirroring crates/dns-tracker-ebpf/src/main.rs DnsKey.
 /// Must stay ABI-compatible with the BPF program.

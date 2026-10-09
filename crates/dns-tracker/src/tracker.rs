@@ -15,6 +15,18 @@ pub struct DnsQueryInfo {
     pub domain: String,
 }
 
+/// A tracked DNS query found by domain scan, with its source socket so the
+/// caller can validate the socket's current owner via SOCK_DIAG / /proc.
+#[derive(Clone, Debug)]
+pub struct DnsQueryCandidate {
+    /// Source IPv4 from the map key (may be `0.0.0.0` for auto-bound sockets).
+    pub src_ip: Ipv4Addr,
+    /// Source port from the map key.
+    pub src_port: u16,
+    /// Captured query info (pid, comm, domain).
+    pub info: DnsQueryInfo,
+}
+
 /// Manages the eBPF DNS tracker: loads the BPF program, attaches the kprobe,
 /// and provides lookups into the DNS events map.
 pub struct DnsTracker {
@@ -86,6 +98,46 @@ impl DnsTracker {
             comm: null_terminated_str(&event.comm).to_string(),
             domain: null_terminated_str(&event.domain).to_string(),
         })
+    }
+
+    /// Find every tracked query for `domain` by scanning the whole map.
+    ///
+    /// Used for stub-resolver attribution: when a local caching resolver
+    /// (systemd-resolved, dnsmasq, …) re-queries the forwarder, the
+    /// socket-level lookup names the resolver — not the app that asked for
+    /// the name. The app's own query to the stub (e.g. dst `127.0.0.53:53`)
+    /// has dport 53 too, so the map also holds `(app socket → domain)`
+    /// entries that this scan recovers.
+    ///
+    /// Returns candidates in arbitrary map order; the caller filters out
+    /// resolver/daemon comms and validates the socket's current owner.
+    pub fn lookup_all_by_domain(&self, domain: &str) -> Vec<DnsQueryCandidate> {
+        let Some(map_data) = self.ebpf.map("DNS_EVENTS") else {
+            return Vec::new();
+        };
+        let Ok(map) = HashMap::<_, DnsKey, DnsEvent>::try_from(map_data) else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for key in map.keys() {
+            let Ok(key) = key else { continue };
+            let Ok(event) = map.get(&key, 0) else {
+                continue;
+            };
+            if null_terminated_str(&event.domain) == domain {
+                out.push(DnsQueryCandidate {
+                    src_ip: Ipv4Addr::from(u32::from_be(key.src_ip4)),
+                    src_port: key.src_port,
+                    info: DnsQueryInfo {
+                        pid: event.pid,
+                        comm: null_terminated_str(&event.comm).to_string(),
+                        domain: null_terminated_str(&event.domain).to_string(),
+                    },
+                });
+            }
+        }
+        out
     }
 }
 
