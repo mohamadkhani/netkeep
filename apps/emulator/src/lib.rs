@@ -2,17 +2,38 @@ use std::io::{copy, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use control_api::{ControlRequest, ControlResponse};
 use core_types::{FlowContext, FlowDirection, RouteTarget, RuleAction, TransportProtocol};
+
+/// How long `send_control_request` keeps retrying a refused/missing daemon
+/// socket before giving up.
+const SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Pause between socket connect retries.
+const SOCKET_CONNECT_RETRY: Duration = Duration::from_millis(50);
 
 pub fn send_control_request(
     socket_path: &str,
     request: &ControlRequest,
 ) -> Result<ControlResponse, String> {
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|e| format!("failed to connect to daemon socket {socket_path}: {e}"))?;
+    // The mock daemon binds its socket on a separate thread; under CI load
+    // the first connect can race the bind (ENOENT). Retry the connect —
+    // and only the connect — briefly before giving up.
+    let deadline = Instant::now() + SOCKET_CONNECT_TIMEOUT;
+    let mut stream = loop {
+        match UnixStream::connect(socket_path) {
+            Ok(s) => break s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && Instant::now() < deadline => {
+                thread::sleep(SOCKET_CONNECT_RETRY);
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to connect to daemon socket {socket_path}: {e}"
+                ))
+            }
+        }
+    };
     let payload = serde_json::to_string(request).map_err(|e| e.to_string())?;
     stream
         .write_all(format!("{payload}\n").as_bytes())
