@@ -277,8 +277,9 @@ fn load_proxy_config(db_path: &str, proxy_id: &str) -> Result<ProxyConfig, Strin
 /// For SOCKS5, the domain is sent directly to the proxy (proxy-side DNS resolution).
 /// For HTTP CONNECT, the domain is included in the CONNECT line.
 ///
-/// `daemon_mark` is stamped via `SO_MARK` on the proxy TCP socket so that
-/// nftables bypasses NFQUEUE for the daemon's own relay connections.
+/// `daemon_mark` is stamped via `SO_MARK` on the proxy TCP socket **before**
+/// connect so the SYN and the whole proxy handshake bypass NFQUEUE (marking
+/// after connect is too late — conntrack judges the SYN).
 fn connect_via_proxy_target(
     proxy: &ProxyConfig,
     host: &str,
@@ -294,31 +295,9 @@ fn connect_via_proxy_target(
         host,
         port,
         std::time::Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
+        daemon_mark,
     )
     .map_err(|e| format!("proxy connect to {}:{} failed: {e}", proxy.host, proxy.port))?;
-
-    // Stamp daemon fwmark so nftables output_early bypasses NFQUEUE.
-    // This must happen AFTER connect() because proxy_client returns an
-    // already-connected stream. We set the mark on the fd so subsequent
-    // packets (data relay) carry the mark.
-    if daemon_mark != 0 {
-        use std::os::unix::io::AsRawFd;
-        let ret = unsafe {
-            libc::setsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_MARK,
-                &daemon_mark as *const u32 as *const _,
-                std::mem::size_of::<u32>() as u32,
-            )
-        };
-        if ret < 0 {
-            eprintln!(
-                "routed proxy connect: SO_MARK({daemon_mark}) failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-    }
     Ok(stream)
 }
 
@@ -1130,8 +1109,11 @@ fn main() {
 
     // Start one transparent proxy per enabled proxy, each on a different port.
     // Build a map: proxy_id → (fwmark, local_port).
-    // fwmarks are allocated below ROUTE_MARK_BASE (PROXY_REDIRECT_MARK range).
-    // PROXY_REDIRECT_MARK = ROUTE_MARK_BASE - 1; we allocate downward from there.
+    // fwmarks are allocated below DAEMON_BYPASS_MARK (which is PROXY_REDIRECT_MARK - 1)
+    // so proxy marks never collide with the daemon bypass mark (19998) or the
+    // legacy PROXY_REDIRECT_MARK (19999) — a collision would make nftables
+    // redirect the daemon's own marked sockets into a proxy tunnel.
+    // PROXY_REDIRECT_MARK = ROUTE_MARK_BASE - 1; we allocate downward from DAEMON_BYPASS_MARK - 1.
     let proxy_marks: std::collections::HashMap<String, (u32, u16)> = {
         let proxies: Vec<ProxyConfig> = {
             let mut svc = service.lock().expect("service lock");
@@ -1143,12 +1125,14 @@ fn main() {
         let enabled_proxies: Vec<_> = proxies.into_iter().filter(|p| p.enabled).collect();
         let mut map = std::collections::HashMap::new();
         for (i, proxy) in enabled_proxies.into_iter().enumerate() {
-            // Allocate a mark below ROUTE_MARK_BASE: base-1, base-2, base-3, ...
-            let mark = route_mark_base - 1 - i as u32;
+            // Allocate a mark below DAEMON_BYPASS_MARK: 19997, 19996, ...
+            let mark = enforcer::DAEMON_BYPASS_MARK - 1 - i as u32;
             let tp = match proxy_client::transparent::TransparentProxy::bind(
                 "127.0.0.1:0",
                 proxy.clone(),
                 std::time::Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
+                enforcer::DAEMON_BYPASS_MARK,
+                dns_cache.clone(),
             ) {
                 Ok(tp) => tp,
                 Err(e) => {

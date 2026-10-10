@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use core_types::ProxyConfig;
+use flow_classifier::SniDnsCache;
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::{connect_via_proxy, ProxyClientError};
@@ -23,6 +24,14 @@ pub struct TransparentProxy {
     listener: TcpListener,
     proxy: ProxyConfig,
     timeout: Duration,
+    /// Fwmark stamped on upstream sockets before connect so nftables bypasses
+    /// NFQUEUE for the daemon's own proxy connections (see `connect_via_proxy`).
+    daemon_mark: u32,
+    /// Shared IP→domain cache. Local DNS can be poisoned (censored networks
+    /// hand out sinkhole IPs); for proxy CONNECT the **domain** is what must
+    /// reach the proxy, so the original destination IP is translated back to
+    /// the domain the app queried before connecting upstream.
+    dns_cache: SniDnsCache,
 }
 
 impl TransparentProxy {
@@ -31,12 +40,16 @@ impl TransparentProxy {
         listen_addr: &str,
         proxy: ProxyConfig,
         timeout: Duration,
+        daemon_mark: u32,
+        dns_cache: SniDnsCache,
     ) -> Result<Self, ProxyClientError> {
         let listener = bind_transparent_listener(listen_addr)?;
         Ok(Self {
             listener,
             proxy,
             timeout,
+            daemon_mark,
+            dns_cache,
         })
     }
 
@@ -68,24 +81,35 @@ impl TransparentProxy {
 
     fn handle_client(&self, client: TcpStream) -> Result<(), String> {
         let original_dst = get_original_dst(&client)?;
-        let host = original_dst.ip().to_string();
         let port = original_dst.port();
+        let host = host_for_connect(&original_dst.ip().to_string(), &self.dns_cache);
 
         eprintln!(
-            "transparent proxy: {} -> {} via {}:{}",
+            "transparent proxy: {} -> {host}:{port} via {}:{}",
             client
                 .peer_addr()
                 .map(|a| a.to_string())
                 .unwrap_or_else(|_| "?".into()),
-            original_dst,
             self.proxy.host,
             self.proxy.port
         );
 
-        let upstream = connect_via_proxy(&self.proxy, &host, port, self.timeout)
+        let upstream = connect_via_proxy(&self.proxy, &host, port, self.timeout, self.daemon_mark)
             .map_err(|e| format!("proxy connect to {host}:{port}: {e}"))?;
 
         relay_bidirectional(client, upstream)
+    }
+}
+
+/// Translate an original destination IP into the host used for the proxy
+/// CONNECT. If the SniDnsCache knows the domain the app queried for this IP,
+/// the domain is used — the proxy then resolves it on the far side, which is
+/// what makes routed traffic survive poisoned local DNS. Otherwise the IP is
+/// passed through unchanged.
+fn host_for_connect(ip: &str, dns_cache: &SniDnsCache) -> String {
+    match dns_cache.lookup(ip) {
+        Some(domain) if !domain.is_empty() => domain,
+        _ => ip.to_string(),
     }
 }
 
@@ -215,5 +239,14 @@ mod tests {
     #[test]
     fn so_original_dst_constant() {
         assert_eq!(SO_ORIGINAL_DST, 80);
+    }
+
+    #[test]
+    fn host_for_connect_prefers_cached_domain() {
+        let cache = SniDnsCache::new();
+        cache.insert("10.10.34.36", "www.facebook.com");
+        assert_eq!(host_for_connect("10.10.34.36", &cache), "www.facebook.com");
+        // Unknown IP passes through unchanged.
+        assert_eq!(host_for_connect("1.2.3.4", &cache), "1.2.3.4");
     }
 }

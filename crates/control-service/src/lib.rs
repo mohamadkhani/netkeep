@@ -584,7 +584,12 @@ impl<R: Repository> ControlService<R> {
                 match self.repo.get_proxy(&proxy_id) {
                     Some(proxy) => {
                         let timeout = std::time::Duration::from_secs(10);
-                        match proxy_client::test_http_connectivity(&proxy, &url, timeout) {
+                        match proxy_client::test_http_connectivity(
+                            &proxy,
+                            &url,
+                            timeout,
+                            enforcer::DAEMON_BYPASS_MARK,
+                        ) {
                             Ok(latency_ms) => ControlResponse::ProxyTestResult {
                                 success: true,
                                 latency_ms,
@@ -604,7 +609,12 @@ impl<R: Repository> ControlService<R> {
                 match self.repo.get_proxy(&proxy_id) {
                     Some(proxy) => {
                         let timeout = std::time::Duration::from_secs(10);
-                        match proxy_client::test_dns_connectivity(&proxy, &domain, timeout) {
+                        match proxy_client::test_dns_connectivity(
+                            &proxy,
+                            &domain,
+                            timeout,
+                            enforcer::DAEMON_BYPASS_MARK,
+                        ) {
                             Ok(latency_ms) => ControlResponse::ProxyTestResult {
                                 success: true,
                                 latency_ms,

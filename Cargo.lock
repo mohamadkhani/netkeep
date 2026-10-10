@@ -5482,6 +5482,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "core-types",
+ "flow-classifier",
  "libc",
  "socket2",
 ]

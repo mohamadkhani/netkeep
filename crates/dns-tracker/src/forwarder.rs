@@ -15,6 +15,40 @@ const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum DNS message size (standard UDP limit).
 const DNS_BUF: usize = 512;
 
+/// DNS RCODE 2 — server failure (RFC 1035 §4.1.1). Returned to the app when
+/// egress resolution fails, instead of leaking the query to system DNS.
+const RCODE_SERVFAIL: u8 = 2;
+
+/// Comms of well-known local stub/caching resolvers (bpf comm is truncated
+/// to 15 bytes, hence `systemd-resolve`). Queries arriving from these are
+/// re-attributed to the real app via [`DnsForwarder::resolve_behind_resolver`].
+const LOCAL_RESOLVER_COMMS: &[&str] = &[
+    "systemd-resolve",
+    "dnsmasq",
+    "unbound",
+    "stubby",
+    "dnscrypt-proxy",
+    "kresd",
+    "pdns-recursor",
+    "dohclient",
+];
+
+/// Whether `comm` belongs to a local resolver or to this daemon itself.
+/// Empty comm (attribution failed) is treated like a resolver so the
+/// behind-resolver recovery still gets a chance to name the real app.
+fn is_local_resolver_comm(comm: &str) -> bool {
+    comm.is_empty()
+        || comm.starts_with("netkeep")
+        || LOCAL_RESOLVER_COMMS.iter().any(|r| comm.starts_with(r))
+}
+
+/// Read a process name from `/proc/<pid>/comm`.
+fn comm_for_pid(pid: u32) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
 /// Dispatch function: given `(process_name, domain)`, return the `RouteTarget`
 /// and the list of DNS servers to use, or `None` for system DNS.
 pub type EgressResolver =
@@ -189,21 +223,23 @@ impl DnsForwarder {
         let response = if let Some(name) = &process_name {
             if let Some((target, dns_servers)) = (self.egress_resolver)(name, &domain) {
                 if dns_servers.is_empty() {
+                    // Fail closed: an egress with no DNS servers cannot resolve
+                    // through its own path, and falling back to system DNS
+                    // would leak routed domains to the local resolver.
                     eprintln!(
-                        "dns-forwarder: egress matched but no DNS servers configured; using system DNS"
+                        "dns-forwarder: egress {target:?} matched for '{domain}' but has no DNS servers configured; answering SERVFAIL (configure DNS servers for this egress to enable resolution)"
                     );
-                    self.forward_system(&query)
+                    build_dns_error_response(&query, RCODE_SERVFAIL)
+                        .ok_or_else(|| "malformed query: cannot build SERVFAIL reply".to_string())?
                 } else {
-                    self.resolve_via_egress(&query, &target, &dns_servers)
+                    self.resolve_via_egress(&query, &target, &dns_servers)?
                 }
             } else {
-                self.forward_system(&query)
+                self.forward_system(&query)?
             }
         } else {
-            self.forward_system(&query)
+            self.forward_system(&query)?
         };
-
-        let response = response?;
 
         // Populate SniDnsCache: extract (ip → domain) from DNS response A/AAAA records.
         if !domain.is_empty() {
@@ -228,13 +264,20 @@ impl DnsForwarder {
         Ok(())
     }
 
-    fn resolve_process(&self, peer: SocketAddr, _domain: &str) -> Option<String> {
+    /// Identify the source process for a query arriving from `peer`.
+    ///
+    /// Socket-level attribution names the process owning `peer`'s socket.
+    /// When that is a local stub resolver (systemd-resolved, dnsmasq, …) the
+    /// real application is hidden behind it, so [`Self::resolve_behind_resolver`]
+    /// recovers the app that asked for `domain`.
+    fn resolve_process(&self, peer: SocketAddr, domain: &str) -> Option<String> {
         // Try eBPF tracker first (100% accurate, no /proc race).
+        let mut direct = None;
         if let Some(tracker) = &self.tracker {
             if let SocketAddr::V4(v4) = peer {
                 if let Some(info) = tracker.lookup(*v4.ip(), v4.port()) {
                     if !info.comm.is_empty() {
-                        return Some(info.comm);
+                        direct = Some(info.comm);
                     }
                 }
             }
@@ -242,18 +285,77 @@ impl DnsForwarder {
 
         // Fallback: SOCK_DIAG + /proc scan.
         // The app is blocked on getaddrinfo() so its socket is still open.
-        if let SocketAddr::V4(v4) = peer {
-            let src_ip = v4.ip().to_string();
-            if let Some(proc_info) =
-                self.proc_resolver
-                    .resolve(&src_ip, v4.port(), TransportProtocol::Udp, None)
-            {
-                if !proc_info.name.is_empty() {
-                    return Some(proc_info.name);
+        if direct.is_none() {
+            if let SocketAddr::V4(v4) = peer {
+                let src_ip = v4.ip().to_string();
+                if let Some(proc_info) =
+                    self.proc_resolver
+                        .resolve(&src_ip, v4.port(), TransportProtocol::Udp, None)
+                {
+                    if !proc_info.name.is_empty() {
+                        direct = Some(proc_info.name);
+                    }
                 }
             }
         }
 
+        match direct {
+            Some(name) if !is_local_resolver_comm(&name) => Some(name),
+            direct => self.resolve_behind_resolver(domain).or(direct),
+        }
+    }
+
+    /// Best-effort attribution of a query that arrived from a local stub
+    /// resolver: find the app that originally asked for `domain`.
+    ///
+    /// Layer 1 — eBPF DNS map scan (domain-exact, when the tracker loaded):
+    /// the app's query to the stub has dport 53 too, so the map holds an
+    /// entry for the app's socket; its current owner is verified via
+    /// SOCK_DIAG before use.
+    ///
+    /// Layer 2 — /proc socket scan: apps blocked in getaddrinfo() hold a UDP
+    /// socket with the stub as remote (loopback:53). Used when the eBPF DNS
+    /// tracker is unavailable. With several apps resolving concurrently the
+    /// attribution is ambiguous and we refuse to guess (returns `None`), so
+    /// the query keeps the resolver's identity rather than a wrong one.
+    fn resolve_behind_resolver(&self, domain: &str) -> Option<String> {
+        if let Some(tracker) = &self.tracker {
+            for candidate in tracker.lookup_all_by_domain(domain) {
+                if is_local_resolver_comm(&candidate.info.comm) {
+                    continue;
+                }
+                // Prefer the socket's CURRENT owner — the app is usually
+                // still blocked in getaddrinfo(), so SOCK_DIAG sees it.
+                if let Some(owner) = self.proc_resolver.resolve(
+                    &candidate.src_ip.to_string(),
+                    candidate.src_port,
+                    TransportProtocol::Udp,
+                    None,
+                ) {
+                    if !owner.name.is_empty() && !is_local_resolver_comm(&owner.name) {
+                        return Some(owner.name);
+                    }
+                }
+                // Socket already closed: trust the eBPF comm if still alive.
+                if candidate.info.pid != 0
+                    && std::path::Path::new(&format!("/proc/{}", candidate.info.pid)).exists()
+                {
+                    return Some(candidate.info.comm);
+                }
+            }
+        }
+
+        let mut clients: Vec<String> = Vec::new();
+        for pid in flow_classifier::proc_resolver::stub_resolver_client_pids() {
+            if let Some(comm) = comm_for_pid(pid) {
+                if !is_local_resolver_comm(&comm) && !clients.contains(&comm) {
+                    clients.push(comm);
+                }
+            }
+        }
+        if clients.len() == 1 {
+            return clients.pop();
+        }
         None
     }
 
@@ -273,13 +375,21 @@ impl DnsForwarder {
                 resolve_via_bindtodevice(query, dns_servers, iface, self.daemon_mark)
             }
         };
-        // If egress DNS fails, fall back to system DNS so the app still gets a response.
-        // The NFQUEUE transparent proxy will handle routing the subsequent TCP connection.
+        // Fail closed: never fall back to system DNS when the egress fails.
+        // A rule that routes a domain through a private egress (proxy, tun,
+        // device) means the caller does not want the local network's resolver
+        // to see that domain. Answering SERVFAIL leaks nothing; querying the
+        // system DNS would hand the routed domain to the very path the rule
+        // steers traffic away from.
         match result {
             ok @ Ok(_) => ok,
-            Err(_e) => {
-                // Don't log every failure — fallback is transparent to the app.
-                self.forward_system(query)
+            Err(e) => {
+                eprintln!(
+                    "dns-forwarder: egress DNS failed via {target:?} (servers: {dns_servers:?}): {e}; answering SERVFAIL (system DNS fallback disabled to prevent domain leak)"
+                );
+                build_dns_error_response(query, RCODE_SERVFAIL).ok_or_else(|| {
+                    format!("egress DNS failed ({e}) and malformed query prevented SERVFAIL reply")
+                })
             }
         }
     }
@@ -350,8 +460,8 @@ impl DnsForwarder {
 /// SOCKS5 CONNECT only supports TCP streams. Most public DNS servers (1.1.1.1,
 /// 8.8.8.8) accept DNS-over-TCP on port 53.
 ///
-/// `daemon_mark` is set via `SO_MARK` on the TCP socket so nftables bypasses
-/// NFQUEUE for the daemon's own proxy connections.
+/// `daemon_mark` is set via `SO_MARK` on the TCP socket **before** connect so
+/// the SYN and the whole SOCKS handshake bypass NFQUEUE.
 fn dns_over_socks(
     proxy: &ProxyConfig,
     dns_server_ip: &str,
@@ -359,29 +469,21 @@ fn dns_over_socks(
     daemon_mark: u32,
 ) -> Result<Vec<u8>, String> {
     use std::io::{Read, Write};
-    use std::os::unix::io::AsRawFd;
 
-    let mut stream = proxy_client::connect_via_proxy(proxy, dns_server_ip, 53, DNS_TIMEOUT)
-        .map_err(|e| format!("socks connect to {dns_server_ip}:53: {e}"))?;
+    let mut stream =
+        proxy_client::connect_via_proxy(proxy, dns_server_ip, 53, DNS_TIMEOUT, daemon_mark)
+            .map_err(|e| format!("socks connect to {dns_server_ip}:53: {e}"))?;
 
-    // Stamp daemon fwmark so nftables output_early bypasses NFQUEUE.
-    if daemon_mark != 0 {
-        let ret = unsafe {
-            libc::setsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_MARK,
-                &daemon_mark as *const u32 as *const libc::c_void,
-                std::mem::size_of::<u32>() as libc::socklen_t,
-            )
-        };
-        if ret < 0 {
-            eprintln!(
-                "dns-forwarder: SO_MARK({daemon_mark}) on dns_over_socks socket failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-    }
+    // `connect_via_proxy` clears I/O timeouts after its handshake (relay-path
+    // semantics), but this is a bounded request/response exchange: re-arm
+    // DNS_TIMEOUT so a silent proxy/DNS server cannot wedge this worker
+    // thread (and its semaphore slot) forever.
+    stream
+        .set_read_timeout(Some(DNS_TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(DNS_TIMEOUT))
+        .map_err(|e| e.to_string())?;
 
     // TCP DNS framing: 2-byte big-endian length prefix, then query.
     let len_prefix = (query.len() as u16).to_be_bytes();
@@ -617,6 +719,38 @@ fn forward_udp(query: &[u8], upstream: SocketAddr, daemon_mark: u32) -> Result<V
 // DNS wire format helpers
 // ---------------------------------------------------------------------------
 
+/// Build a minimal DNS response that echoes the query's question section and
+/// carries the given RCODE (e.g. [`RCODE_SERVFAIL`]). Lets the forwarder
+/// answer with a proper error instead of leaking the query to system DNS or
+/// silently timing the client out.
+///
+/// Returns `None` for malformed input shorter than a DNS header.
+fn build_dns_error_response(query: &[u8], rcode: u8) -> Option<Vec<u8>> {
+    if query.len() < 12 {
+        return None;
+    }
+    // Echo exactly the first question (QNAME + QTYPE + QCLASS) when parseable.
+    let mut pos = 12usize;
+    let question = if skip_name(query, &mut pos).is_some() && pos + 4 <= query.len() {
+        Some(query[12..pos + 4].to_vec())
+    } else {
+        None
+    };
+    let mut resp = Vec::with_capacity(12 + question.as_ref().map_or(0, Vec::len));
+    resp.extend_from_slice(&query[0..2]); // ID — must echo so the client accepts it
+    resp.push(query[2] | 0x80); // flags: copy opcode/RD, set QR (is a response)
+    resp.push((query[3] & 0xF0) | (rcode & 0x0F)); // preserve Z/AD/CD, set RCODE
+    let qdcount: u16 = if question.is_some() { 1 } else { 0 };
+    resp.extend_from_slice(&qdcount.to_be_bytes()); // QDCOUNT
+    resp.extend_from_slice(&[0, 0]); // ANCOUNT
+    resp.extend_from_slice(&[0, 0]); // NSCOUNT
+    resp.extend_from_slice(&[0, 0]); // ARCOUNT
+    if let Some(q) = question {
+        resp.extend_from_slice(&q);
+    }
+    Some(resp)
+}
+
 /// Extract the QNAME from a DNS query message.
 pub fn parse_qname_from_query(data: &[u8]) -> Option<String> {
     if data.len() < 13 {
@@ -793,4 +927,80 @@ fn skip_name(data: &[u8], pos: &mut usize) -> Option<()> {
         *pos += 1 + len;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal well-formed A query for `example.com` (RD set).
+    fn sample_query() -> Vec<u8> {
+        let mut q = Vec::new();
+        q.extend_from_slice(&[0xAB, 0xCD]); // ID
+        q.extend_from_slice(&[0x01, 0x00]); // flags: standard query, RD=1
+        q.extend_from_slice(&[0, 1]); // QDCOUNT = 1
+        q.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // AN/NS/AR = 0
+        for label in ["example", "com"] {
+            q.push(label.len() as u8);
+            q.extend_from_slice(label.as_bytes());
+        }
+        q.push(0); // root label
+        q.extend_from_slice(&[0, 1]); // QTYPE = A
+        q.extend_from_slice(&[0, 1]); // QCLASS = IN
+        q
+    }
+
+    #[test]
+    fn servfail_response_echoes_query() {
+        let query = sample_query();
+        let resp = build_dns_error_response(&query, RCODE_SERVFAIL).expect("response built");
+
+        // ID echoed.
+        assert_eq!(&resp[0..2], &[0xAB, 0xCD]);
+        // QR set (response), opcode and RD preserved from the query.
+        assert_eq!(resp[2] & 0x80, 0x80, "QR bit must be set");
+        assert_eq!(resp[2] & 0x7F, query[2] & 0x7F, "opcode/RD echoed");
+        // RCODE = SERVFAIL (2), upper nibble preserved.
+        assert_eq!(resp[3] & 0x0F, RCODE_SERVFAIL);
+        // Counts: one question, no answers.
+        assert_eq!(&resp[4..6], &[0, 1]);
+        assert_eq!(&resp[6..12], &[0, 0, 0, 0, 0, 0]);
+        // Question section echoed verbatim.
+        let question_end = 12 + query.len() - 12;
+        assert_eq!(&resp[12..], &query[12..question_end]);
+        // The response parses as a name-bearing message and yields no IPs.
+        assert_eq!(
+            parse_qname_from_query(&resp).as_deref(),
+            Some("example.com")
+        );
+        assert!(parse_dns_response_ips(&resp).is_empty());
+    }
+
+    #[test]
+    fn error_response_header_only_without_question() {
+        // A 12-byte header with QDCOUNT=0 — no question section to echo.
+        let query = vec![0x12, 0x34, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0];
+        let resp = build_dns_error_response(&query, RCODE_SERVFAIL).expect("response built");
+        assert_eq!(resp.len(), 12);
+        assert_eq!(&resp[4..6], &[0, 0], "QDCOUNT must be 0");
+        assert_eq!(resp[3] & 0x0F, RCODE_SERVFAIL);
+    }
+
+    #[test]
+    fn error_response_rejects_malformed_query() {
+        assert!(build_dns_error_response(&[0, 1, 2], RCODE_SERVFAIL).is_none());
+    }
+
+    #[test]
+    fn resolver_comm_detection() {
+        assert!(is_local_resolver_comm("systemd-resolve")); // 15-char comm truncation
+        assert!(is_local_resolver_comm("systemd-resolved"));
+        assert!(is_local_resolver_comm("dnsmasq"));
+        assert!(is_local_resolver_comm("netkeepd"));
+        assert!(is_local_resolver_comm("netkeep-daemon"));
+        assert!(is_local_resolver_comm(""));
+        assert!(!is_local_resolver_comm("chromium"));
+        assert!(!is_local_resolver_comm("dig"));
+        assert!(!is_local_resolver_comm("curl"));
+    }
 }

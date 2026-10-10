@@ -858,6 +858,70 @@ fn read_ppid(pid: u32) -> Option<u32> {
     None
 }
 
+/// PIDs of processes holding a UDP socket whose **remote** endpoint is
+/// loopback port 53 — i.e. apps currently resolving names behind a local
+/// stub/caching resolver (systemd-resolved on `127.0.0.53`, dnsmasq, …).
+///
+/// glibc/musl resolvers `connect()` the UDP socket before sending, so an app
+/// blocked in `getaddrinfo()` still shows the stub as the remote address in
+/// `/proc/net/udp[6]`. This is the attribution path for queries that arrive
+/// at the DNS forwarder from the resolver's own socket.
+///
+/// Deduplicated; empty when nobody is resolving behind a stub.
+pub fn stub_resolver_client_pids() -> Vec<u32> {
+    let mut pids = Vec::new();
+    for path in ["/proc/net/udp", "/proc/net/udp6"] {
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        for (inode, uid) in parse_stub_resolver_clients(&content) {
+            if let Some(pid) = find_pid_for_inode(inode, uid) {
+                if !pids.contains(&pid) {
+                    pids.push(pid);
+                }
+            }
+        }
+    }
+    pids
+}
+
+/// Parse `/proc/net/udp[6]` rows whose remote address is loopback port 53.
+/// Returns `(inode, uid)` pairs.
+fn parse_stub_resolver_clients(content: &str) -> Vec<(u64, u32)> {
+    const DNS_PORT_HEX: &str = "0035";
+    let mut out = Vec::new();
+    for line in content.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 10 {
+            continue;
+        }
+        let remote = cols[2];
+        let Some(colon) = remote.rfind(':') else {
+            continue;
+        };
+        if &remote[colon + 1..] != DNS_PORT_HEX {
+            continue;
+        }
+        let Some(IpAddr::V4(addr)) = parse_hex_addr(&remote[..colon]) else {
+            continue;
+        };
+        // Loopback only: 127.0.0.0/8 (covers 127.0.0.53 and a direct
+        // 127.0.0.1 resolver on the same host).
+        if !addr.is_loopback() {
+            continue;
+        }
+        let Ok(inode) = cols[9].parse::<u64>() else {
+            continue;
+        };
+        if inode == 0 {
+            continue;
+        }
+        let uid = cols[7].parse().unwrap_or(u32::MAX);
+        out.push((inode, uid));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1374,5 +1438,19 @@ mod tests {
         // electron called with no arguments — nothing to extract.
         let cmdline = "/usr/lib/electron42/electron\0";
         assert_eq!(parse_cmdline_for_app_name(cmdline), None);
+    }
+
+    #[test]
+    fn parse_stub_resolver_clients_matches_loopback_dns_remotes() {
+        // Header +: row1 rem=127.0.0.53:53 (match), row2 rem=0.0.0.0:0
+        // (unconnected, skip), row3 rem=142.250.0.53... not loopback (skip).
+        let content = concat!(
+            "  sl local_address rem_address   st tx_rx tx_he retrnsmt uid  timeout inode\n",
+            "   0: 0100007F:9A6C 3500007F:0035 01 00000000:00000000 00:00000000 00000000  1000        0 12345 1\n",
+            "   1: 0100007F:9A6D 00000000:0000 07 00000000:00000000 00:00000000 00000000  1000        0 12346 1\n",
+            "   2: 0100007F:9A6E 8EFA0035:0035 01 00000000:00000000 00:00000000 00000000  1000        0 12347 1\n"
+        );
+        let clients = parse_stub_resolver_clients(content);
+        assert_eq!(clients, vec![(12345, 1000)]);
     }
 }

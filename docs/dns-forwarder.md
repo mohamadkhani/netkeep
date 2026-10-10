@@ -64,6 +64,12 @@ fn lookup(&self, src_ip: Ipv4Addr, src_port: u16) -> Option<DnsQueryInfo>
 7. Populate SniDnsCache: ip → domain (helps transparent proxy use hostnames for SOCKS CONNECT)
 ```
 
+### Fail-closed behavior (never leak routed domains)
+
+If an egress-matched query cannot be resolved through its egress — proxy unreachable, DNS-over-SOCKS failed, tun/device DNS timed out, or the egress has **no** `dns_servers` configured — the forwarder answers **SERVFAIL** (RCODE 2, via `build_dns_error_response`) and logs the failure. It **never** falls back to system DNS.
+
+Rationale: a rule that routes a domain through a private egress means the caller does not want the local network's resolver to see that domain. Falling back to system DNS on failure would hand every routed domain to exactly the path the rule steers traffic away from — a DNS leak. Failing closed matches netkeep's overall fail-close philosophy: a broken egress must degrade to "no resolution", not "resolution via the wrong network".
+
 ### 3. Daemon Integration
 
 The daemon (`apps/daemon/src/main.rs`) starts both components at boot:
@@ -121,12 +127,33 @@ SOCKS5 CONNECT to <egress_dns_server>:53
 
 This uses the existing `proxy_client::connect_via_proxy()`. The DNS server IP itself (e.g. `8.8.8.8`) is sent to the SOCKS5 proxy as a destination, so the proxy resolves the DNS query on the far side using its own network path.
 
+The exchange is bounded: the socket carries `DAEMON_BYPASS_MARK` **before** connect (SYN + SOCKS handshake bypass NFQUEUE), and read/write timeouts of `DNS_TIMEOUT` (5 s) are re-armed after the proxy handshake, so a silent proxy or DNS server fails the query instead of wedging a forwarder worker thread forever.
+
+### Stub-resolver attribution (systemd-resolved, dnsmasq, …)
+
+When a local caching resolver sits between apps and the forwarder (the default on
+systemd systems: app → `127.0.0.53` stub → forwarder on `127.0.0.1:53`), the
+socket-level lookup names **the resolver**, not the app — so per-app DNS rules
+never match. The forwarder looks behind the resolver:
+
+1. **eBPF domain scan** (when the DNS tracker kprobe loaded): the app's query to
+   the stub has dport 53 too, so the map holds an `(app socket → domain)` entry;
+   the candidate's socket owner is re-verified via SOCK_DIAG before use.
+2. **`/proc` socket scan** (fallback, works without eBPF): an app blocked in
+   `getaddrinfo()` holds a UDP socket whose *remote* is loopback:53;
+   `stub_resolver_client_pids()` recovers its owner. If several distinct apps
+   are resolving concurrently, attribution is ambiguous and the forwarder
+   refuses to guess (keeps the resolver identity).
+
+Resolver/daemon comms (`systemd-resolve`, `dnsmasq`, `unbound`, `netkeep*`, …)
+are always excluded from candidate attribution.
+
 ## Relation to Transparent Proxy
 
 The DNS forwarder and the transparent proxy complement each other:
 
 - DNS forwarder: app gets a **real IP** from the correct egress DNS → NFQUEUE routes TCP to transparent proxy using hostname from SniDnsCache
-- Transparent proxy: when DNS forwarder was used, `SniDnsCache` already has `ip → domain` → SOCKS5 CONNECT uses the domain name, not the IP
+- Transparent proxy: the original destination IP is translated back to the domain via `SniDnsCache` (`host_for_connect`), so the SOCKS5 CONNECT carries the **domain** and the proxy resolves it on the far side. This is what keeps proxy-routed traffic working on networks with poisoned DNS: the sinkhole IP the app received never reaches the proxy as a destination. If the cache has no entry, the IP is passed through unchanged.
 
 ## UDP Retry Behavior
 

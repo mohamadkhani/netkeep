@@ -49,6 +49,12 @@ impl From<std::io::Error> for ProxyClientError {
 /// For HTTP proxies, sends an HTTP CONNECT request.
 /// For Shadowsocks, returns `UnsupportedProtocol` (not yet implemented).
 ///
+/// `mark` — fwmark stamped via `SO_MARK` on the socket **before** the TCP
+/// connect. This is critical: the SYN and the whole proxy handshake must
+/// carry the daemon bypass mark, or nftables queues them to NFQUEUE and the
+/// daemon's own connection stalls on a policy decision. Pass 0 to skip
+/// marking.
+///
 /// The returned `TcpStream` is in a connected/established state and ready
 /// for bidirectional byte relay.
 pub fn connect_via_proxy(
@@ -56,6 +62,7 @@ pub fn connect_via_proxy(
     host: &str,
     port: u16,
     timeout: Duration,
+    mark: u32,
 ) -> Result<TcpStream, ProxyClientError> {
     // Check protocol support before opening any TCP connection.
     if matches!(proxy.protocol, ProxyProtocol::Shadowsocks) {
@@ -73,6 +80,13 @@ pub fn connect_via_proxy(
         Some(socket2::Protocol::TCP),
     )
     .map_err(ProxyClientError::Io)?;
+
+    // Stamp the fwmark BEFORE connect so the SYN and every handshake packet
+    // are already marked when they traverse the nftables output hooks.
+    // Marking after connect is too late: conntrack judges the SYN.
+    if mark != 0 {
+        socket.set_mark(mark).map_err(ProxyClientError::Io)?;
+    }
 
     socket
         .connect_timeout(&socket2::SockAddr::from(sock_addr), timeout)
@@ -493,7 +507,7 @@ mod tests {
                 password: "secret".to_string(),
             },
         );
-        let result = connect_via_proxy(&proxy, "example.com", 443, Duration::from_secs(5));
+        let result = connect_via_proxy(&proxy, "example.com", 443, Duration::from_secs(5), 0);
         assert!(matches!(result, Err(ProxyClientError::UnsupportedProtocol)));
     }
 }
@@ -506,10 +520,14 @@ mod tests {
 ///
 /// Connects to the URL's host:port via the proxy, sends an HTTP HEAD request,
 /// waits for the response status line, and returns the round-trip latency in ms.
+///
+/// `mark` — fwmark stamped on the socket before connect (daemon bypass mark
+/// when called from inside the daemon; 0 for external callers).
 pub fn test_http_connectivity(
     proxy: &ProxyConfig,
     url: &str,
     timeout: Duration,
+    mark: u32,
 ) -> Result<u64, ProxyClientError> {
     let start = std::time::Instant::now();
 
@@ -521,7 +539,7 @@ pub fn test_http_connectivity(
     let port = 80;
 
     // Connect through the proxy
-    let mut stream = connect_via_proxy(proxy, &host, port, timeout)?;
+    let mut stream = connect_via_proxy(proxy, &host, port, timeout, mark)?;
 
     // Send HTTP HEAD request
     let request = format!("HEAD / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
@@ -583,15 +601,19 @@ pub fn test_http_connectivity(
 /// Connects to 8.8.8.8:53 (Google DNS) via the proxy, sends a DNS A query
 /// for the given domain, waits for the response, and returns the round-trip
 /// latency in ms.
+///
+/// `mark` — fwmark stamped on the socket before connect (daemon bypass mark
+/// when called from inside the daemon; 0 for external callers).
 pub fn test_dns_connectivity(
     proxy: &ProxyConfig,
     domain: &str,
     timeout: Duration,
+    mark: u32,
 ) -> Result<u64, ProxyClientError> {
     let start = std::time::Instant::now();
 
     // Connect to Google DNS through the proxy
-    let mut stream = connect_via_proxy(proxy, "8.8.8.8", 53, timeout)?;
+    let mut stream = connect_via_proxy(proxy, "8.8.8.8", 53, timeout, mark)?;
 
     // Set read timeout so we don't block forever on unresponsive servers
     stream
