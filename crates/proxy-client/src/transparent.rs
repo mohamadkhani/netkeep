@@ -1,10 +1,11 @@
-use std::io::copy;
+use std::io::{copy, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
 use core_types::ProxyConfig;
+use flow_classifier::sni::{extract_http_host, extract_tls_sni};
 use flow_classifier::SniDnsCache;
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -29,8 +30,9 @@ pub struct TransparentProxy {
     daemon_mark: u32,
     /// Shared IP→domain cache. Local DNS can be poisoned (censored networks
     /// hand out sinkhole IPs); for proxy CONNECT the **domain** is what must
-    /// reach the proxy, so the original destination IP is translated back to
-    /// the domain the app queried before connecting upstream.
+    /// reach the proxy, so the CONNECT host is resolved in-band from the
+    /// app's own ClientHello/Host when possible, falling back to the cache's
+    /// most recent binding for the original destination IP.
     dns_cache: SniDnsCache,
 }
 
@@ -79,10 +81,17 @@ impl TransparentProxy {
         }
     }
 
-    fn handle_client(&self, client: TcpStream) -> Result<(), String> {
+    fn handle_client(&self, mut client: TcpStream) -> Result<(), String> {
         let original_dst = get_original_dst(&client)?;
         let port = original_dst.port();
-        let host = host_for_connect(&original_dst.ip().to_string(), &self.dns_cache);
+
+        // The app's own first bytes (TLS ClientHello SNI or HTTP Host header)
+        // are the authoritative hostname — they name the host even when the
+        // shared IP cache holds a *different* domain that resolves to the
+        // same IP. Peek before choosing the CONNECT target; the peeked bytes
+        // are then forwarded as-is.
+        let (prefix, hint) = peek_client_hello(&mut client, self.timeout);
+        let host = connect_host(hint, &original_dst.ip().to_string(), &self.dns_cache);
 
         eprintln!(
             "transparent proxy: {} -> {host}:{port} via {}:{}",
@@ -94,23 +103,68 @@ impl TransparentProxy {
             self.proxy.port
         );
 
-        let upstream = connect_via_proxy(&self.proxy, &host, port, self.timeout, self.daemon_mark)
-            .map_err(|e| format!("proxy connect to {host}:{port}: {e}"))?;
+        // Try the in-band hint host first. If the upstream proxy cannot
+        // resolve or reach it, fall back to the pre-hint behavior (cache,
+        // then raw IP) instead of killing the flow — a dead CONNECT surfaces
+        // in browsers as ERR_HTTP2_PROTOCOL_ERROR / ERR_CONNECTION_RESET.
+        let mut upstream =
+            match connect_via_proxy(&self.proxy, &host, port, self.timeout, self.daemon_mark) {
+                Ok(upstream) => upstream,
+                Err(hint_err) => {
+                    let fallback =
+                        connect_host(None, &original_dst.ip().to_string(), &self.dns_cache);
+                    if fallback == host {
+                        return Err(format!("proxy connect to {host}:{port}: {hint_err}"));
+                    }
+                    eprintln!(
+                        "transparent proxy: hint host {host} unreachable ({hint_err}), \
+                     retrying CONNECT with {fallback}:{port}"
+                    );
+                    connect_via_proxy(&self.proxy, &fallback, port, self.timeout, self.daemon_mark)
+                        .map_err(|e| format!("proxy connect to {fallback}:{port}: {e}"))?
+                }
+            };
+        if !prefix.is_empty() {
+            upstream
+                .write_all(&prefix)
+                .map_err(|e| format!("forward peeked bytes to {host}:{port}: {e}"))?;
+        }
 
         relay_bidirectional(client, upstream)
     }
 }
 
-/// Translate an original destination IP into the host used for the proxy
-/// CONNECT. If the SniDnsCache knows the domain the app queried for this IP,
-/// the domain is used — the proxy then resolves it on the far side, which is
-/// what makes routed traffic survive poisoned local DNS. Otherwise the IP is
-/// passed through unchanged.
-fn host_for_connect(ip: &str, dns_cache: &SniDnsCache) -> String {
-    match dns_cache.lookup(ip) {
-        Some(domain) if !domain.is_empty() => domain,
-        _ => ip.to_string(),
-    }
+/// Read the first bytes from the redirected client connection and recover the
+/// intended hostname from an in-band TLS ClientHello SNI or HTTP `Host`
+/// header.
+///
+/// Returns `(peeked_bytes, host_hint)`. All failure modes (timeout while the
+/// app waits for a server greeting, connection reset, payload without SNI or
+/// Host) degrade to `(possibly-empty prefix, None)` — the caller then falls
+/// back to the IP-keyed DNS cache and passes the prefix through unharmed.
+///
+/// One read of up to 4 KiB is performed with the given timeout. A ClientHello
+/// split across TCP segments whose SNI lands beyond the first read falls back
+/// to the cache — acceptable, since real ClientHellos are a few hundred bytes
+/// and arrive in the first segment in practice.
+fn peek_client_hello(client: &mut TcpStream, timeout: Duration) -> (Vec<u8>, Option<String>) {
+    let _ = client.set_read_timeout(Some(timeout));
+    let mut buf = [0u8; 4096];
+    let n = client.read(&mut buf).unwrap_or(0);
+    let _ = client.set_read_timeout(None);
+    let chunk = &buf[..n];
+    let hint = extract_tls_sni(chunk).or_else(|| extract_http_host(chunk));
+    (chunk.to_vec(), hint)
+}
+
+/// Pick the hostname used for the upstream proxy CONNECT.
+///
+/// Order: in-band hint from the app's own traffic → most recent domain the
+/// DNS cache holds for the original IP → the IP itself (pass-through).
+fn connect_host(hint: Option<String>, ip: &str, dns_cache: &SniDnsCache) -> String {
+    hint.filter(|h| !h.is_empty())
+        .or_else(|| dns_cache.lookup(ip))
+        .unwrap_or_else(|| ip.to_string())
 }
 
 /// Bind a listener with `IP_TRANSPARENT` so nftables REDIRECT can deliver connections.
@@ -242,11 +296,31 @@ mod tests {
     }
 
     #[test]
-    fn host_for_connect_prefers_cached_domain() {
+    fn connect_host_prefers_inband_hint_over_cache() {
         let cache = SniDnsCache::new();
         cache.insert("10.10.34.36", "www.facebook.com");
-        assert_eq!(host_for_connect("10.10.34.36", &cache), "www.facebook.com");
+        // In-band SNI wins even when the cache holds another domain that
+        // resolves to the same shared IP.
+        assert_eq!(
+            connect_host(Some("a.example".into()), "10.10.34.36", &cache),
+            "a.example"
+        );
+    }
+
+    #[test]
+    fn connect_host_falls_back_to_cache_then_ip() {
+        let cache = SniDnsCache::new();
+        cache.insert("10.10.34.36", "www.facebook.com");
+        assert_eq!(
+            connect_host(None, "10.10.34.36", &cache),
+            "www.facebook.com"
+        );
         // Unknown IP passes through unchanged.
-        assert_eq!(host_for_connect("1.2.3.4", &cache), "1.2.3.4");
+        assert_eq!(connect_host(None, "1.2.3.4", &cache), "1.2.3.4");
+        // Empty hint behaves like no hint.
+        assert_eq!(
+            connect_host(Some(String::new()), "10.10.34.36", &cache),
+            "www.facebook.com"
+        );
     }
 }

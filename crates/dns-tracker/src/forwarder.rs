@@ -241,11 +241,13 @@ impl DnsForwarder {
             self.forward_system(&query)?
         };
 
-        // Populate SniDnsCache: extract (ip → domain) from DNS response A/AAAA records.
+        // Populate SniDnsCache: extract (ip, domain, ttl) from DNS response
+        // A/AAAA records. TTL-honored so bindings expire with the answer.
         if !domain.is_empty() {
             let pairs = parse_dns_response_ips(&response);
-            for (ip, d) in &pairs {
-                self.dns_cache.insert(ip.to_string(), d.as_str());
+            for (ip, d, ttl) in &pairs {
+                self.dns_cache
+                    .insert_with_ttl(ip.to_string(), d.as_str(), Some(u64::from(*ttl)));
             }
             if !pairs.is_empty() {
                 eprintln!(
@@ -785,10 +787,12 @@ pub fn parse_qname_from_query(data: &[u8]) -> Option<String> {
     }
 }
 
-/// Parse A/AAAA records from a DNS response, returning `(ip, domain)` pairs.
+/// Parse A/AAAA records from a DNS response, returning
+/// `(ip, domain, ttl_secs)` triples.
 /// Used to populate the SniDnsCache so subsequent connections to the same IP
-/// can be attributed to the domain the application originally queried.
-fn parse_dns_response_ips(data: &[u8]) -> Vec<(IpAddr, String)> {
+/// can be attributed to the domain the application originally queried. The
+/// TTL bounds how long the binding stays trustworthy.
+fn parse_dns_response_ips(data: &[u8]) -> Vec<(IpAddr, String, u32)> {
     if data.len() < 12 {
         return vec![];
     }
@@ -843,6 +847,7 @@ fn parse_dns_response_ips(data: &[u8]) -> Vec<(IpAddr, String)> {
         }
         let rtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let rdlength = u16::from_be_bytes([data[pos + 8], data[pos + 9]]) as usize;
+        let ttl = u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
         pos += 10;
 
         if pos + rdlength > data.len() {
@@ -852,12 +857,12 @@ fn parse_dns_response_ips(data: &[u8]) -> Vec<(IpAddr, String)> {
         match rtype {
             1 if rdlength == 4 => {
                 let ip = IpAddr::from([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-                results.push((ip, domain.clone()));
+                results.push((ip, domain.clone(), ttl));
             }
             28 if rdlength == 16 => {
                 let mut bytes = [0u8; 16];
                 bytes.copy_from_slice(&data[pos..pos + 16]);
-                results.push((IpAddr::from(bytes), domain.clone()));
+                results.push((IpAddr::from(bytes), domain.clone(), ttl));
             }
             _ => {}
         }

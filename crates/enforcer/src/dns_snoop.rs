@@ -55,8 +55,12 @@ impl DnsSnoopWorker {
                         Some(entries) if !entries.is_empty() => {
                             counter!("netkeep.dns.snoop.parse_success").increment(1);
                             let count = entries.len() as u64;
-                            for (ip, domain) in entries {
-                                self.dns_cache.insert(ip.to_string(), domain);
+                            for (ip, domain, ttl) in entries {
+                                self.dns_cache.insert_with_ttl(
+                                    ip.to_string(),
+                                    domain,
+                                    Some(u64::from(ttl)),
+                                );
                             }
                             counter!("netkeep.dns.snoop.entries_learned").increment(count);
                         }
@@ -125,9 +129,9 @@ impl DnsSnoopWorker {
     }
 }
 
-/// Extract (resolved_ip, queried_domain) pairs from a raw IP packet
-/// (IP header + UDP header + DNS payload).
-fn parse_dns_from_ip_packet(payload: &[u8]) -> Option<Vec<(IpAddr, String)>> {
+/// Extract `(resolved_ip, queried_domain, ttl_secs)` triples from a raw IP
+/// packet (IP header + UDP header + DNS payload).
+fn parse_dns_from_ip_packet(payload: &[u8]) -> Option<Vec<(IpAddr, String, u32)>> {
     let sliced = SlicedPacket::from_ip(payload).ok()?;
     let udp = match &sliced.transport {
         Some(TransportSlice::Udp(u)) => u,
@@ -148,14 +152,16 @@ fn parse_dns_from_ip_packet(payload: &[u8]) -> Option<Vec<(IpAddr, String)>> {
 
 /// Parse a DNS response wire-format payload (no IP/UDP headers).
 ///
-/// Returns a list of `(ip_address, queried_domain)` pairs extracted from
-/// A (type 1) and AAAA (type 28) answer records. The `queried_domain` comes
-/// from the first QNAME in the question section, which is the name the
-/// application actually queried — correct even with CNAME chains.
+/// Returns a list of `(ip_address, queried_domain, ttl_secs)` triples
+/// extracted from A (type 1) and AAAA (type 28) answer records. The
+/// `queried_domain` comes from the first QNAME in the question section, which
+/// is the name the application actually queried — correct even with CNAME
+/// chains. The TTL comes from the answer record and bounds how long the
+/// binding may be trusted.
 ///
 /// Returns an empty vec on any parse error or if the packet is a query
 /// (not a response), has a non-zero RCODE, or has no usable answers.
-pub fn parse_dns_packet(data: &[u8]) -> Vec<(IpAddr, String)> {
+pub fn parse_dns_packet(data: &[u8]) -> Vec<(IpAddr, String, u32)> {
     if data.len() < 12 {
         return vec![];
     }
@@ -211,6 +217,7 @@ pub fn parse_dns_packet(data: &[u8]) -> Vec<(IpAddr, String)> {
         }
         let rtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let rdlength = u16::from_be_bytes([data[pos + 8], data[pos + 9]]) as usize;
+        let ttl = u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
         pos += 10;
 
         if pos + rdlength > data.len() {
@@ -220,12 +227,12 @@ pub fn parse_dns_packet(data: &[u8]) -> Vec<(IpAddr, String)> {
         match rtype {
             1 if rdlength == 4 => {
                 let ip = Ipv4Addr::new(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
-                results.push((IpAddr::V4(ip), domain.clone()));
+                results.push((IpAddr::V4(ip), domain.clone(), ttl));
             }
             28 if rdlength == 16 => {
                 let mut bytes = [0u8; 16];
                 bytes.copy_from_slice(&data[pos..pos + 16]);
-                results.push((IpAddr::V6(Ipv6Addr::from(bytes)), domain.clone()));
+                results.push((IpAddr::V6(Ipv6Addr::from(bytes)), domain.clone(), ttl));
             }
             _ => {}
         }
@@ -374,6 +381,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, IpAddr::V4(ip));
         assert_eq!(results[0].1, "api.example.com");
+        assert_eq!(results[0].2, 60, "A-record TTL must be carried through");
     }
 
     #[test]
@@ -384,6 +392,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, IpAddr::V6(ip));
         assert_eq!(results[0].1, "ipv6.example.com");
+        assert_eq!(results[0].2, 60, "AAAA-record TTL must be carried through");
     }
 
     #[test]

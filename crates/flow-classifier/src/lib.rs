@@ -1,38 +1,123 @@
 pub mod diag;
 pub mod proc_resolver;
+pub mod sni;
 pub mod sock_diag;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use core_types::{FlowContext, FlowDirection, TransportProtocol};
 use metrics::{counter, histogram};
-use std::time::Instant;
 
 // ── SNI DNS cache ──────────────────────────────────────────────────────────────
 
-/// Shared, thread-safe cache of `dst_ip → domain` mappings learned from SNI.
+/// Maximum hostnames kept per destination IP (most-recent-first list).
+/// CDN IPs legitimately serve many domains; the list must hold them all
+/// instead of overwriting.
+const MAX_DOMAINS_PER_IP: usize = 8;
+/// Soft cap on tracked IPs before an expiry sweep runs.
+const MAX_IPS: usize = 8192;
+/// Clamp for DNS-derived TTLs (seconds). TTL 0 answers are kept for the
+/// minimum so a connection landing in the same second still resolves.
+const MIN_TTL_SECS: u64 = 1;
+const MAX_TTL_SECS: u64 = 86_400;
+
+/// One learned `ip → domain` binding with optional expiry.
+struct DomainEntry {
+    domain: String,
+    /// `None` for in-band hints (SNI/Host — valid until evicted),
+    /// `Some` for DNS answers (expires per the DNS record TTL).
+    expires_at: Option<Instant>,
+}
+
+impl DomainEntry {
+    fn alive(&self, now: Instant) -> bool {
+        self.expires_at.is_none_or(|t| t > now)
+    }
+}
+
+/// Shared, thread-safe cache of `dst_ip → [domains]` bindings learned from
+/// SNI, HTTP Host headers, and DNS answers.
 ///
-/// Populated by the NFQUEUE run loop whenever a TLS ClientHello carries an SNI.
-/// Consulted by `FlowClassifier` for every subsequent packet to the same IP so
-/// the domain survives beyond the ClientHello and rules keep matching.
+/// Populated by the NFQUEUE run loop whenever a TLS ClientHello carries an
+/// SNI, and by the DNS snoop / forwarder from A and AAAA answers. Consulted
+/// by `FlowClassifier` for every subsequent packet to the same IP so the
+/// domain survives beyond the ClientHello and rules keep matching.
+///
+/// An IP maps to a *list* of domains ordered most-recent-first: several
+/// domains legitimately share one IP (CDN multi-tenancy, shared hosting),
+/// and a single-valued map made the last writer win, mislabeling (and for
+/// proxied routing, misrouting) every other domain on that IP.
 #[derive(Clone, Default)]
-pub struct SniDnsCache(Arc<Mutex<HashMap<String, String>>>);
+pub struct SniDnsCache(Arc<Mutex<HashMap<String, Vec<DomainEntry>>>>);
 
 impl SniDnsCache {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Record that `ip` resolved to `domain` (learned from SNI or DNS).
-    pub fn insert(&self, ip: impl Into<String>, domain: impl Into<String>) {
-        if let Ok(mut m) = self.0.lock() {
-            m.insert(ip.into(), domain.into());
-        }
+    /// Record that `ip` resolved to `domain`.
+    ///
+    /// * `ttl_secs = Some(s)` — DNS-learned binding, expires after `s`
+    ///   seconds (clamped to `[MIN_TTL_SECS, MAX_TTL_SECS]`).
+    /// * `ttl_secs = None` — in-band hint (SNI / HTTP Host), kept until
+    ///   evicted by newer entries.
+    ///
+    /// Re-inserting a known domain moves it to the front (most recent).
+    pub fn insert_with_ttl(
+        &self,
+        ip: impl Into<String>,
+        domain: impl Into<String>,
+        ttl_secs: Option<u64>,
+    ) {
+        let expires_at = ttl_secs
+            .map(|s| Instant::now() + Duration::from_secs(s.clamp(MIN_TTL_SECS, MAX_TTL_SECS)));
+        self.insert_at(ip, domain, expires_at);
     }
 
+    /// Record an in-band hint (SNI / HTTP Host) that never TTL-expires.
+    pub fn insert(&self, ip: impl Into<String>, domain: impl Into<String>) {
+        self.insert_at(ip, domain, None);
+    }
+
+    fn insert_at(
+        &self,
+        ip: impl Into<String>,
+        domain: impl Into<String>,
+        expires_at: Option<Instant>,
+    ) {
+        let domain = domain.into();
+        if domain.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let Ok(mut m) = self.0.lock() else {
+            return;
+        };
+
+        if m.len() >= MAX_IPS {
+            m.retain(|_, list| list.iter().any(|e| e.alive(now)));
+        }
+
+        let list = m.entry(ip.into()).or_default();
+        list.retain(|e| e.domain != domain);
+        list.insert(0, DomainEntry { domain, expires_at });
+        list.truncate(MAX_DOMAINS_PER_IP);
+    }
+
+    /// Most recent live domain for `ip`, or `None`. Expired entries are
+    /// pruned as a side effect.
     pub fn lookup(&self, ip: &str) -> Option<String> {
-        self.0.lock().ok()?.get(ip).cloned()
+        let mut m = self.0.lock().ok()?;
+        let now = Instant::now();
+        let list = m.get_mut(ip)?;
+        list.retain(|e| e.alive(now));
+        if list.is_empty() {
+            m.remove(ip);
+            return None;
+        }
+        Some(list[0].domain.clone())
     }
 }
 
@@ -59,8 +144,8 @@ pub struct RawPacket {
     /// connections to the same IP — also resolve to a domain.
     ///
     /// The field name is `sni_hint` for historical reasons; both
-    /// `extract_tls_sni` and `extract_http_host` in
-    /// `crates/enforcer/src/nfqueue.rs` write to it.
+    /// `sni::extract_tls_sni` and `sni::extract_http_host` in this crate
+    /// write to it.
     pub sni_hint: Option<String>,
     /// Network interface the packet arrived on (populated for gateway/routed traffic).
     pub ingress_interface: Option<String>,
@@ -316,6 +401,95 @@ impl Classifier for FakeClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SniDnsCache: shared-IP multi-domain regression tests ─────────────
+    //
+    // The old cache was HashMap<ip, String>: the last writer won, so two
+    // domains resolving to one IP mislabeled every connection to that IP.
+    // These tests pin the new semantics.
+
+    #[test]
+    fn shared_ip_domains_coexist_most_recent_wins() {
+        let c = SniDnsCache::new();
+        c.insert("1.2.3.4", "a.example");
+        c.insert("1.2.3.4", "b.example");
+        // b was learned last → it wins, but a must not be destroyed.
+        assert_eq!(c.lookup("1.2.3.4").as_deref(), Some("b.example"));
+
+        // A fresh binding for a moves it back to the front.
+        c.insert("1.2.3.4", "a.example");
+        assert_eq!(c.lookup("1.2.3.4").as_deref(), Some("a.example"));
+        c.insert("1.2.3.4", "b.example");
+        assert_eq!(c.lookup("1.2.3.4").as_deref(), Some("b.example"));
+    }
+
+    #[test]
+    fn per_ip_domain_list_is_capped() {
+        let c = SniDnsCache::new();
+        for i in 0..(MAX_DOMAINS_PER_IP + 4) {
+            c.insert("9.9.9.9", format!("d{i}.example"));
+        }
+        assert_eq!(
+            c.lookup("9.9.9.9").as_deref(),
+            Some(format!("d{}.example", MAX_DOMAINS_PER_IP + 3).as_str())
+        );
+        // Oldest entries evicted — lookup only ever returns live ones.
+        assert_eq!(c.lookup("d0.example").as_deref(), None);
+    }
+
+    #[test]
+    fn expired_dns_binding_is_not_returned() {
+        let c = SniDnsCache::new();
+        // Already-expired binding (TTL in the past).
+        c.insert_at(
+            "7.7.7.7",
+            "gone.example",
+            Some(Instant::now() - Duration::from_secs(1)),
+        );
+        c.insert_at(
+            "7.7.7.7",
+            "live.example",
+            Some(Instant::now() + Duration::from_secs(60)),
+        );
+        assert_eq!(c.lookup("7.7.7.7").as_deref(), Some("live.example"));
+
+        // Everything expired → None, and the key is pruned.
+        c.insert_at(
+            "8.8.8.8",
+            "old.example",
+            Some(Instant::now() - Duration::from_secs(1)),
+        );
+        assert_eq!(c.lookup("8.8.8.8"), None);
+    }
+
+    #[test]
+    fn ttl_is_clamped() {
+        let c = SniDnsCache::new();
+        // TTL 0 is raised to the minimum rather than expiring instantly.
+        c.insert_with_ttl("6.6.6.6", "zero.example", Some(0));
+        assert_eq!(c.lookup("6.6.6.6").as_deref(), Some("zero.example"));
+    }
+
+    #[test]
+    fn empty_domain_is_ignored() {
+        let c = SniDnsCache::new();
+        c.insert("5.5.5.5", "");
+        assert_eq!(c.lookup("5.5.5.5"), None);
+        // Lookup of a never-seen IP is None.
+        assert_eq!(c.lookup("4.4.4.4"), None);
+    }
+
+    #[test]
+    fn sni_hint_never_expires() {
+        let c = SniDnsCache::new();
+        c.insert("3.3.3.3", "sni.example");
+        // A later DNS binding for the same IP with a short TTL must not
+        // evict the SNI entry from the list.
+        c.insert_with_ttl("3.3.3.3", "dns.example", Some(1));
+        assert_eq!(c.lookup("3.3.3.3").as_deref(), Some("dns.example"));
+        c.insert("3.3.3.3", "sni.example");
+        assert_eq!(c.lookup("3.3.3.3").as_deref(), Some("sni.example"));
+    }
 
     fn classifier(
         process: Option<&str>,
