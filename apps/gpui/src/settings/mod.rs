@@ -3,6 +3,7 @@
 //! Uses gpui-component `Table` (DataTable) for each tab and `Dialog` for
 //! editing/viewing details of egress and proxy items.
 
+mod egress_form;
 mod egress_tab;
 mod helpers;
 mod proxies_tab;
@@ -1054,7 +1055,8 @@ impl SettingsApp {
         let proxy_options = Arc::new(proxy_options);
 
         // Reactive list of "type:name" target strings; shared with add/remove buttons.
-        let targets_list = Arc::new(Mutex::new(init_targets_vec));
+        let targets_list = Arc::new(Mutex::new(egress_form::TargetDraft::new(init_targets_vec)));
+        let form_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         // Currently-selected type for the add-target inline form.
         let new_tgt_type = Arc::new(Mutex::new("tun".to_string()));
         // Currently-selected interface value for the add-target form.
@@ -1071,7 +1073,8 @@ impl SettingsApp {
 
         window.open_dialog(cx, move |dialog, _, _cx| {
             // ── Snapshot shared state for this render ───────────────────
-            let cur_targets = targets_list.lock().unwrap().clone();
+            let cur_targets = targets_list.lock().unwrap().targets().to_vec();
+            let current_error = form_error.lock().unwrap().clone();
             let cur_tgt_type = new_tgt_type.lock().unwrap().clone();
             let current_color = color_c.read(_cx).value().to_string();
             let color_swatch = colors::hex_to_hsla(&current_color);
@@ -1121,6 +1124,8 @@ impl SettingsApp {
                 .enumerate()
                 .map(|(i, tgt)| {
                     let tl = targets_list.clone();
+                    let remove_target = tgt.clone();
+                    let error = form_error.clone();
                     let (badge, badge_color): (&str, gpui::Hsla) =
                         if tgt.starts_with("tun:") {
                             ("TUN", colors::green())
@@ -1179,8 +1184,10 @@ impl SettingsApp {
                                 .text_color(colors::muted())
                                 .cursor_pointer()
                                 .px(px(4.))
-                                .on_click(move |_, _, _| {
-                                    tl.lock().unwrap().remove(i);
+                                .on_click(move |_, win, _| {
+                                    tl.lock().unwrap().remove(&remove_target);
+                                    *error.lock().unwrap() = None;
+                                    win.refresh();
                                 })
                                 .child("✕"),
                         )
@@ -1215,6 +1222,9 @@ impl SettingsApp {
                     let is_sel = *val == cur_sel_iface;
                     let color = if is_sel { colors::primary() } else { colors::muted() };
                     let si = selected_iface.clone();
+                    let draft = targets_list.clone();
+                    let kind = cur_tgt_type.clone();
+                    let error = form_error.clone();
                     let v = val.clone();
                     div()
                         .id(gpui::ElementId::Name(format!("iface-sel-{val}").into()))
@@ -1226,8 +1236,11 @@ impl SettingsApp {
                         .text_color(color)
                         .text_size(px(11.))
                         .cursor_pointer()
-                        .on_click(move |_, _, _| {
+                        .on_click(move |_, win, _| {
                             *si.lock().unwrap() = v.clone();
+                            draft.lock().unwrap().select(&kind, &v);
+                            *error.lock().unwrap() = None;
+                            win.refresh();
                         })
                         .child(label.clone())
                         .into_any_element()
@@ -1236,22 +1249,30 @@ impl SettingsApp {
 
             let tt_tun = new_tgt_type.clone();
             let si_tun = selected_iface.clone();
+            let draft_tun = targets_list.clone();
+            let error_tun = form_error.clone();
             let tun_first = tun_ifaces.first().cloned().unwrap_or_default();
             let tt_dev = new_tgt_type.clone();
             let si_dev = selected_iface.clone();
+            let draft_dev = targets_list.clone();
+            let error_dev = form_error.clone();
             let dev_first = dev_ifaces.first().cloned().unwrap_or_default();
             let tt_prx = new_tgt_type.clone();
             let si_prx = selected_iface.clone();
+            let draft_prx = targets_list.clone();
+            let error_prx = form_error.clone();
             let prx_first = proxy_options.first().map(|(id, _)| id.clone()).unwrap_or_default();
             let tl_add = targets_list.clone();
             let tt_add = new_tgt_type.clone();
             let si_add = selected_iface.clone();
+            let error_add = form_error.clone();
 
             // ── Clones consumed by on_ok ────────────────────────────────
             let name_i = name_c.clone();
             let color_i = color_c.clone();
             let dns_i = dns_c.clone();
             let tl_ok = targets_list.clone();
+            let error_ok = form_error.clone();
             let state_w = state_weak.clone();
             let sock = socket_path.clone();
             let eid = existing_id.clone();
@@ -1261,7 +1282,14 @@ impl SettingsApp {
                     let name = name_i.read(cx).value().to_string();
                     let color = color_i.read(cx).value().to_string();
                     let dns_s = dns_i.read(cx).value().to_string();
-                    let targets_vec = tl_ok.lock().unwrap().clone();
+                    let targets_vec = match tl_ok.lock().unwrap().targets_for_save() {
+                        Ok(targets) => targets,
+                        Err(message) => {
+                            *error_ok.lock().unwrap() = Some(message.into());
+                            cx.refresh_windows();
+                            return false;
+                        }
+                    };
                     let targets = helpers::parse_targets_csv(&targets_vec.join(","));
                     let dns = helpers::parse_dns_csv(&dns_s);
                     let id = eid
@@ -1358,8 +1386,9 @@ impl SettingsApp {
                         .child(
                             action_btn("dialog-ok", ok_label, crate::colors::primary())
                                 .on_click(move |_, win, cx| {
-                                    do_save_btn(cx);
-                                    win.close_dialog(cx);
+                                    if do_save_btn(cx) {
+                                        win.close_dialog(cx);
+                                    }
                                 })
                         )
                 )
@@ -1423,7 +1452,7 @@ impl SettingsApp {
                                                     .text_size(px(11.))
                                                     .text_color(colors::muted())
                                                     .child(
-                                                        "No targets — system routing table used.",
+                                                        "No outputs selected. Choose an output below.",
                                                     ),
                                             )
                                         })
@@ -1463,9 +1492,12 @@ impl SettingsApp {
                                                                     gpui::FontWeight::BOLD,
                                                                 )
                                                                 .cursor_pointer()
-                                                                .on_click(move |_, _, _| {
+                                                                .on_click(move |_, win, _| {
                                                                     *tt_tun.lock().unwrap() = "tun".into();
                                                                     *si_tun.lock().unwrap() = tun_first.clone();
+                                                                    draft_tun.lock().unwrap().select("tun", &tun_first);
+                                                                    *error_tun.lock().unwrap() = None;
+                                                                    win.refresh();
                                                                 })
                                                                 .child("TUN"),
                                                         )
@@ -1485,9 +1517,12 @@ impl SettingsApp {
                                                                     gpui::FontWeight::BOLD,
                                                                 )
                                                                 .cursor_pointer()
-                                                                .on_click(move |_, _, _| {
+                                                                .on_click(move |_, win, _| {
                                                                     *tt_dev.lock().unwrap() = "dev".into();
                                                                     *si_dev.lock().unwrap() = dev_first.clone();
+                                                                    draft_dev.lock().unwrap().select("dev", &dev_first);
+                                                                    *error_dev.lock().unwrap() = None;
+                                                                    win.refresh();
                                                                 })
                                                                 .child("DEV"),
                                                         )
@@ -1507,9 +1542,12 @@ impl SettingsApp {
                                                                     gpui::FontWeight::BOLD,
                                                                 )
                                                                 .cursor_pointer()
-                                                                .on_click(move |_, _, _| {
+                                                                .on_click(move |_, win, _| {
                                                                     *tt_prx.lock().unwrap() = "proxy".into();
                                                                     *si_prx.lock().unwrap() = prx_first.clone();
+                                                                    draft_prx.lock().unwrap().select("proxy", &prx_first);
+                                                                    *error_prx.lock().unwrap() = None;
+                                                                    win.refresh();
                                                                 })
                                                                 .child("PROXY"),
                                                         ),
@@ -1554,19 +1592,25 @@ impl SettingsApp {
                                                         .text_size(px(10.))
                                                         .font_weight(gpui::FontWeight::BOLD)
                                                         .cursor_pointer()
-                                                        .on_click(move |_, _, _| {
+                                                        .on_click(move |_, win, _| {
                                                             let type_s = tt_add.lock().unwrap().clone();
                                                             let iface = si_add.lock().unwrap().clone();
-                                                            if !iface.is_empty() {
-                                                                tl_add.lock().unwrap().push(
-                                                                    format!("{type_s}:{iface}"),
-                                                                );
-                                                            }
+                                                            let error = tl_add.lock().unwrap()
+                                                                .add(&type_s, &iface).err().map(str::to_string);
+                                                            *error_add.lock().unwrap() = error;
+                                                            win.refresh();
                                                         })
                                                         .child("ADD"),
                                                 ),
+                                        )
+                                        .child(
+                                            div().text_size(px(11.)).text_color(colors::muted())
+                                                .child("Choose an output, then Add or Save."),
                                         ),
-                                ),
+                                )
+                                .when_some(current_error.clone(), |el, message| {
+                                    el.child(div().text_size(px(12.)).text_color(colors::error()).child(message))
+                                }),
                         )
                         // DNS
                         .child(
