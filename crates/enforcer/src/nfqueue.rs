@@ -28,6 +28,7 @@ struct CachedVerdict {
     accept: bool,
     fwmark: Option<u32>,
     expires_at: u64,
+    routing_revision: u64,
 }
 
 /// Cached process attribution keyed by `(dst_ip, dst_port)`.
@@ -432,6 +433,23 @@ where
             protocol: raw.protocol,
         };
 
+        // A new TCP connection may reuse the tuple of a connection whose FIN
+        // bypassed NFQUEUE. Recheck edited egresses on SYNs and UDP datagrams,
+        // while keeping established TCP streams on their original route.
+        let routing_revision = if raw.tcp_syn || raw.protocol != TransportProtocol::Tcp {
+            let revision = self.registrar.routing_revision();
+            if self
+                .decided
+                .get(&key)
+                .is_some_and(|cached| cached.routing_revision != revision)
+            {
+                self.decided.remove(&key);
+            }
+            Some(revision)
+        } else {
+            None
+        };
+
         // FIN/RST — connection is closing/resetting. Evict the cached verdict so
         // that a future connection reusing the same 5-tuple gets a fresh decision.
         if raw.tcp_fin || raw.tcp_rst {
@@ -591,6 +609,19 @@ where
             _ => None,
         };
 
+        // A selected target is not enough: accepting without its routing mark
+        // lets the packet follow system routing. Do not cache setup failures,
+        // so retransmissions can retry installing the same target's route.
+        if matches!(
+            &decision,
+            FlowDecision::Immediate(RuleAction::Route, Some(_))
+        ) && fwmark.is_none()
+        {
+            counter!("netkeep.packets.dropped", "reason" => "route_setup_failed").increment(1);
+            diag!("route setup failed for {decision:?}; dropping without caching");
+            return (Verdict::Drop, None);
+        }
+
         let verdict = match &decision {
             FlowDecision::Immediate(RuleAction::Allow, _)
             | FlowDecision::Immediate(RuleAction::Route, Some(_))
@@ -614,6 +645,8 @@ where
                     accept: matches!(verdict, Verdict::Accept),
                     fwmark,
                     expires_at: now_secs + CACHE_TTL_SECS,
+                    routing_revision: routing_revision
+                        .unwrap_or_else(|| self.registrar.routing_revision()),
                 },
             );
         }
@@ -801,7 +834,120 @@ const NF_INET_FORWARD: u8 = 2;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core_types::{FlowContext, FlowDirection, RouteTarget};
     use etherparse::PacketBuilder;
+    use flow_classifier::FakeClassifier;
+
+    struct RouteRegistrar {
+        target: RouteTarget,
+        mark: Option<u32>,
+        attempts: usize,
+        revision: u64,
+    }
+
+    impl FlowRegistrar for RouteRegistrar {
+        fn register(&mut self, _flow: FlowContext, _now_secs: u64) -> FlowDecision {
+            FlowDecision::Immediate(RuleAction::Route, Some(self.target.clone()))
+        }
+
+        fn route_mark(&mut self, target: &RouteTarget) -> Option<u32> {
+            assert_eq!(target, &self.target);
+            self.attempts += 1;
+            self.mark
+        }
+
+        fn routing_revision(&mut self) -> u64 {
+            self.revision
+        }
+    }
+
+    #[test]
+    fn route_setup_retries_and_output_edits_refresh_new_connections() {
+        for target in [
+            RouteTarget::Tun("test-tun".into()),
+            RouteTarget::Device("test-device".into()),
+            RouteTarget::Proxy("test-proxy".into()),
+        ] {
+            let raw = RawPacket {
+                src_ip: "192.0.2.1".into(),
+                src_port: 12345,
+                dst_ip: "198.51.100.1".into(),
+                dst_port: 443,
+                protocol: TransportProtocol::Tcp,
+                sni_hint: None,
+                ingress_interface: None,
+                tcp_payload_empty: true,
+                tcp_syn: true,
+                tcp_fin: false,
+                tcp_rst: false,
+                sk_uid: None,
+                forwarded: false,
+            };
+            let flow = FlowContext {
+                process_name: Some("curl".into()),
+                process_exe: None,
+                app_name: None,
+                source_ip: raw.src_ip.clone(),
+                source_port: raw.src_port,
+                destination_ip: raw.dst_ip.clone(),
+                destination_port: raw.dst_port,
+                destination_domain: Some("example.com".into()),
+                protocol: raw.protocol,
+                direction: FlowDirection::Outbound,
+                device_label: None,
+                tcp_syn: true,
+            };
+            let mut processor = NfqueueProcessor {
+                // Open a netlink socket only; do not bind a kernel queue or send traffic.
+                queue: Queue::open().expect("open netlink socket"),
+                classifier: FakeClassifier { result: flow },
+                registrar: RouteRegistrar {
+                    target,
+                    mark: None,
+                    attempts: 0,
+                    revision: 0,
+                },
+                dns_cache: SniDnsCache::new(),
+                decided: HashMap::new(),
+                attr_cache: AttrCache::new(),
+            };
+
+            assert_eq!(processor.decide(&raw, 1000), (Verdict::Drop, None));
+            assert!(processor.decided.is_empty());
+            assert_eq!(processor.decide(&raw, 1001), (Verdict::Drop, None));
+            assert_eq!(processor.registrar.attempts, 2);
+
+            // Once setup recovers, retransmit through the same target and cache its mark.
+            processor.registrar.mark = Some(20000);
+            assert_eq!(processor.decide(&raw, 1002), (Verdict::Accept, Some(20000)));
+            assert_eq!(processor.registrar.attempts, 3);
+            assert_eq!(processor.decided.len(), 1);
+            assert_eq!(processor.decide(&raw, 1003), (Verdict::Accept, Some(20000)));
+            assert_eq!(processor.registrar.attempts, 3);
+
+            // An egress edit must take effect for a new SYN reusing this tuple.
+            processor.registrar.target = RouteTarget::Proxy("replacement".into());
+            processor.registrar.mark = None;
+            processor.registrar.revision += 1;
+
+            let mut established = raw.clone();
+            established.tcp_syn = false;
+            established.tcp_payload_empty = false;
+            assert_eq!(
+                processor.decide(&established, 1004),
+                (Verdict::Accept, Some(20000))
+            );
+            assert_eq!(processor.registrar.attempts, 3);
+
+            // Never reuse the old output when the replacement cannot be set up.
+            assert_eq!(processor.decide(&raw, 1005), (Verdict::Drop, None));
+            assert!(processor.decided.is_empty());
+            assert_eq!(processor.registrar.attempts, 4);
+            processor.registrar.mark = Some(19997);
+            assert_eq!(processor.decide(&raw, 1006), (Verdict::Accept, Some(19997)));
+            assert_eq!(processor.registrar.attempts, 5);
+        }
+    }
 
     // -------------------------------------------------------------------
     // Layer-0 destination-keyed attribution cache (AttrCache)

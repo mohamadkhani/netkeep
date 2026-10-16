@@ -49,6 +49,8 @@ pub struct ControlService<R: Repository> {
     /// Lazily install and return the fwmark for a RouteTarget.
     /// Set by the daemon to call `ensure_route_mark`; None in tests.
     route_mark_fn: Option<RouteMarkFn>,
+    /// Version of egress/proxy configuration used by NFQUEUE's verdict cache.
+    routing_revision: u64,
     /// Suppress repeated `policy:` stderr lines for the same flow identity.
     policy_log_dedup: HashMap<PolicyLogKey, u64>,
 }
@@ -110,6 +112,7 @@ impl<R: Repository> ControlService<R> {
             nfqueue_enabled: AtomicBool::new(nfqueue_enabled),
             nfqueue_num,
             route_mark_fn: None,
+            routing_revision: 0,
             policy_log_dedup: HashMap::new(),
         }
     }
@@ -180,6 +183,7 @@ impl<R: Repository> ControlService<R> {
             nfqueue_enabled: AtomicBool::new(false),
             nfqueue_num: None,
             route_mark_fn: None,
+            routing_revision: 0,
             policy_log_dedup: HashMap::new(),
         }
     }
@@ -522,6 +526,7 @@ impl<R: Repository> ControlService<R> {
             }
             ControlRequest::UpsertEgress(egress) => {
                 self.repo.upsert_egress(&egress);
+                self.routing_revision = self.routing_revision.wrapping_add(1);
                 ControlResponse::Ok
             }
             ControlRequest::DeleteEgress { id } => {
@@ -536,6 +541,7 @@ impl<R: Repository> ControlService<R> {
                     }
                 }
                 if self.repo.delete_egress(&id) {
+                    self.routing_revision = self.routing_revision.wrapping_add(1);
                     ControlResponse::Ok
                 } else {
                     ControlResponse::Error("egress not found".to_string())
@@ -566,10 +572,12 @@ impl<R: Repository> ControlService<R> {
                     return response;
                 }
                 self.repo.upsert_proxy(&proxy);
+                self.routing_revision = self.routing_revision.wrapping_add(1);
                 ControlResponse::Ok
             }
             ControlRequest::DeleteProxy { id } => {
                 if self.repo.delete_proxy(&id) {
+                    self.routing_revision = self.routing_revision.wrapping_add(1);
                     ControlResponse::Ok
                 } else {
                     ControlResponse::Error("proxy not found".to_string())
@@ -804,6 +812,13 @@ fn first_available_target<R: state_store::ProxyRepository>(
 pub struct SharedService<R: Repository>(pub std::sync::Arc<std::sync::Mutex<ControlService<R>>>);
 
 impl<R: Repository> FlowRegistrar for SharedService<R> {
+    fn routing_revision(&mut self) -> u64 {
+        self.0
+            .lock()
+            .expect("service lock poisoned")
+            .routing_revision()
+    }
+
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
         self.0
             .lock()
@@ -820,6 +835,10 @@ impl<R: Repository> FlowRegistrar for SharedService<R> {
 }
 
 impl<R: Repository> FlowRegistrar for ControlService<R> {
+    fn routing_revision(&mut self) -> u64 {
+        self.routing_revision
+    }
+
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision {
         if let Some(resolved) = resolve_action(&self.repo.list_rules(), &flow) {
             self.log_policy_match(&flow, &resolved, now_secs);

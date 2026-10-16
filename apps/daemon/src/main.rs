@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod metrics;
+mod proxy_routes;
 
 use dns_tracker::forwarder::{DnsForwarder, EgressResolver, FwmarkResolver, SystemDns};
 use dns_tracker::{DnsTracker, SockTracker};
@@ -718,8 +719,8 @@ struct DaemonRuntime {
     /// `queue num N` rules would just drop every packet.
     nfqueue_num: Option<u16>,
     route_mark_base: u32,
-    /// Per-proxy (fwmark, local_port) pairs for nftables REDIRECT rules.
-    proxy_redirects: Vec<(u32, u16)>,
+    /// Live proxy redirects, including outputs selected after startup.
+    proxy_routes: Arc<Mutex<proxy_routes::ProxyRoutes>>,
 }
 
 /// Decision returned by [`plan_nfqueue_toggle`]. Splitting the gate logic from
@@ -802,7 +803,11 @@ fn handle_client(
             NfqueueToggleAction::Apply { queue } => {
                 // `bootstrap.is_some()` already checked by the planner.
                 let bs = runtime.bootstrap.as_deref().expect("bootstrap present");
-                match bs.setup(queue, runtime.route_mark_base, &runtime.proxy_redirects) {
+                let result = {
+                    let routes = runtime.proxy_routes.lock().map_err(|e| e.to_string())?;
+                    bs.setup(queue, runtime.route_mark_base, &routes.redirects())
+                };
+                match result {
                     Ok(()) => {
                         // Only commit the flag after nftables actually applied,
                         // so a kernel failure can't leave the UI claiming
@@ -1155,17 +1160,58 @@ fn main() {
         map
     };
     // Build the list of (mark, port) pairs for nftables setup.
-    let proxy_redirects: Vec<(u32, u16)> = proxy_marks.values().copied().collect();
+    let proxy_routes = Arc::new(Mutex::new(proxy_routes::ProxyRoutes::new(proxy_marks)));
+    let proxy_redirects = proxy_routes.lock().expect("proxy routes lock").redirects();
 
     // Now that proxy_marks is ready, set the fwmark lookup function on the service.
     {
         let mut svc = service.lock().expect("service lock");
-        let proxy_marks_for_fn = proxy_marks.clone();
+        let routes_for_fn = Arc::clone(&proxy_routes);
+        let db_for_proxy = db_path.clone();
+        let dns_for_proxy = dns_cache.clone();
         svc.set_route_mark_fn(move |target| match target {
-            RouteTarget::Proxy(id) => proxy_marks_for_fn
-                .get(id)
-                .map(|(mark, _port)| *mark)
-                .or(Some(enforcer::PROXY_REDIRECT_MARK)),
+            RouteTarget::Proxy(id) => {
+                let result =
+                    routes_for_fn
+                        .lock()
+                        .map_err(|e| e.to_string())
+                        .and_then(|mut routes| {
+                            routes.ensure(
+                                id,
+                                || {
+                                    let proxy = load_proxy_config(&db_for_proxy, id)?;
+                                    if !proxy.enabled {
+                                        return Err(format!("proxy '{id}' is disabled"));
+                                    }
+                                    let listener =
+                                        proxy_client::transparent::TransparentProxy::bind(
+                                            "127.0.0.1:0",
+                                            proxy,
+                                            Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
+                                            enforcer::DAEMON_BYPASS_MARK,
+                                            dns_for_proxy.clone(),
+                                        )
+                                        .map_err(|e| e.to_string())?;
+                                    let port =
+                                        listener.local_addr().map_err(|e| e.to_string())?.port();
+                                    Ok((port, Arc::new(listener)))
+                                },
+                                |mark, port| SystemNftablesBootstrap.add_proxy_redirect(mark, port),
+                            )
+                        });
+                match result {
+                    Ok((mark, listener)) => {
+                        if let Some(listener) = listener {
+                            std::thread::spawn(move || listener.run());
+                        }
+                        Some(mark)
+                    }
+                    Err(e) => {
+                        eprintln!("proxy routing setup failed for '{id}': {e}");
+                        None
+                    }
+                }
+            }
             _ => ensure_route_mark(target).ok(),
         });
     }
@@ -1216,7 +1262,7 @@ fn main() {
     };
 
     // Start the NFQUEUE processor if enabled and nftables came up.
-    let proxy_redirects_for_recovery = proxy_redirects.clone();
+    let proxy_routes_for_recovery = Arc::clone(&proxy_routes);
     let bootstrap: Option<Arc<dyn NftablesBootstrap>> = if nftables_ready {
         if let Some(queue_num) = nfqueue_num {
             let resolver: ProcProcessResolver = match sock_tracker {
@@ -1245,14 +1291,15 @@ fn main() {
                     }
                     let bs_for_nfqueue = Arc::clone(&bs);
                     let route_mark_base_for_nfqueue = route_mark_base;
-                    let pr_for_nfqueue = proxy_redirects_for_recovery.clone();
+                    let pr_for_nfqueue = Arc::clone(&proxy_routes_for_recovery);
                     std::thread::spawn(move || {
                         let recover = |q: u16| -> Result<(), String> {
                             eprintln!("nfqueue recovery: re-applying nftables for queue {q}");
+                            let routes = pr_for_nfqueue.lock().map_err(|e| e.to_string())?;
                             bs_for_nfqueue.setup(
                                 Some(q),
                                 route_mark_base_for_nfqueue,
-                                &pr_for_nfqueue,
+                                &routes.redirects(),
                             )
                         };
                         if let Err(e) = processor.run_loop(queue_num, recover) {
@@ -1270,11 +1317,13 @@ fn main() {
                                 println!("dns snoop running on queue {dns_q}");
                                 let bs_for_dns = Arc::clone(&bs);
                                 let rmb_for_dns = route_mark_base;
-                                let pr_for_dns = proxy_redirects_for_recovery.clone();
+                                let pr_for_dns = Arc::clone(&proxy_routes_for_recovery);
                                 std::thread::spawn(move || {
                                     let recover = |q: u16| -> Result<(), String> {
                                         eprintln!("dns snoop recovery: re-applying nftables for queue {q}");
-                                        bs_for_dns.setup(Some(q), rmb_for_dns, &pr_for_dns)
+                                        let routes =
+                                            pr_for_dns.lock().map_err(|e| e.to_string())?;
+                                        bs_for_dns.setup(Some(q), rmb_for_dns, &routes.redirects())
                                     };
                                     if let Err(e) = worker.run_loop(dns_q, recover) {
                                         eprintln!("dns snoop stopped: {e}");
@@ -1301,7 +1350,7 @@ fn main() {
         bootstrap: bootstrap.clone(),
         nfqueue_num,
         route_mark_base,
-        proxy_redirects: proxy_redirects_for_recovery,
+        proxy_routes,
     };
 
     for stream in listener.incoming() {

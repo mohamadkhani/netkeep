@@ -77,9 +77,16 @@ pub enum FlowDecision {
 /// Implemented by `ControlService` in the daemon.
 pub trait FlowRegistrar {
     fn register(&mut self, flow: FlowContext, now_secs: u64) -> FlowDecision;
+    /// Changes when egress outputs or proxy configuration are edited, so new
+    /// connections cannot reuse a verdict cached for the previous output.
+    fn routing_revision(&mut self) -> u64 {
+        0
+    }
     /// Return (and lazily install) the fwmark for a route target.
     /// Used by the NFQUEUE processor to set the packet mark on routed verdicts
     /// so the kernel's policy routing tables steer the traffic correctly.
+    /// Returning `None` means routing setup failed: the packet must be dropped
+    /// without caching the failure, allowing later packets to retry setup.
     fn route_mark(&mut self, target: &RouteTarget) -> Option<u32>;
 }
 
@@ -273,6 +280,17 @@ pub trait NftablesBootstrap: Send + Sync {
 }
 
 pub struct SystemNftablesBootstrap;
+
+impl SystemNftablesBootstrap {
+    /// Add a live proxy redirect without rebuilding the table or disturbing
+    /// existing connections. The nft batch publishes both rules atomically.
+    pub fn add_proxy_redirect(&self, mark: u32, port: u16) -> Result<(), String> {
+        run_nft_script(&format!(
+            "insert rule inet netkeep output_early meta mark {mark} accept\n\
+             add rule inet netkeep output_proxy_redirect meta mark {mark} meta l4proto tcp redirect to :{port}\n"
+        ))
+    }
+}
 
 impl NftablesBootstrap for SystemNftablesBootstrap {
     fn setup(
@@ -500,15 +518,15 @@ impl NftablesBootstrap for SystemNftablesBootstrap {
         // Packets carrying a proxy fwmark are redirected to the corresponding
         // transparent proxy port. The proxy reads the original destination via
         // SO_ORIGINAL_DST and tunnels through SOCKS/HTTP.
-        if !proxy_redirects.is_empty() {
-            script.push_str(
-                "add chain inet netkeep output_proxy_redirect { type nat hook output priority -50; policy accept; }\n",
-            );
-            for (mark, port) in proxy_redirects {
-                script.push_str(&format!(
-                    "add rule inet netkeep output_proxy_redirect meta mark {mark} meta l4proto tcp redirect to :{port}\n",
-                ));
-            }
+        // Keep the chain present even with no proxies at startup, so a proxy
+        // selected after an egress edit can install its redirect live.
+        script.push_str(
+            "add chain inet netkeep output_proxy_redirect { type nat hook output priority -50; policy accept; }\n",
+        );
+        for (mark, port) in proxy_redirects {
+            script.push_str(&format!(
+                "add rule inet netkeep output_proxy_redirect meta mark {mark} meta l4proto tcp redirect to :{port}\n",
+            ));
         }
 
         run_nft_script(&script)
