@@ -109,7 +109,7 @@ impl ProcProcessResolver {
             .or_else(|| retry_find_socket(ip, port, protocol));
         if let Some((inode, uid)) = inode_uid {
             diag!("{proto_str} {ip}:{port} inode={inode} uid={uid} src=sockdiag|procnet");
-            if let Some(pid) = find_pid_for_inode(inode, uid) {
+            if let Some(pid) = find_pid_for_inode(inode, Some(uid)) {
                 diag!("{proto_str} {ip}:{port} fdpid={pid}");
                 return Some(pid);
             }
@@ -658,15 +658,17 @@ fn parse_ipv6_hex(hex: &str) -> Option<Ipv6Addr> {
 
 /// Scan /proc/*/fd/* for a symlink pointing to socket:[inode].
 ///
-/// Uses `uid` from /proc/net to skip processes owned by a different user,
-/// cutting the scan from O(all_processes × fds) to O(user_processes × fds).
-/// Falls back to a full scan if the UID-filtered pass finds nothing
-/// (edge case: socket passed between processes or setuid binaries).
+/// `uid` (when known from /proc/net) is used to skip processes owned by a
+/// different user, cutting the scan from O(all_processes × fds) to
+/// O(user_processes × fds); pass `None` when the source table carries no uid
+/// (`/proc/net/unix`). Falls back to a full scan if the UID-filtered pass
+/// finds nothing (edge case: socket passed between processes or setuid
+/// binaries).
 ///
 /// A short retry loop covers multi-process applications (e.g. Electron) where
 /// the network-service subprocess can have a brief window after fork/exec during
 /// which its file descriptors are not yet visible under /proc/<pid>/fd/.
-fn find_pid_for_inode(inode: u64, uid: u32) -> Option<u32> {
+fn find_pid_for_inode(inode: u64, uid: Option<u32>) -> Option<u32> {
     let target = format!("socket:[{inode}]");
 
     // Retry delays: 0 ms covers the common case (fd already visible);
@@ -679,9 +681,11 @@ fn find_pid_for_inode(inode: u64, uid: u32) -> Option<u32> {
         if delay > 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay));
         }
-        // UID-filtered pass first (fast path).
-        if let Some(pid) = scan_proc_for_inode(&target, Some(uid)) {
-            return Some(pid);
+        // UID-filtered pass first (fast path) when the source table has a uid.
+        if let Some(uid) = uid {
+            if let Some(pid) = scan_proc_for_inode(&target, Some(uid)) {
+                return Some(pid);
+            }
         }
         // Full scan — catches setuid, capability-elevated, or socket-passed processes.
         if let Some(pid) = scan_proc_for_inode(&target, None) {
@@ -875,7 +879,7 @@ pub fn stub_resolver_client_pids() -> Vec<u32> {
             continue;
         };
         for (inode, uid) in parse_stub_resolver_clients(&content) {
-            if let Some(pid) = find_pid_for_inode(inode, uid) {
+            if let Some(pid) = find_pid_for_inode(inode, Some(uid)) {
                 if !pids.contains(&pid) {
                     pids.push(pid);
                 }
@@ -918,6 +922,125 @@ fn parse_stub_resolver_clients(content: &str) -> Vec<(u64, u32)> {
         }
         let uid = cols[7].parse().unwrap_or(u32::MAX);
         out.push((inode, uid));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Varlink clients of systemd-resolved (modern nss `resolve` path)
+// ---------------------------------------------------------------------------
+
+/// Unix sockets on which apps ask systemd-resolved to resolve names.
+///
+/// With `hosts: ... resolve ...` in `nsswitch.conf`, glibc's libnss_resolve
+/// does **not** send a UDP query anyone can observe: it opens a per-call
+/// Varlink session to systemd-resolved and sends
+/// `io.systemd.Resolve.ResolveHostname` over it. Resolved then queries the
+/// DNS forwarder from its own socket, so the app is invisible to both the
+/// eBPF DNS map (no app UDP dport-53 packet exists) and the stub-UDP `/proc`
+/// scan (no app UDP socket exists). This is the attribution path for that
+/// layout: while the request is in flight, resolved holds an accepted
+/// session socket bound to one of these paths, and unix-diag's
+/// `UNIX_DIAG_PEER` maps that session back to the app's socket (and pid).
+///
+/// The `.Hostname` path is the older varlink spelling of the same API;
+/// listing both keeps attribution working across systemd versions.
+pub const RESOLVED_VARI_LINK_SOCKETS: &[&str] = &[
+    "/run/systemd/resolve/io.systemd.Resolve",
+    "/run/systemd/resolve/io.systemd.Hostname",
+];
+
+/// PIDs of processes with an in-flight Varlink name-resolution session to
+/// systemd-resolved. Empty when nobody is resolving through the Varlink path.
+pub fn resolved_varlink_client_pids() -> Vec<u32> {
+    let mut pids = Vec::new();
+    for socket_path in RESOLVED_VARI_LINK_SOCKETS {
+        for pid in varlink_client_pids(socket_path) {
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
+
+/// PIDs of processes whose connected client sockets peer with a server-side
+/// session bound to `socket_path`.
+///
+/// `/proc/net/unix` shows the *server* side of each session (accepted
+/// sockets keep the pathname; the listener is excluded via SO_ACCEPTCON),
+/// so the client is recovered through the kernel's peer relation
+/// (`SOCK_DIAG` `UNIX_DIAG_PEER`) and then mapped inode → pid.
+pub fn varlink_client_pids(socket_path: &str) -> Vec<u32> {
+    let Ok(content) = fs::read_to_string("/proc/net/unix") else {
+        return Vec::new();
+    };
+    let sessions: Vec<u64> = parse_varlink_sessions(&content, socket_path);
+    if sessions.is_empty() {
+        return Vec::new();
+    }
+    // One unix-diag dump → (inode, peer) pairs; the session's peer is the
+    // client's socket.
+    let peers = sock_diag::unix_peer_map();
+    let mut pids = Vec::new();
+    for session_inode in sessions {
+        // Kernel's udiag_ino is u32: a session whose /proc inode does not fit
+        // could never appear in the dump (or, if truncated, could collide with
+        // an unrelated socket) — skip it rather than risk wrong attribution.
+        let Ok(session_ino32) = u32::try_from(session_inode) else {
+            continue;
+        };
+        let Some(&(_, client_inode)) = peers
+            .iter()
+            .find(|(ino, _)| *ino == u64::from(session_ino32))
+        else {
+            continue;
+        };
+        // `/proc/net/unix` carries no uid column → no uid-filtered fast path.
+        if let Some(pid) = find_pid_for_inode(client_inode, None) {
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
+
+/// Parse `/proc/net/unix` for established **server-side sessions** bound to
+/// `socket_path` (one per connected client). Returns session inodes.
+///
+/// Rows are `Num RefCount Protocol Flags Type St Inode [Path]` where `Num`
+/// and `Inode` are hex. The listening socket carries `SO_ACCEPTCON` in
+/// `Flags` and is skipped; an accepted session has the pathname, flags 0,
+/// and state connected — exactly the rows that name the target socket while
+/// a client is attached.
+fn parse_varlink_sessions(content: &str, socket_path: &str) -> Vec<u64> {
+    const SO_ACCEPTCON: u32 = 0x0001_0000;
+    let mut out = Vec::new();
+    for line in content.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // Num RefCount Protocol Flags Type St Inode Path
+        if cols.len() < 8 {
+            continue;
+        }
+        // Path may contain spaces; the remainder re-joined is the full path.
+        if cols[7..].join(" ") != socket_path {
+            continue;
+        }
+        let Ok(flags) = u32::from_str_radix(cols[3], 16) else {
+            continue;
+        };
+        if flags & SO_ACCEPTCON != 0 {
+            continue; // the listener itself, not a session
+        }
+        // The Inode column is decimal (unlike the hex Num/Flags columns).
+        let Ok(inode) = cols[6].parse::<u64>() else {
+            continue;
+        };
+        if inode == 0 {
+            continue;
+        }
+        out.push(inode);
     }
     out
 }
@@ -1452,5 +1575,66 @@ mod tests {
         );
         let clients = parse_stub_resolver_clients(content);
         assert_eq!(clients, vec![(12345, 1000)]);
+    }
+
+    const UNIX_SAMPLE: &str = "\
+Num               RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01  7844 /run/systemd/resolve/io.systemd.Resolve
+0000000000000000: 00000002 00000000 00000000 0001 03  99001 /run/systemd/resolve/io.systemd.Resolve
+0000000000000000: 00000002 00000000 00000000 0001 03  99002 /run/systemd/resolve/io.systemd.Resolve.Monitor
+0000000000000000: 00000002 00000000 00000000 0005 03  99003 /tmp/other.sock
+0000000000000000: 00000003 00000000 00000000 0005 01  99004";
+
+    #[test]
+    fn parse_varlink_sessions_keeps_sessions_skips_listener_and_others() {
+        let sessions =
+            parse_varlink_sessions(UNIX_SAMPLE, "/run/systemd/resolve/io.systemd.Resolve");
+        // Only the accepted session: the listener (SO_ACCEPTCON), the
+        // Monitor path, other sockets, and the unnamed row are excluded.
+        assert_eq!(sessions, vec![99001]);
+    }
+
+    #[test]
+    fn parse_varlink_sessions_empty_for_absent_path() {
+        assert!(
+            parse_varlink_sessions(UNIX_SAMPLE, "/run/systemd/resolve/io.systemd.Hostname")
+                .is_empty()
+        );
+        assert!(parse_varlink_sessions("", "/run/systemd/resolve/io.systemd.Resolve").is_empty());
+    }
+
+    /// End-to-end: a real connected client of a pathname socket must be
+    /// found through the session row → unix-diag peer → /proc/*/fd chain.
+    /// This is the exact mechanism that recovers the app behind
+    /// systemd-resolved's Varlink path (no root needed: SOCK_DIAG unix peer
+    /// queries are unprivileged, like `ss -x`).
+    #[test]
+    fn varlink_client_pids_finds_connected_client() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        let path = std::env::temp_dir().join(format!(
+            "nk-varlink-session-{}-{:?}.sock",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path_str = path.to_string_lossy().to_string();
+        let _ = fs::remove_file(&path);
+
+        let listener = UnixListener::bind(&path).expect("bind listener");
+        let client = UnixStream::connect(&path).expect("connect client");
+        let _accepted = listener.accept().expect("accept session");
+
+        // This test process owns the client socket → its pid must be found.
+        let pids = varlink_client_pids(&path_str);
+        assert!(
+            pids.contains(&std::process::id()),
+            "client pid {} not among {pids:?}",
+            std::process::id()
+        );
+
+        drop(client);
+        drop(_accepted);
+        drop(listener);
+        let _ = fs::remove_file(&path);
     }
 }

@@ -7,10 +7,13 @@
 
 use std::net::IpAddr;
 
-use netlink_packet_core::{NetlinkHeader, NetlinkMessage, NetlinkPayload, NLM_F_REQUEST};
+use netlink_packet_core::{
+    NetlinkHeader, NetlinkMessage, NetlinkPayload, NLM_F_DUMP, NLM_F_REQUEST,
+};
 use netlink_packet_sock_diag::constants::{AF_INET, AF_INET6};
 use netlink_packet_sock_diag::inet::{ExtensionFlags, InetRequest, SocketId, StateFlags};
 use netlink_packet_sock_diag::message::SockDiagMessage;
+use netlink_packet_sock_diag::unix::{ShowFlags, StateFlags as UnixStateFlags, UnixRequest};
 use netlink_sys::{protocols::NETLINK_SOCK_DIAG, Socket, SocketAddr};
 
 use core_types::TransportProtocol;
@@ -169,6 +172,83 @@ fn query_single_family(
     None
 }
 
+/// Dump the **peer relation** of connected AF_UNIX sockets: returns
+/// `(socket_inode, peer_inode)` pairs for every socket that has a peer.
+///
+/// Built from one `NLM_F_DUMP` unix-diag roundtrip (individual-inode
+/// lookups are not answered by all kernels, a dump always is). Used to map
+/// a server-side session socket — the row that carries a pathname in
+/// `/proc/net/unix` — back to the unnamed client socket on the other end,
+/// whose inode then resolves to the client's pid via `/proc/*/fd`.
+///
+/// Unprivileged, like `ss -x`.
+pub fn unix_peer_map() -> Vec<(u64, u64)> {
+    let Ok(socket) = (|| -> std::io::Result<Socket> {
+        let mut socket = Socket::new(NETLINK_SOCK_DIAG)?;
+        socket.bind(&SocketAddr::new(0, 0))?;
+        socket.connect(&SocketAddr::new(0, 0))?;
+        Ok(socket)
+    })() else {
+        return Vec::new();
+    };
+
+    let request = UnixRequest {
+        // Connected sockets only: sessions and their clients. Listeners
+        // carry no peer attribute and add nothing to the map.
+        state_flags: UnixStateFlags::ESTABLISHED,
+        inode: 0,
+        show_flags: ShowFlags::PEER,
+        cookie: [0xff; 8],
+    };
+
+    let mut msg = NetlinkMessage::new(
+        NetlinkHeader::default(),
+        NetlinkPayload::from(SockDiagMessage::UnixRequest(request)),
+    );
+    msg.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
+    msg.header.sequence_number = 1;
+    msg.finalize();
+
+    let mut buf = vec![0u8; msg.buffer_len()];
+    msg.serialize(&mut buf);
+    if socket.send(&buf[..], 0).is_err() {
+        return Vec::new();
+    }
+
+    let mut peers = Vec::new();
+    // One datagram can carry several concatenated nlmsgs (dump batches);
+    // walk them with 4-byte NLMSG_ALIGN stepping until DONE/error.
+    for _ in 0..4096 {
+        let received = match socket.recv_from_full() {
+            Ok((buf, _)) => buf,
+            Err(_) => break,
+        };
+        let mut rest: &[u8] = &received;
+        while !rest.is_empty() {
+            let msg = match NetlinkMessage::<SockDiagMessage>::deserialize(rest) {
+                Ok(msg) => msg,
+                Err(_) => return peers,
+            };
+            let raw_len = msg.buffer_len();
+            let aligned = (raw_len + 3) & !3; // NLMSG_ALIGNTO = 4
+            match msg.payload {
+                NetlinkPayload::InnerMessage(SockDiagMessage::UnixResponse(resp)) => {
+                    if let Some(peer) = resp.peer().filter(|&peer| peer != 0) {
+                        peers.push((u64::from(resp.header.inode), u64::from(peer)));
+                    }
+                }
+                NetlinkPayload::Done(_) | NetlinkPayload::Error(_) => return peers,
+                _ => {}
+            }
+            if aligned >= rest.len() {
+                break;
+            }
+            rest = &rest[aligned..];
+        }
+    }
+    peers
+}
+
 fn wildcard_dest_addr(src_ip: IpAddr) -> IpAddr {
     match src_ip {
         IpAddr::V4(_) => IpAddr::from([0u8; 4]),
@@ -207,5 +287,11 @@ mod tests {
         let mapped: IpAddr = "::ffff:10.0.2.15".parse().unwrap();
         assert!(sock_addr_matches(mapped, v4));
         assert!(sock_addr_matches(v4, mapped));
+    }
+
+    #[test]
+    fn unix_peer_map_does_not_panic() {
+        // Also proves the dump works unprivileged (test user, no caps).
+        let _ = unix_peer_map();
     }
 }

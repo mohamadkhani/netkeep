@@ -42,6 +42,44 @@ fn is_local_resolver_comm(comm: &str) -> bool {
         || LOCAL_RESOLVER_COMMS.iter().any(|r| comm.starts_with(r))
 }
 
+/// Whether this daemon itself sent the query: daemon queries are always the
+/// daemon's own (it never resolves on an app's behalf over port 53), so they
+/// keep their identity and must never borrow an app's egress through
+/// behind-resolver attribution.
+fn is_netkeep_comm(comm: &str) -> bool {
+    comm.starts_with("netkeep")
+}
+
+/// Decide whether a directly-attributed comm is used as-is instead of
+/// looking behind the resolver for the real app.
+fn keep_direct_comm(comm: &str) -> bool {
+    is_netkeep_comm(comm) || !is_local_resolver_comm(comm)
+}
+
+/// Pick the single real app among behind-resolver attribution candidates.
+///
+/// Returns `Some(comm)` when exactly one distinct non-resolver client is
+/// resolving (resolvers and systemd daemons never borrow an egress),
+/// `None` for an empty set or several distinct apps — attribution would be
+/// a guess, and the query keeps the resolver's identity instead.
+fn pick_behind_resolver_comm(candidates: impl IntoIterator<Item = String>) -> Option<String> {
+    let mut picked: Option<String> = None;
+    for comm in candidates {
+        let comm = comm.trim().to_string();
+        // Never attribute *to* resolvers, this daemon, or systemd
+        // components (networkd/oomd/… hold varlink sessions too).
+        if comm.is_empty() || is_local_resolver_comm(&comm) || comm.starts_with("systemd") {
+            continue;
+        }
+        match &picked {
+            None => picked = Some(comm),
+            Some(existing) if *existing == comm => {}
+            Some(_) => return None, // ambiguous — refuse to guess
+        }
+    }
+    picked
+}
+
 /// Read a process name from `/proc/<pid>/comm`.
 fn comm_for_pid(pid: u32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
@@ -235,9 +273,11 @@ impl DnsForwarder {
                     self.resolve_via_egress(&query, &target, &dns_servers)?
                 }
             } else {
+                self.warn_rules_not_evaluated(&domain, Some(name));
                 self.forward_system(&query)?
             }
         } else {
+            self.warn_rules_not_evaluated(&domain, None);
             self.forward_system(&query)?
         };
 
@@ -264,6 +304,25 @@ impl DnsForwarder {
             .map_err(|e| format!("send_to {peer}: {e}"))?;
 
         Ok(())
+    }
+
+    /// Surface the wrong-egress hazard: when attribution lands on a local
+    /// resolver (or nothing), process-scoped rules were **not** evaluated
+    /// and the query falls through to system DNS. Without this line the
+    /// fall-through is silent — it reads externally as "my process rules
+    /// don't apply to DNS", which is exactly the bug it exists to expose.
+    fn warn_rules_not_evaluated(&self, domain: &str, process: Option<&str>) {
+        // Resolver/None = process-scoped rules could not be evaluated.
+        // netkeep* = a known identity whose rules *were* evaluated (the
+        // daemon asking for itself is not an attribution failure).
+        let attribution_lost =
+            process.is_none_or(|p| !is_netkeep_comm(p) && is_local_resolver_comm(p));
+        if attribution_lost {
+            eprintln!(
+                "dns-forwarder: {domain}: no app attribution (process={process:?}) — \
+                 process-scoped rules NOT evaluated, using system DNS"
+            );
+        }
     }
 
     /// Identify the source process for a query arriving from `peer`.
@@ -302,7 +361,7 @@ impl DnsForwarder {
         }
 
         match direct {
-            Some(name) if !is_local_resolver_comm(&name) => Some(name),
+            Some(name) if keep_direct_comm(&name) => Some(name),
             direct => self.resolve_behind_resolver(domain).or(direct),
         }
     }
@@ -311,15 +370,23 @@ impl DnsForwarder {
     /// resolver: find the app that originally asked for `domain`.
     ///
     /// Layer 1 — eBPF DNS map scan (domain-exact, when the tracker loaded):
-    /// the app's query to the stub has dport 53 too, so the map holds an
+    /// the app's query to a UDP stub has dport 53 too, so the map holds an
     /// entry for the app's socket; its current owner is verified via
     /// SOCK_DIAG before use.
     ///
-    /// Layer 2 — /proc socket scan: apps blocked in getaddrinfo() hold a UDP
-    /// socket with the stub as remote (loopback:53). Used when the eBPF DNS
-    /// tracker is unavailable. With several apps resolving concurrently the
-    /// attribution is ambiguous and we refuse to guess (returns `None`), so
-    /// the query keeps the resolver's identity rather than a wrong one.
+    /// Layer 2 — userspace client scan across both resolver styles:
+    /// * **Varlink sessions** to systemd-resolved
+    ///   (`/run/systemd/resolve/io.systemd.Resolve`): the modern nss
+    ///   `resolve` path — the app has no UDP socket at all, it holds a
+    ///   per-call Varlink session while resolved queries us upstream.
+    ///   The session's peer (unix-diag `UNIX_DIAG_PEER`) maps to the app pid.
+    /// * **Stub-UDP clients**: `/proc` sockets whose remote is loopback:53
+    ///   (dnsmasq/unbound setups).
+    ///
+    /// Candidates from both sources are pooled; exactly one distinct
+    /// non-resolver client names the app. Several concurrent resolvers are
+    /// ambiguous and we refuse to guess (returns `None`), so the query keeps
+    /// the resolver's identity rather than a wrong one.
     fn resolve_behind_resolver(&self, domain: &str) -> Option<String> {
         if let Some(tracker) = &self.tracker {
             for candidate in tracker.lookup_all_by_domain(domain) {
@@ -347,18 +414,11 @@ impl DnsForwarder {
             }
         }
 
-        let mut clients: Vec<String> = Vec::new();
-        for pid in flow_classifier::proc_resolver::stub_resolver_client_pids() {
-            if let Some(comm) = comm_for_pid(pid) {
-                if !is_local_resolver_comm(&comm) && !clients.contains(&comm) {
-                    clients.push(comm);
-                }
-            }
-        }
-        if clients.len() == 1 {
-            return clients.pop();
-        }
-        None
+        let candidates = flow_classifier::proc_resolver::stub_resolver_client_pids()
+            .into_iter()
+            .chain(flow_classifier::proc_resolver::resolved_varlink_client_pids())
+            .filter_map(comm_for_pid);
+        pick_behind_resolver_comm(candidates)
     }
 
     fn resolve_via_egress(
@@ -1007,5 +1067,55 @@ mod tests {
         assert!(!is_local_resolver_comm("chromium"));
         assert!(!is_local_resolver_comm("dig"));
         assert!(!is_local_resolver_comm("curl"));
+    }
+
+    /// Which direct attributions are used as-is vs. re-resolved behind the
+    /// resolver: real apps keep their name; resolvers trigger recovery; the
+    /// daemon itself keeps its identity (it never asks on an app's behalf).
+    #[test]
+    fn direct_comm_keeps_identity_rules() {
+        assert!(keep_direct_comm("chromium"), "real app used as-is");
+        assert!(
+            keep_direct_comm("netkeepd"),
+            "daemon queries stay the daemon's"
+        );
+        assert!(keep_direct_comm("netkeep-daemon"));
+        assert!(
+            !keep_direct_comm("systemd-resolved"),
+            "resolver → look behind"
+        );
+        assert!(
+            !keep_direct_comm("systemd-resolve"),
+            "15-char comm truncation"
+        );
+        assert!(!keep_direct_comm("dnsmasq"), "resolver → look behind");
+        assert!(!keep_direct_comm(""), "unknown → look behind");
+    }
+
+    #[test]
+    fn behind_resolver_picks_single_app() {
+        assert_eq!(
+            pick_behind_resolver_comm(["chromium".to_string()]),
+            Some("chromium".to_string())
+        );
+        // Duplicates of one app are still unambiguous.
+        assert_eq!(
+            pick_behind_resolver_comm(["chromium".to_string(), "chromium".to_string()]),
+            Some("chromium".to_string())
+        );
+        // Resolver/systemd identities are never chosen as the app.
+        assert_eq!(pick_behind_resolver_comm(["systemd-resolve".into()]), None);
+        assert_eq!(pick_behind_resolver_comm(["systemd-networkd".into()]), None);
+        assert_eq!(pick_behind_resolver_comm(["netkeepd".into()]), None);
+        assert_eq!(pick_behind_resolver_comm(["".into()]), None);
+        assert_eq!(
+            pick_behind_resolver_comm(std::iter::empty::<String>()),
+            None
+        );
+        // Two distinct apps resolving concurrently → refuse to guess.
+        assert_eq!(
+            pick_behind_resolver_comm(["chromium".to_string(), "codex".to_string()]),
+            None
+        );
     }
 }

@@ -131,22 +131,48 @@ The exchange is bounded: the socket carries `DAEMON_BYPASS_MARK` **before** conn
 
 ### Stub-resolver attribution (systemd-resolved, dnsmasq, …)
 
-When a local caching resolver sits between apps and the forwarder (the default on
-systemd systems: app → `127.0.0.53` stub → forwarder on `127.0.0.1:53`), the
-socket-level lookup names **the resolver**, not the app — so per-app DNS rules
-never match. The forwarder looks behind the resolver:
+When a local resolver sits between apps and the forwarder, the socket-level
+lookup names **the resolver**, not the app — so per-app DNS rules never match.
+The forwarder looks behind the resolver in two layers:
 
-1. **eBPF domain scan** (when the DNS tracker kprobe loaded): the app's query to
-   the stub has dport 53 too, so the map holds an `(app socket → domain)` entry;
-   the candidate's socket owner is re-verified via SOCK_DIAG before use.
-2. **`/proc` socket scan** (fallback, works without eBPF): an app blocked in
-   `getaddrinfo()` holds a UDP socket whose *remote* is loopback:53;
-   `stub_resolver_client_pids()` recovers its owner. If several distinct apps
-   are resolving concurrently, attribution is ambiguous and the forwarder
-   refuses to guess (keeps the resolver identity).
+1. **eBPF domain scan** (when the DNS tracker kprobe loaded): the app's UDP
+   query to a *UDP* stub has dport 53 too, so the map holds an
+   `(app socket → domain)` entry; the candidate's socket owner is re-verified
+   via SOCK_DIAG before use. Domain-exact — no guessing.
 
-Resolver/daemon comms (`systemd-resolve`, `dnsmasq`, `unbound`, `netkeep*`, …)
-are always excluded from candidate attribution.
+2. **Userspace client scan** (also the fallback when eBPF is unavailable):
+   candidates are pooled from both resolver styles, and attribution succeeds
+   only when exactly **one** distinct non-resolver app is mid-resolution —
+   several concurrent resolvers are ambiguous and the forwarder refuses to
+   guess (keeps the resolver identity):
+
+   - **Varlink sessions** — the modern systemd path. With
+     `hosts: ... resolve ...` in `nsswitch.conf`, glibc's libnss_resolve does
+     not send any UDP query: it opens a per-call Varlink session to
+     systemd-resolved (`/run/systemd/resolve/io.systemd.Resolve`, method
+     `io.systemd.Resolve.ResolveHostname`) and resolved then queries *us* from
+     its own socket. While the request is in flight, resolved holds an
+     accepted session socket bound to that path; the client (the app) is
+     recovered through the kernel's peer relation — one unix-diag
+     `NLM_F_DUMP` (`UNIX_DIAG_PEER`) maps session inode → client inode, then
+     `/proc/*/fd` maps inode → pid. Neither the eBPF DNS map nor the stub-UDP
+     scan can ever see these apps (no app-side UDP socket exists), which made
+     this layer necessary: without it every query on this path attributed to
+     `systemd-resolved`, no process-scoped rule matched, and **all DNS fell
+     through to system DNS (wrong egress + leak)**.
+   - **Stub-UDP clients** — `/proc` sockets whose *remote* is loopback:53
+     (dnsmasq/unbound setups); the app blocked in `getaddrinfo()` holds the
+     stub as remote.
+
+   Resolver/daemon comms (`systemd-resolve`, `dnsmasq`, `unbound`,
+   `netkeep*`, systemd components) are always excluded from candidate
+   attribution, and the daemon's own queries keep the daemon's identity (it
+   never resolves on an app's behalf).
+
+If attribution still lands on a local resolver and no rule matches, the
+forwarder logs `no app attribution … process-scoped rules NOT evaluated,
+using system DNS` before the system-DNS fall-through — the fall-through is
+never silent.
 
 ## Relation to Transparent Proxy
 
