@@ -31,7 +31,7 @@ struct Cli {
     #[arg(short, long, env, default_value = DEFAULT_SOCKET_PATH, global = true)]
     socket: String,
 
-    /// Output format: json | yaml | table | md.
+    /// Output format: json | yaml | table | flat | text | md.
     #[arg(
         short,
         long,
@@ -50,6 +50,7 @@ struct Cli {
 enum Format {
     #[default]
     Table,
+    Flat,
     Text,
     Json,
     Yaml,
@@ -65,8 +66,9 @@ impl std::str::FromStr for Format {
             "table" | "t" => Ok(Format::Table),
             "text" | "txt" | "plain" => Ok(Format::Text),
             "md" | "markdown" | "m" => Ok(Format::Md),
+            "flat" => Ok(Format::Flat),
             other => Err(format!(
-                "invalid format '{other}'; use json, yaml, table, text, or md"
+                "invalid format '{other}'; use json, yaml, table, flat, text, or md"
             )),
         }
     }

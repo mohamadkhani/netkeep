@@ -40,6 +40,7 @@ pub fn render(
         Format::Json => serde_json::to_string_pretty(response).map_err(|e| e.to_string()),
         Format::Yaml => serde_yaml::to_string(response).map_err(|e| e.to_string()),
         Format::Table => render_table(response, rule_filter),
+        Format::Flat => render_flat(response, rule_filter),
         Format::Text => render_text(response, rule_filter),
         Format::Md => render_md(response, rule_filter),
     }
@@ -136,6 +137,24 @@ fn render_rules_table(rules: &[Rule], filter: Option<&RuleFilter>) -> Result<Str
     Ok(styled(builder.build()).to_string())
 }
 
+fn render_pending_flat(pendings: &[PendingDecision]) -> Result<String, String> {
+    if pendings.is_empty() {
+        return Ok("no pending decisions".to_string());
+    }
+    let mut out = String::new();
+    out.push_str("id  process   destination   protocol\n");
+    for p in pendings {
+        out.push_str(&format!(
+            "{}  {}  {}  {}\n",
+            p.id,
+            p.flow.process_name.as_deref().unwrap_or("-"),
+            destination_cell(&p.flow),
+            transport_str(&p.flow.protocol),
+        ));
+    }
+    Ok(out)
+}
+
 fn render_pending_table(pendings: &[PendingDecision]) -> Result<String, String> {
     if pendings.is_empty() {
         return Ok("no pending decisions".to_string());
@@ -153,6 +172,25 @@ fn render_pending_table(pendings: &[PendingDecision]) -> Result<String, String> 
         builder.push_record(cells);
     }
     Ok(styled(builder.build()).to_string())
+}
+
+fn render_flows_flat(flows: &[FlowEvent]) -> Result<String, String> {
+    if flows.is_empty() {
+        return Ok("no flows".to_string());
+    }
+    let mut out = String::new();
+    out.push_str("id  process   destination   protocol   state\n");
+    for f in flows {
+        out.push_str(&format!(
+            "{}  {}  {}  {}  {}\n",
+            f.id,
+            f.process_name.as_deref().unwrap_or("-"),
+            destination_cell(f),
+            transport_str(&f.protocol),
+            flow_state_str(&f.state),
+        ));
+    }
+    Ok(out)
 }
 
 fn render_flows_table(flows: &[FlowEvent]) -> Result<String, String> {
@@ -173,6 +211,38 @@ fn render_flows_table(flows: &[FlowEvent]) -> Result<String, String> {
         builder.push_record(cells);
     }
     Ok(styled(builder.build()).to_string())
+}
+
+fn render_egress_flat(egresses: &[Egress]) -> Result<String, String> {
+    if egresses.is_empty() {
+        return Ok("no egresses".to_string());
+    }
+    let mut out = String::new();
+    out.push_str("id  name   targets   dns_servers   system_default   available   color\n");
+    for e in egresses {
+        let targets: String = e
+            .targets
+            .iter()
+            .map(|t| match t {
+                RouteTarget::Tun(v) => format!("tun:{v}"),
+                RouteTarget::Device(v) => format!("dev:{v}"),
+                RouteTarget::Proxy(v) => format!("proxy:{v}"),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let dns: String = e.dns_servers.join(",");
+        out.push_str(&format!(
+            "{}  {}  {}  {}  {}  {}  {}\n",
+            e.id,
+            e.name,
+            targets,
+            dns,
+            if e.is_system_default { "yes" } else { "no" },
+            if e.is_available { "yes" } else { "no" },
+            e.color,
+        ));
+    }
+    Ok(out)
 }
 
 fn render_egress_table(egresses: &[Egress]) -> Result<String, String> {
@@ -213,6 +283,27 @@ fn render_egress_table(egresses: &[Egress]) -> Result<String, String> {
     Ok(styled(builder.build()).to_string())
 }
 
+fn render_proxy_flat(proxies: &[ProxyConfig]) -> Result<String, String> {
+    if proxies.is_empty() {
+        return Ok("no proxies".to_string());
+    }
+    let mut out = String::new();
+    out.push_str("id  name   protocol   host:port   auth   enabled\n");
+    for p in proxies {
+        let addr = format!("{}:{}", p.host, p.port);
+        out.push_str(&format!(
+            "{}  {}  {}  {}  {}  {}\n",
+            p.id,
+            p.name,
+            format_proxy_protocol(&p.protocol),
+            addr,
+            format_proxy_auth(&p.auth),
+            if p.enabled { "yes" } else { "no" },
+        ));
+    }
+    Ok(out)
+}
+
 fn render_proxy_table(proxies: &[ProxyConfig]) -> Result<String, String> {
     if proxies.is_empty() {
         return Ok("no proxies".to_string());
@@ -231,6 +322,20 @@ fn render_proxy_table(proxies: &[ProxyConfig]) -> Result<String, String> {
         ]);
     }
     Ok(styled(builder.build()).to_string())
+}
+
+fn render_nfqueue_status_flat(enabled: &bool, queue_num: &Option<u16>) -> Result<String, String> {
+    let mut out = String::new();
+    out.push_str("setting        value\n");
+    out.push_str(&format!(
+        "nfqueue enabled  {}\n",
+        if *enabled { "yes" } else { "no" }
+    ));
+    out.push_str(&format!(
+        "queue num      {}\n",
+        queue_num.map_or("n/a".to_string(), |n| n.to_string())
+    ));
+    Ok(out)
 }
 
 fn render_health_table(
@@ -280,7 +385,143 @@ fn render_nfqueue_status_table(enabled: &bool, queue_num: &Option<u16>) -> Resul
     Ok(styled(builder.build()).to_string())
 }
 
-/// Apply client-side filters to a list of rules.
+fn render_flat(response: &ControlResponse, filter: Option<&RuleFilter>) -> Result<String, String> {
+    match response {
+        ControlResponse::RuleList(rules) => {
+            let filtered = apply_rule_filter(rules, filter);
+            let mut out = String::new();
+            if filtered.is_empty() {
+                return Ok("no rules installed".to_string());
+            }
+            out.push_str("id  action   process   destination   duration\n");
+            for rule in &filtered {
+                out.push_str(&format!(
+                    "{}  {}  {}  {}  {}\n",
+                    rule.id,
+                    format_action(&rule.action),
+                    rule.process_name.as_deref().unwrap_or("-"),
+                    destination_str(&rule.destination),
+                    format_duration(&rule.duration)
+                ));
+            }
+            Ok(out)
+        }
+        ControlResponse::PendingList(pendings) => render_pending_flat(pendings),
+        ControlResponse::FlowList(flows) => render_flows_flat(flows),
+        ControlResponse::EgressList(egresses) => render_egress_flat(egresses),
+        ControlResponse::ProxyList(proxies) => render_proxy_flat(proxies),
+        ControlResponse::NfqueueStatus { enabled, queue_num } => {
+            render_nfqueue_status_flat(enabled, queue_num)
+        }
+        ControlResponse::Health {
+            ready,
+            fail_close_active,
+            pending_limit,
+            default_timeout_secs,
+            tcp_timeout_secs,
+            udp_timeout_secs,
+            quic_timeout_secs,
+            other_timeout_secs,
+            nfqueue_enabled,
+            nfqueue_num,
+        } => {
+            let mut out = String::new();
+            out.push_str("setting                    value\n");
+            out.push_str(&format!(
+                "ready                      {}\n",
+                if *ready { "yes" } else { "no" }
+            ));
+            out.push_str(&format!(
+                "fail_close_active          {}\n",
+                if *fail_close_active { "yes" } else { "no" }
+            ));
+            out.push_str(&format!("pending_limit              {}\n", pending_limit));
+            out.push_str(&format!(
+                "default_timeout_secs       {}\n",
+                default_timeout_secs
+            ));
+            out.push_str(&format!(
+                "tcp_timeout_secs           {}\n",
+                tcp_timeout_secs
+            ));
+            out.push_str(&format!(
+                "udp_timeout_secs           {}\n",
+                udp_timeout_secs
+            ));
+            out.push_str(&format!(
+                "quic_timeout_secs          {}\n",
+                quic_timeout_secs
+            ));
+            out.push_str(&format!(
+                "other_timeout_secs         {}\n",
+                other_timeout_secs
+            ));
+            out.push_str(&format!(
+                "nfqueue_enabled            {}\n",
+                if *nfqueue_enabled { "yes" } else { "no" }
+            ));
+            out.push_str(&format!(
+                "nfqueue_num                {}\n",
+                nfqueue_num.map_or("n/a".to_string(), |n| n.to_string())
+            ));
+            Ok(out)
+        }
+        ControlResponse::Ok => Ok("ok".to_string()),
+        ControlResponse::PendingCreated { pending_id, .. } => {
+            Ok(format!("pending created: {}", pending_id))
+        }
+        ControlResponse::ImmediateVerdict { action, .. } => Ok(format_verdict(action).to_string()),
+        ControlResponse::PendingStillWaiting { pending_id } => {
+            Ok(format!("pending {} still waiting", pending_id))
+        }
+        ControlResponse::PendingResolved { action, .. } => Ok(format_verdict(action).to_string()),
+        ControlResponse::SubscriptionAck => {
+            Ok("listening for pending decisions (push subscription active)".to_string())
+        }
+        ControlResponse::Unlocked => Ok("nftables rules removed (unlocked)".to_string()),
+        ControlResponse::RoutedTcpReady { listen_addr } => {
+            Ok(format!("routed TCP relay listening on {}", listen_addr))
+        }
+        ControlResponse::ProxyTestResult {
+            success,
+            latency_ms,
+            error,
+        } => {
+            if let Some(err) = error {
+                Err(format!("proxy test failed: {}", err))
+            } else {
+                Ok(format!(
+                    "proxy test {} (latency: {}ms)",
+                    if *success { "ok" } else { "failed" },
+                    latency_ms
+                ))
+            }
+        }
+        ControlResponse::Error(msg) => Err(format!("daemon error: {}", msg)),
+    }
+}
+
+/// ---------- flat ----------
+
+fn render_rules_flat(rules: &[Rule], filter: Option<&RuleFilter>) -> Result<String, String> {
+    let filtered = apply_rule_filter(rules, filter);
+    let mut out = String::new();
+    if filtered.is_empty() {
+        return Ok("no rules installed".to_string());
+    }
+    out.push_str("id  action   process   destination   duration\n");
+    for rule in &filtered {
+        out.push_str(&format!(
+            "{}  {}  {}  {}  {}\n",
+            rule.id,
+            format_action(&rule.action),
+            rule.process_name.as_deref().unwrap_or("-"),
+            destination_str(&rule.destination),
+            format_duration(&rule.duration)
+        ));
+    }
+    Ok(out)
+}
 fn apply_rule_filter<'a>(rules: &'a [Rule], filter: Option<&RuleFilter>) -> Vec<&'a Rule> {
     let mut result: Vec<&Rule> = rules.iter().collect();
     let filter = match filter {
