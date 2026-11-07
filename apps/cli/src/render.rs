@@ -2,6 +2,15 @@ use control_api::ControlResponse;
 
 use crate::Format;
 
+/// Rule list filters passed from the CLI.
+pub struct RuleFilter {
+    pub process: Option<String>,
+    pub id: Option<String>,
+    pub search: Option<String>,
+    pub action: Option<String>,
+    pub duration: Option<String>,
+}
+
 use core_types::{
     DestinationMatcher, Egress, FlowContext, FlowDirection, FlowEvent, FlowState, PendingDecision,
     ProxyAuth, ProxyConfig, ProxyProtocol, RouteTarget, Rule, RuleAction, RuleDuration,
@@ -22,21 +31,25 @@ fn styled(mut table: Table) -> Table {
 }
 
 /// Render a daemon response using the requested format.
-pub fn render(response: &ControlResponse, format: Format) -> Result<String, String> {
+pub fn render(
+    response: &ControlResponse,
+    format: Format,
+    rule_filter: Option<&RuleFilter>,
+) -> Result<String, String> {
     match format {
         Format::Json => serde_json::to_string_pretty(response).map_err(|e| e.to_string()),
         Format::Yaml => serde_yaml::to_string(response).map_err(|e| e.to_string()),
-        Format::Table => render_table(response),
-        Format::Text => render_text(response),
-        Format::Md => render_md(response),
+        Format::Table => render_table(response, rule_filter),
+        Format::Text => render_text(response, rule_filter),
+        Format::Md => render_md(response, rule_filter),
     }
 }
 
 // ---------- table ----------
 
-fn render_table(response: &ControlResponse) -> Result<String, String> {
+fn render_table(response: &ControlResponse, filter: Option<&RuleFilter>) -> Result<String, String> {
     match response {
-        ControlResponse::RuleList(rules) => render_rules_table(rules),
+        ControlResponse::RuleList(rules) => render_rules_table(rules, filter),
         ControlResponse::PendingList(pendings) => render_pending_table(pendings),
         ControlResponse::FlowList(flows) => render_flows_table(flows),
         ControlResponse::EgressList(egresses) => render_egress_table(egresses),
@@ -102,13 +115,14 @@ fn render_table(response: &ControlResponse) -> Result<String, String> {
     }
 }
 
-fn render_rules_table(rules: &[Rule]) -> Result<String, String> {
-    if rules.is_empty() {
+fn render_rules_table(rules: &[Rule], filter: Option<&RuleFilter>) -> Result<String, String> {
+    let filtered = apply_rule_filter(rules, filter);
+    if filtered.is_empty() {
         return Ok("no rules installed".to_string());
     }
     let mut builder = tabled::builder::Builder::new();
     builder.push_record(["id", "action", "process", "destination", "duration"]);
-    for rule in rules {
+    for rule in &filtered {
         let destination = destination_str(&rule.destination);
         let cells: Vec<&str> = vec![
             rule.id.as_str(),
@@ -265,16 +279,57 @@ fn render_nfqueue_status_table(enabled: &bool, queue_num: &Option<u16>) -> Resul
     ]);
     Ok(styled(builder.build()).to_string())
 }
+
+/// Apply client-side filters to a list of rules.
+fn apply_rule_filter<'a>(rules: &'a [Rule], filter: Option<&RuleFilter>) -> Vec<&'a Rule> {
+    let mut result: Vec<&Rule> = rules.iter().collect();
+    let filter = match filter {
+        Some(f) => f,
+        None => return result,
+    };
+    if let Some(p) = &filter.process {
+        result.retain(|r| r.process_name.as_deref() == Some(p.as_str()));
+    }
+    if let Some(id) = &filter.id {
+        result.retain(|r| &r.id == id);
+    }
+    if let Some(search) = &filter.search {
+        let needle = search.to_ascii_lowercase();
+        result.retain(|r| {
+            let text = format!(
+                "{} {} {} {} {}",
+                r.id,
+                format_action(&r.action),
+                r.process_name.as_deref().unwrap_or("-"),
+                destination_str(&r.destination),
+                format_duration(&r.duration),
+            )
+            .to_ascii_lowercase();
+            text.contains(&needle)
+        });
+    }
+    if let Some(action) = &filter.action {
+        let needle = action.to_ascii_lowercase();
+        result.retain(|r| format_action(&r.action).contains(&needle));
+    }
+    if let Some(duration) = &filter.duration {
+        let needle = duration.to_ascii_lowercase();
+        result.retain(|r| format_duration(&r.duration).contains(&needle));
+    }
+    result
+}
+
 // ---------- text ----------
 
-fn render_text(response: &ControlResponse) -> Result<String, String> {
+fn render_text(response: &ControlResponse, filter: Option<&RuleFilter>) -> Result<String, String> {
     match response {
         ControlResponse::RuleList(rules) => {
+            let filtered = apply_rule_filter(rules, filter);
             let mut out = String::new();
-            if rules.is_empty() {
+            if filtered.is_empty() {
                 return Ok("no rules installed".to_string());
             }
-            for rule in rules {
+            for rule in &filtered {
                 out.push_str(&format!(
                     "rule {} ({}) process={} destination={} duration={}\n",
                     rule.id,
@@ -426,9 +481,9 @@ fn render_text(response: &ControlResponse) -> Result<String, String> {
 
 // ---------- md ----------
 
-fn render_md(response: &ControlResponse) -> Result<String, String> {
+fn render_md(response: &ControlResponse, filter: Option<&RuleFilter>) -> Result<String, String> {
     match response {
-        ControlResponse::RuleList(rules) => render_rules_table(rules),
+        ControlResponse::RuleList(rules) => render_rules_table(rules, filter),
         ControlResponse::PendingList(pendings) => render_pending_md(pendings),
         ControlResponse::FlowList(flows) => render_flows_md(flows),
         ControlResponse::EgressList(egresses) => render_egress_md(egresses),

@@ -177,6 +177,23 @@ pub enum RuleAction {
         /// Show only rules matching this process name.
         #[arg(long)]
         process: Option<String>,
+
+        /// Filter rules by an exact rule id.
+        #[arg(long, short = 'i')]
+        id: Option<String>,
+
+        /// Search text matched case-insensitively against all rule fields
+        /// (id, process, destination, action, duration).
+        #[arg(long)]
+        search: Option<String>,
+
+        /// Filter rules by action (allow | deny | ask | route).
+        #[arg(long)]
+        action: Option<String>,
+
+        /// Filter rules by duration (until-restart | permanent).
+        #[arg(long)]
+        duration: Option<String>,
     },
 
     /// Delete a rule by ID.

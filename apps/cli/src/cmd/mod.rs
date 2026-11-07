@@ -23,8 +23,14 @@ fn build_request(cmd: args::Command) -> Result<ControlRequest, CliError> {
                     after_id,
                 })
             }
-            args::RuleAction::List { process } => {
-                let _ = process;
+            args::RuleAction::List {
+                process,
+                id,
+                search,
+                action,
+                duration,
+            } => {
+                let _ = (process, id, search, action, duration);
                 Ok(ControlRequest::ListRules)
             }
             args::RuleAction::Delete { id, force } => {
