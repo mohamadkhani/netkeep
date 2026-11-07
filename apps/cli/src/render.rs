@@ -7,11 +7,17 @@ use core_types::{
     ProxyAuth, ProxyConfig, ProxyProtocol, RouteTarget, Rule, RuleAction, RuleDuration,
     TransportProtocol,
 };
-use tabled::{settings::{Alignment, Padding, Style}, Table};
+use tabled::{
+    settings::{Alignment, Padding, Style},
+    Table,
+};
 
-/// Apply a modern Unicode box style to a built table.
+/// Apply a standard ASCII box style to a built table.
 fn styled(mut table: Table) -> Table {
-    table.with(Style::modern()).with(Padding::new(1, 1, 0, 0)).with(Alignment::left());
+    table
+        .with(Style::blank())
+        .with(Padding::new(1, 1, 0, 0))
+        .with(Alignment::left());
     table
 }
 
@@ -258,8 +264,8 @@ fn render_nfqueue_status_table(enabled: &bool, queue_num: &Option<u16>) -> Resul
         &queue_num.map_or("n/a".to_string(), |n| n.to_string()),
     ]);
     Ok(styled(builder.build()).to_string())
-}  
-  // ---------- text ----------
+}
+// ---------- text ----------
 
 fn render_text(response: &ControlResponse) -> Result<String, String> {
     match response {
