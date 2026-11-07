@@ -21,11 +21,11 @@ use tabled::{
     Table,
 };
 
-/// Apply a standard ASCII box style to a built table.
+/// Apply a standard box style (borders + padding + left alignment).
 fn styled(mut table: Table) -> Table {
     table
-        .with(Style::blank())
-        .with(Padding::new(1, 1, 0, 0))
+        .with(Style::modern())
+        .with(Padding::new(1, 2, 0, 0))
         .with(Alignment::left());
     table
 }
