@@ -848,23 +848,18 @@ fn handle_client(
         std::thread::spawn(move || {
             let mut writer = &stream_clone;
             loop {
-                match rx.try_recv() {
+                match rx.blocking_recv() {
                     Ok(notif) => {
                         if let Ok(payload) = serde_json::to_string(&notif) {
-                            let _ = writer.write_all(format!("{payload}\n").as_bytes());
+                            if writer.write_all(format!("{payload}\n").as_bytes()).is_err() {
+                                break; // subscriber disconnected
+                            }
                         }
                     }
-                    Err(broadcast::error::TryRecvError::Lagged(_)) => {
-                        // Buffer full, skip this message
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Buffer full, skip ahead to the newest messages.
                     }
-                    Err(broadcast::error::TryRecvError::Empty) => {
-                        // No message available, sleep briefly
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                    Err(broadcast::error::TryRecvError::Closed) => {
-                        // Broadcast channel closed, exit
-                        break;
-                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
