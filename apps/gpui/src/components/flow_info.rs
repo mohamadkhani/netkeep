@@ -13,6 +13,7 @@ pub fn flow_info_section(flow: &FlowContext, mono_font_family: SharedString) -> 
     let ip = flow.destination_ip.as_str();
     let direction = flow.direction;
     let device_label = &flow.device_label;
+    let process_exe = flow.process_exe.as_deref();
 
     let destination = domain.as_deref().unwrap_or("(unknown)");
 
@@ -61,6 +62,13 @@ pub fn flow_info_section(flow: &FlowContext, mono_font_family: SharedString) -> 
         card = card.child(grid_row(
             label_element("DEVICE", ui_font.clone()),
             device_value(label, mono_font_family.clone()),
+        ));
+    }
+
+    if let Some(exe) = process_exe {
+        card = card.child(grid_row(
+            label_element("EXECUTABLE", ui_font.clone()),
+            exe_value(exe, mono_font_family.clone()),
         ));
     }
 
@@ -125,6 +133,18 @@ fn process_value(
                 .child("\u{1F525}"), // 🔥 fire
         )
         .child(name_col)
+        .into_any_element()
+}
+
+/// Full `/proc/<pid>/exe` target. Shown in full (wrapping if needed) because
+/// it is the identity that distinguishes apps sharing a runtime name such as
+/// `electron`; truncating it would hide the distinguishing part.
+fn exe_value(path: &str, mono_font_family: SharedString) -> gpui::AnyElement {
+    div()
+        .font_family(mono_font_family)
+        .text_color(colors::muted())
+        .text_size(px(11.))
+        .child(SharedString::from(path.to_string()))
         .into_any_element()
 }
 

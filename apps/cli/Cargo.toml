@@ -12,4 +12,4 @@ serde_yaml = "0.9"
 serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive", "color", "env", "wrap_help"] }
 thiserror = "2"
-tabled = { version = "0.17", features = ["ansi"] }
+tabled = "0.17"

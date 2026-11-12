@@ -5,7 +5,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_probe_read_kernel},
+    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_kernel},
     macros::{kprobe, map},
     maps::{HashMap, PerCpuArray},
     programs::ProbeContext,
@@ -43,10 +43,10 @@ static DNS_EVENTS: HashMap<DnsKey, DnsEvent> = HashMap::with_max_entries(8192, 0
 
 /// Field offsets inside `struct sock` → `struct sock_common` (x86_64, Linux 6.x).
 /// Verify with: `pahole -C sock_common vmlinux` or BTF dump.
-const SKC_FAMILY_OFF: usize = 0;      // __u16 skc_family
-const SKC_DPORT_OFF: usize = 2;       // __be16 skc_dport  (destination port, big-endian)
-const SKC_NUM_OFF: usize = 4;         // __u16  skc_num    (source port, host-endian)
-const SKC_RCV_SADDR_OFF: usize = 20;  // __be32 skc_rcv_saddr (IPv4 src, big-endian)
+const SKC_FAMILY_OFF: usize = 0; // __u16 skc_family
+const SKC_DPORT_OFF: usize = 2; // __be16 skc_dport  (destination port, big-endian)
+const SKC_NUM_OFF: usize = 4; // __u16  skc_num    (source port, host-endian)
+const SKC_RCV_SADDR_OFF: usize = 20; // __be32 skc_rcv_saddr (IPv4 src, big-endian)
 
 /// msghdr layout (x86_64, Linux 6.x).
 /// The __iov pointer (pointer to first iovec) lives at offset 32 inside msghdr.
@@ -88,7 +88,16 @@ unsafe fn try_dns_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
     let src_ip4: u32 =
         bpf_probe_read_kernel(sk_ptr.add(SKC_RCV_SADDR_OFF) as *const u32).map_err(|_| ())?;
 
-    let key = DnsKey { src_ip4, src_port, _pad: 0 };
+    // Build DnsKey field-by-field with volatile writes so LLVM does not
+    // recognize the struct literal (which zero-inits padding) as llvm.memset,
+    // which bpf-linker >= 0.11 rejects on no_std eBPF targets.
+    let mut key = core::mem::MaybeUninit::<DnsKey>::uninit();
+    unsafe {
+        core::ptr::write_volatile(&mut (*key.as_mut_ptr()).src_ip4, src_ip4);
+        core::ptr::write_volatile(&mut (*key.as_mut_ptr()).src_port, src_port);
+        core::ptr::write_volatile(&mut (*key.as_mut_ptr())._pad, 0u16);
+    }
+    let key = unsafe { key.assume_init() };
 
     // Obtain a per-CPU scratch DnsEvent to avoid stack overflow.
     let event = SCRATCH.get_ptr_mut(0).ok_or(())?;
@@ -96,11 +105,18 @@ unsafe fn try_dns_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
     let event = &mut *event;
 
     event.pid = (bpf_get_current_pid_tgid() >> 32) as u32;
-    // Raw helper instead of aya's wrapper: the wrapper zero-inits a 16-byte
-    // stack buffer, which lowers to llvm.memset and bpf-linker >= 0.11
-    // rejects it. Writing directly into the per-CPU map value avoids that.
+    // Raw helper instead of aya's wrapper: the wrapper (`bpf_get_current_comm`)
+    // zero-inits a 16-byte stack buffer, which lowers to llvm.memset and
+    // bpf-linker >= 0.11 rejects it. Writing directly into the per-CPU map
+    // value avoids that.
     // SAFETY: event.comm is [u8; 16]; the helper writes at most 16 bytes.
-    if bpf_get_current_comm().is_err() {
+    let comm_ret = unsafe {
+        aya_ebpf::helpers::generated::bpf_get_current_comm(
+            event.comm.as_mut_ptr().cast(),
+            event.comm.len() as u32,
+        )
+    };
+    if comm_ret != 0 {
         return Err(());
     }
 
@@ -125,15 +141,13 @@ unsafe fn try_dns_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
 unsafe fn parse_qname_from_msg(msg_ptr: *const u8, out: &mut [u8; 256]) -> Result<(), ()> {
     // Read the iovec pointer stored at MSGHDR_IOV_OFF inside msghdr.
     let iov_ptr: *const u8 =
-        bpf_probe_read_kernel((msg_ptr.add(MSGHDR_IOV_OFF)) as *const *const u8)
-            .map_err(|_| ())?;
+        bpf_probe_read_kernel((msg_ptr.add(MSGHDR_IOV_OFF)) as *const *const u8).map_err(|_| ())?;
     if iov_ptr.is_null() {
         return Err(());
     }
 
     // Read iov_base from the first iovec (offset 0 inside struct iovec).
-    let data_ptr: *const u8 =
-        bpf_probe_read_kernel(iov_ptr as *const *const u8).map_err(|_| ())?;
+    let data_ptr: *const u8 = bpf_probe_read_kernel(iov_ptr as *const *const u8).map_err(|_| ())?;
     if data_ptr.is_null() {
         return Err(());
     }

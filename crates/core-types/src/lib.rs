@@ -42,9 +42,13 @@ pub struct Rule {
     pub action: RuleAction,
     pub duration: RuleDuration,
     pub process_name: Option<String>,
-    /// Full path to the process executable (e.g. `/usr/bin/curl`). Used as
-    /// the primary match key when present — more unique than basename alone
-    /// and immune to comm-name truncation.
+    /// Full path to the process executable (e.g. `/usr/bin/curl`). An exact
+    /// path match is the strongest identity signal and is immune to comm-name
+    /// truncation. A *different* path does not by itself reject the rule: apps
+    /// get a new path on every update (versioned dirs, AppImage mounts), and a
+    /// matching `process_name` still describes the same app. The exception is
+    /// a shared runtime name (`electron`, `AppRun`), which is not an app
+    /// identity — those rules require this path to match exactly.
     #[serde(default)]
     pub process_exe: Option<String>,
     pub destination: DestinationMatcher,

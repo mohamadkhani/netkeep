@@ -74,15 +74,54 @@ fn destination_matches(rule: &Rule, flow: &FlowContext) -> bool {
     }
 }
 
+/// Runtime names that are shared by every bundled app and therefore carry no
+/// app identity on their own. Electron reports its own binary as `electron`,
+/// and AppImage launchers report the `AppRun` shim until the resolver recovers
+/// the app dir from the cmdline. A rule keyed on one of these names must pin
+/// the executable path too, or approving one app silently approves every other
+/// Electron/AppImage app on the machine.
+fn is_ambiguous_process_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("electron") || name.eq_ignore_ascii_case("apprun")
+}
+
 fn process_matches(rule: &Rule, flow: &FlowContext) -> bool {
-    // Prefer exe-path comparison when both sides have it — more unique than
-    // basename alone and immune to comm-name truncation.
-    if let (Some(rule_exe), Some(flow_exe)) = (&rule.process_exe, &flow.process_exe) {
-        return rule_exe == flow_exe;
+    // Exact exe-path equality is the strongest identity signal: accept it even
+    // when the display name changed (e.g. the resolver learned the real app
+    // name after the rule was created).
+    let exe_equal = matches!(
+        (&rule.process_exe, &flow.process_exe),
+        (Some(rule_exe), Some(flow_exe)) if rule_exe == flow_exe
+    );
+
+    // An exe-only rule (no process_name) must still pin the exact binary.
+    // Without this guard the `(None, _) => true` arm below would widen it
+    // into "match every process".
+    if rule.process_name.is_none() {
+        return rule.process_exe.is_none() || exe_equal;
     }
+
+    // A shared runtime name (`electron`, `AppRun`) is not an app identity. Only
+    // the exact binary may satisfy such a rule — no name-only match, and no
+    // destination-only fallback when attribution failed.
+    if rule
+        .process_name
+        .as_deref()
+        .is_some_and(is_ambiguous_process_name)
+        && !exe_equal
+    {
+        return false;
+    }
+
     match (&rule.process_name, &flow.process_name) {
-        (None, _) => true,
-        (Some(rp), Some(fp)) => rp == fp,
+        // A changed exe path must NOT veto a matching process name. Apps move
+        // to a new `/proc/<pid>/exe` on every update — VS Code extension
+        // releases (`.../kilo-code-7.8.17/bin/kilo` → `...-7.8.27/bin/kilo`),
+        // codex release dirs, JDK upgrades, AppImage mount paths, `/opt.old`
+        // moves. The user's decision was about the app, not that path. Treating
+        // the path as a hard reject re-prompted after every update and saved a
+        // near-duplicate rule each time (observed: 51 duplicate groups whose
+        // only difference was `process_exe`).
+        (Some(rp), Some(fp)) => rp == fp || exe_equal,
         // Flow process attribution failed (proc_resolver lost the
         // /proc/net/tcp race). When the rule pins a *specific* destination
         // we trust the destination: re-prompting the user for the same
@@ -90,10 +129,15 @@ fn process_matches(rule: &Rule, flow: &FlowContext) -> bool {
         // apply. Broad destinations (Any / Cidr / Wildcard) still require
         // an exact process match so a global "allow process X" rule can't
         // be silently piggy-backed on by a different unattributed process.
-        (Some(_), None) => matches!(
-            rule.destination,
-            DestinationMatcher::IpExact(_) | DestinationMatcher::DomainExact(_)
-        ),
+        (Some(_), None) => {
+            exe_equal
+                || matches!(
+                    rule.destination,
+                    DestinationMatcher::IpExact(_) | DestinationMatcher::DomainExact(_)
+                )
+        }
+        // `process_name.is_none()` returned above.
+        (None, _) => rule.process_exe.is_none() || exe_equal,
     }
 }
 
@@ -216,6 +260,175 @@ mod tests {
             egress_id: None,
             priority,
         }
+    }
+
+    fn mk_rule_with_exe(
+        id: &str,
+        action: RuleAction,
+        process_name: Option<&str>,
+        process_exe: Option<&str>,
+        destination: DestinationMatcher,
+    ) -> Rule {
+        Rule {
+            id: id.to_string(),
+            enabled: true,
+            action,
+            duration: RuleDuration::UntilRestart,
+            process_name: process_name.map(str::to_string),
+            process_exe: process_exe.map(str::to_string),
+            destination,
+            egress_id: None,
+            priority: 5.0,
+        }
+    }
+
+    fn flow_for(
+        process_name: Option<&str>,
+        process_exe: Option<&str>,
+        domain: &str,
+    ) -> FlowContext {
+        FlowContext {
+            process_name: process_name.map(str::to_string),
+            process_exe: process_exe.map(str::to_string),
+            app_name: None,
+            source_ip: "10.0.0.1".to_string(),
+            source_port: 54321,
+            destination_ip: "1.1.1.1".to_string(),
+            destination_port: 443,
+            destination_domain: Some(domain.to_string()),
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: false,
+        }
+    }
+
+    /// Regression: every app update moved the binary to a new versioned path
+    /// (`kilo-code-7.8.17/bin/kilo` → `kilo-code-7.8.27/bin/kilo`). The old
+    /// rule stored the previous path and `process_matches` rejected the flow
+    /// solely because the paths differed, so the user was asked again and the
+    /// dialog saved a near-duplicate rule.
+    #[test]
+    fn changed_exe_path_does_not_revoke_name_match() {
+        let rule = mk_rule_with_exe(
+            "kilo-models",
+            RuleAction::Allow,
+            Some("kilo"),
+            Some("/home/u/.vscode-oss/extensions/kilocode.kilo-code-7.8.17-linux-x64/bin/kilo"),
+            DestinationMatcher::DomainExact("models.dev".to_string()),
+        );
+        let flow = flow_for(
+            Some("kilo"),
+            Some("/home/u/.vscode-oss/extensions/kilocode.kilo-code-7.8.27-linux-x64/bin/kilo"),
+            "models.dev",
+        );
+        let resolved = resolve_action(&[rule], &flow).expect("updated app must stay allowed");
+        assert_eq!(resolved.action, RuleAction::Allow);
+    }
+
+    /// The exe path still earns its keep when the display name changed between
+    /// rule creation and now (e.g. the resolver learned the real app name).
+    #[test]
+    fn identical_exe_path_matches_across_renamed_process() {
+        let rule = mk_rule_with_exe(
+            "electron-rule",
+            RuleAction::Allow,
+            Some("electron"),
+            Some("/opt/cursor/cursor"),
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+        let flow = flow_for(Some("cursor"), Some("/opt/cursor/cursor"), "example.com");
+        assert!(resolve_action(&[rule], &flow).is_some());
+    }
+
+    /// Different name *and* different binary is genuinely a different process.
+    #[test]
+    fn different_name_and_exe_still_does_not_match() {
+        let rule = mk_rule_with_exe(
+            "curl-rule",
+            RuleAction::Allow,
+            Some("curl"),
+            Some("/usr/bin/curl"),
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+        let flow = flow_for(Some("wget"), Some("/usr/bin/wget"), "example.com");
+        assert!(resolve_action(&[rule], &flow).is_none());
+    }
+
+    /// An exe-only rule (no process_name) must keep pinning the exact binary.
+    #[test]
+    fn exe_only_rule_requires_exact_path() {
+        let rule = mk_rule_with_exe(
+            "exe-only",
+            RuleAction::Allow,
+            None,
+            Some("/usr/bin/curl"),
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+        let same = flow_for(Some("curl"), Some("/usr/bin/curl"), "example.com");
+        let other = flow_for(Some("wget"), Some("/usr/bin/wget"), "example.com");
+        assert!(resolve_action(std::slice::from_ref(&rule), &same).is_some());
+        assert!(resolve_action(&[rule], &other).is_none());
+    }
+
+    /// Electron/AppImage apps all report `electron` / `AppRun`. Two different
+    /// apps must never satisfy each other's rules just because the runtime name
+    /// matches; only the exact binary may.
+    #[test]
+    fn ambiguous_runtime_name_requires_exact_exe() {
+        let rule = mk_rule_with_exe(
+            "cursor-rule",
+            RuleAction::Allow,
+            Some("electron"),
+            Some("/opt/cursor/cursor"),
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+        let same_app = flow_for(Some("electron"), Some("/opt/cursor/cursor"), "example.com");
+        let other_app = flow_for(Some("electron"), Some("/opt/slack/slack"), "example.com");
+        let same_name_no_exe = flow_for(Some("electron"), None, "example.com");
+
+        assert!(resolve_action(std::slice::from_ref(&rule), &same_app).is_some());
+        assert!(
+            resolve_action(std::slice::from_ref(&rule), &other_app).is_none(),
+            "a different Electron app must not inherit this rule"
+        );
+        assert!(
+            resolve_action(&[rule], &same_name_no_exe).is_none(),
+            "unattributed flow must not fall back to a shared runtime name"
+        );
+    }
+
+    /// A rule saved before the exe-path guard existed (name only) cannot
+    /// distinguish apps, so it must not match by name alone.
+    #[test]
+    fn ambiguous_name_rule_without_exe_never_matches() {
+        let rule = mk_rule_with_exe(
+            "old-electron-rule",
+            RuleAction::Allow,
+            Some("AppRun"),
+            None,
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+        let flow = flow_for(
+            Some("AppRun"),
+            Some("/tmp/.mount_App123/AppRun"),
+            "example.com",
+        );
+        assert!(resolve_action(&[rule], &flow).is_none());
+    }
+
+    /// Guard the exact-exe escape hatch for the ambiguous names too.
+    #[test]
+    fn ambiguous_name_still_matches_when_exe_path_is_identical() {
+        let rule = mk_rule_with_exe(
+            "apprun-rule",
+            RuleAction::Allow,
+            Some("AppRun"),
+            Some("/opt/thing/AppRun"),
+            DestinationMatcher::DomainExact("example.com".to_string()),
+        );
+        let renamed = flow_for(Some("thing"), Some("/opt/thing/AppRun"), "example.com");
+        assert!(resolve_action(&[rule], &renamed).is_some());
     }
 
     #[test]

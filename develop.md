@@ -924,3 +924,37 @@ Security fix: the DNS forwarder used to silently fall back to **system DNS** whe
 - [x] **Stub-resolver attribution** — with systemd-resolved in the path (app → `127.0.0.53` → forwarder), every query was attributed to `systemd-resolved`, so per-app DNS rules (e.g. `chromium + facebook.com → Route`) never matched and the query went to system DNS — returning the ISP's poisoned answer (observed live: facebook.com → `10.10.34.36` sinkhole). Fix: when the socket-level attribution is a local resolver (`is_local_resolver_comm`), the forwarder recovers the real app — layer 1: eBPF DNS map domain scan (`DnsTracker::lookup_all_by_domain`, the app's query to the stub is captured too); layer 2 (works even when the kprobe fails to load): `/proc/net/udp[6]` remote-socket scan (`flow_classifier::proc_resolver::stub_resolver_client_pids`). Ambiguous multi-app cases refuse to guess.
 - [x] **Transparent proxy sends the domain, not the (poisoned) IP** — `TransparentProxy` passed the original destination IP straight into SOCKS CONNECT, so with poisoned local DNS the proxy tunneled to the sinkhole IP (observed live: `dst=10.10.34.36:443` for facebook). `docs/dns-forwarder.md` already claimed CONNECT uses the domain via SniDnsCache — it was never implemented. Fix: `TransparentProxy::bind` takes the shared `SniDnsCache`; `handle_client` translates the original IP back to the domain the app queried (`host_for_connect`), so the proxy resolves it on the far side and poisoned local answers become irrelevant for proxy-routed traffic.
 - [x] **Tests:** 3 new unit tests in `forwarder::tests` (question echo + flags, header-only fallback, malformed-query rejection) + resolver-comm detection + `/proc` stub-client parser test + `host_for_connect` substitution test. Workspace: 258 passing, clippy clean.
+
+### 2026-11-11 (session 41 — app updates no longer re-prompt / duplicate rules)
+
+User report: *"Sometimes netkeep ask for requests that previously we decide about it. The evidence is the repeated rules saved in my system."*
+
+- [x] **Root cause.** `policy_engine::process_matches` treated the full `/proc/<pid>/exe` path as a hard veto:
+
+  ```rust
+  if let (Some(rule_exe), Some(flow_exe)) = (&rule.process_exe, &flow.process_exe) {
+      return rule_exe == flow_exe;
+  }
+  ```
+
+  Every app update moves the binary to a new path — VS Code extension version dirs (`kilo-code-7.8.17/bin/kilo` → `kilo-code-7.8.27/bin/kilo`), codex release dirs, JDK upgrades, AppImage mounts, `/opt.old` moves. The existing permanent rule still named the same app (`process_name` unchanged) but the differing path short-circuited to `false`, so the flow was treated as unknown, the dialog reappeared, and the decision saved another rule carrying the new path.
+
+- [x] **Evidence from the live daemon DB** (`netkeep-cli -f json rule list`): 601 rules, 53 duplicate `(process_name, destination, action)` groups (69 extra rows). **51 of the 53 groups differed only in `process_exe`.** Example: `kilo → models.dev Allow` existed four times, one per extension version.
+
+- [x] **Fix.** `process_matches` now treats an exact exe-path match as sufficient (still covers name changes), but a path *mismatch* no longer vetoes a matching `process_name`. Exe-only rules (no `process_name`) remain pinned to the exact path via an explicit guard, so a rule cannot widen into "any process".
+
+- [x] **Tests:** 4 new policy-engine tests — `changed_exe_path_does_not_revoke_name_match`, `identical_exe_path_matches_across_renamed_process`, `different_name_and_exe_still_does_not_match`, `exe_only_rule_requires_exact_path`.
+
+- [x] **Docs:** `docs/process-resolver.md` (exe identity is exact-match preferred, not a veto), `docs/testing.md` (new matrix rows), `core_types::Rule::process_exe` field docs.
+
+**Follow-up: name-only matching is too loose for Electron.**
+
+Every Electron bundle reports `electron` and every AppImage reports `AppRun`, so name-only matching would let a rule approved for one app apply to all of them.
+
+- [x] **Ambiguity guard.** `process_matches` now requires the exact exe path when the rule's `process_name` is `electron` or `AppRun` (case-insensitive). This also blocks the "unattributed flow + specific destination" fallback for those rules, and old name-only rules cannot match at all until the user re-approves once (the new rule stores the path).
+- [x] **Tests:** 3 more policy-engine tests — different Electron app does not inherit a rule, no-exe `AppRun` rule never matches, identical path still matches across a later name fixup. `cargo test -p policy-engine` = 28 passing.
+- [x] **GUI shows the executable path.**
+  - Decision dialog (`flow_info.rs`): new `EXECUTABLE` row with the full path in monospace.
+  - Rules table (`rules_tab.rs`): Process cell now shows the name plus a left-elided exe path (`…/bin/app`); Process column widened to 200 px.
+  - Rule add/edit dialog (`settings/mod.rs`): new `EXECUTABLE PATH` input, prefilled on edit. **This also fixes a bug where saving an edited rule wrote `process_exe: None`**, silently dropping the path from existing rules.
+- [x] **Docs:** `docs/process-resolver.md` documents the runtime-name exception; `docs/testing.md` adds the three rows.

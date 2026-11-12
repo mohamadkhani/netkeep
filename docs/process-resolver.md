@@ -251,7 +251,11 @@ The primary name comes from `/proc/<pid>/exe` (basename preferred over `/proc/<p
 
 ### Exe path
 
-`read_exe_path(pid)` reads the symlink at `/proc/<pid>/exe`, returning the full path (e.g. `/opt/cursor/resources/app.asar.unpacked/node_modules/@cursor-arm/cursor-linux-x64/cursor`). A trailing ` (deleted)` suffix (kernel notation for a binary replaced by an update while running) is stripped. The exe path is stored in `Rule.process_exe` and `FlowContext.process_exe` and used as the primary identity for rule matching when both the rule and the incoming flow have it — it is immune to `/proc/<pid>/comm`'s 15-character truncation and basename collisions between packages with the same executable name.
+`read_exe_path(pid)` reads the symlink at `/proc/<pid>/exe`, returning the full path (e.g. `/opt/cursor/resources/app.asar.unpacked/node_modules/@cursor-arm/cursor-linux-x64/cursor`). A trailing ` (deleted)` suffix (kernel notation for a binary replaced by an update while running) is stripped. The exe path is stored in `Rule.process_exe` and `FlowContext.process_exe`. An **exact** path match is the strongest rule-identity signal — it is immune to `/proc/<pid>/comm`'s 15-character truncation and basename collisions between packages with the same executable name.
+
+A *changed* path is not a veto, however. Apps get a new `/proc/<pid>/exe` on every update (VS Code extension version dirs, release-dir installs, AppImage mount paths, JDK upgrades), and `policy_engine::process_matches` still accepts the rule when the `process_name` matches. Rejecting on a path mismatch re-prompted the user after every update and wrote a near-duplicate rule each time. Exe-only rules (no `process_name`) remain pinned to the exact path.
+
+Name matching has one deliberate exception: **`electron` and `AppRun` are runtime names, not app identities.** Every Electron bundle and every AppImage reports one of them until the resolver recovers a real app name. A rule whose `process_name` is one of those must also match the exact exe path — otherwise approving one app would silently approve every other Electron/AppImage app. Rules saved without an exe path (older data, or a manually typed name) never match by that name alone; the user is re-prompted once and the new rule stores the path. The GUI shows the full exe path in the decision dialog and the rule form so the user can verify which binary a rule pins.
 
 ### App name (package manager lookup)
 

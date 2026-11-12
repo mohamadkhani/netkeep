@@ -6,9 +6,9 @@ use gpui::{
     px, App, AppContext as _, Context, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, WeakEntity, Window,
 };
-use gpui_component::h_flex;
 use gpui_component::label::Label;
 use gpui_component::table::{Column, TableDelegate, TableState};
+use gpui_component::{h_flex, v_flex};
 
 use crate::colors;
 use crate::components::{action_btn, badge, dest_text};
@@ -40,7 +40,7 @@ impl RulesDelegate {
             socket_path,
             columns: vec![
                 Column::new("id", "ID").width(px(90.)),
-                Column::new("process", "Process").width(px(110.)),
+                Column::new("process", "Process").width(px(200.)),
                 Column::new("destination", "Destination").width(px(180.)),
                 Column::new("action", "Action").width(px(80.)),
                 Column::new("duration", "Duration").width(px(80.)),
@@ -114,7 +114,9 @@ impl TableDelegate for RulesDelegate {
                     )
                     .into_any_element()
             }
-            // Process column — process name or "—" when unconstrained
+            // Process column — name plus the executable path that disambiguates
+            // apps sharing a runtime name (`electron`, `AppRun`). The path is
+            // elided from the left; the full value is visible in the edit dialog.
             1 => {
                 let proc_label: gpui::SharedString = match &rule.process_name {
                     Some(p) if !p.is_empty() => p.clone().into(),
@@ -125,14 +127,26 @@ impl TableDelegate for RulesDelegate {
                     .as_deref()
                     .map(|s| !s.is_empty())
                     .unwrap_or(false);
-                Label::new(proc_label)
-                    .text_size(px(12.))
-                    .text_color(if has_proc && !dimmed {
-                        colors::text()
-                    } else {
-                        colors::muted()
-                    })
-                    .into_any_element()
+                let name_color = if has_proc && !dimmed {
+                    colors::text()
+                } else {
+                    colors::muted()
+                };
+                let mut cell = v_flex().gap(px(0.)).child(
+                    Label::new(proc_label)
+                        .text_size(px(12.))
+                        .line_height(px(13.))
+                        .text_color(name_color),
+                );
+                if let Some(exe) = rule.process_exe.as_deref().filter(|e| !e.is_empty()) {
+                    cell = cell.child(
+                        Label::new(elide_left(exe, 36))
+                            .text_size(px(9.))
+                            .line_height(px(10.))
+                            .text_color(colors::muted()),
+                    );
+                }
+                cell.into_any_element()
             }
 
             // Destination column
@@ -390,4 +404,22 @@ impl TableDelegate for RulesDelegate {
 
 fn route_is_empty(rule: &Rule) -> bool {
     rule.egress_id.is_none()
+}
+
+/// Keep the tail of a path (`…/bin/app`) — the leaf names the binary, while
+/// the leading install prefix is the least informative part in a table cell.
+/// The full path is shown in the rule edit dialog.
+fn elide_left(path: &str, max_chars: usize) -> String {
+    if path.chars().count() <= max_chars {
+        return path.to_string();
+    }
+    let tail: String = path
+        .chars()
+        .rev()
+        .take(max_chars.saturating_sub(1))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{tail}")
 }

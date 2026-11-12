@@ -437,6 +437,10 @@ impl SettingsApp {
             .as_ref()
             .and_then(|r| r.process_name.clone())
             .unwrap_or_default();
+        let init_exe = existing
+            .as_ref()
+            .and_then(|r| r.process_exe.clone())
+            .unwrap_or_default();
         let init_action = existing
             .as_ref()
             .map(|r| r.action.clone())
@@ -478,6 +482,12 @@ impl SettingsApp {
             s.set_value(init_process.clone(), window, cx);
             s
         });
+        let exe_input = cx.new(|cx| {
+            let mut s = InputState::new(window, cx)
+                .placeholder("Optional — /proc/<pid>/exe target, e.g. /opt/app/app");
+            s.set_value(init_exe.clone(), window, cx);
+            s
+        });
         let dest_input = cx.new(|cx| {
             let mut s = InputState::new(window, cx);
             s.set_value(init_dest_value.clone(), window, cx);
@@ -504,6 +514,7 @@ impl SettingsApp {
             Arc::new(Mutex::new(init_proc_priority));
 
         let proc_c = process_input.clone();
+        let exe_c = exe_input.clone();
         let dest_c = dest_input.clone();
         let action_c = selected_action.clone();
         let dur_c = selected_duration.clone();
@@ -584,6 +595,7 @@ impl SettingsApp {
 
             // Clones for on_ok
             let proc_i = proc_c.clone();
+            let exe_i = exe_c.clone();
             let dest_i = dest_c.clone();
             let route_ok = selected_route.clone();
             let action_ok = action_c.clone();
@@ -601,6 +613,12 @@ impl SettingsApp {
                         None
                     } else {
                         Some(process_raw.trim().to_string())
+                    };
+                    let exe_raw = exe_i.read(cx).value().trim().to_string();
+                    let process_exe = if exe_raw.is_empty() {
+                        None
+                    } else {
+                        Some(exe_raw)
                     };
                     let dest_val = dest_i.read(cx).value().trim().to_string();
                     let action = action_ok.lock().unwrap().clone();
@@ -638,7 +656,7 @@ impl SettingsApp {
                         action,
                         duration,
                         process_name,
-                        process_exe: None,
+                        process_exe,
                         destination,
                         egress_id,
                         priority: 0.0,
@@ -764,6 +782,21 @@ impl SettingsApp {
                                 .gap(px(4.))
                                 .child(field_label("PROCESS  (leave empty to match all)"))
                                 .child(Input::new(&proc_c)),
+                        )
+                        // Executable path — the identity that distinguishes apps
+                        // sharing a runtime name. Shown in full so the user can
+                        // verify/copy the exact binary.
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(field_label(
+                                    "EXECUTABLE PATH  (optional, exact /proc/<pid>/exe)",
+                                ))
+                                .child(Input::new(&exe_c))
+                                .child(div().text_size(px(10.)).text_color(colors::muted()).child(
+                                    "Required for Electron/AppRun rules: those names are \
+                                             shared by every bundled app.",
+                                )),
                         )
                         // Process priority — only for process+Any rules.
                         // A process rule with no destination has no specificity to

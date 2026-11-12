@@ -39,6 +39,13 @@ Every unit is testable in isolation. All OS/system effects behind traits. No rul
 - [x] **unknown-process + specific destination** (`IpExact`/`DomainExact`) → rule matches (proc-attribution race tolerance)
 - [x] **unknown-process safety negatives:** wildcard / `Any` / CIDR rules do **not** apply when the flow's process is unknown
 - [x] known-process *mismatch* (different name) still does not match a specific rule
+- [x] **changed exe path after an app update** still matches by `process_name` (no re-prompt, no duplicate rule)
+- [x] identical exe path still matches when the display name changed
+- [x] differing *both* name and exe still does not match
+- [x] exe-only rule (no `process_name`) still requires the exact path
+- [x] **shared runtime name (`electron`/`AppRun`) requires the exact exe** — a different Electron app with the same name does not inherit the rule
+- [x] **shared runtime name with no stored exe never matches by name alone** (no cross-app bleed from old rules)
+- [x] **shared runtime name still matches when the exe path is identical** (resolver later learns the real app name)
 
 ### `decision-engine`
 - [x] unknown flow creates pending decision

@@ -7,8 +7,7 @@
 
 use aya_ebpf::{
     helpers::{
-        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
-        bpf_probe_read_kernel,
+        bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns, bpf_probe_read_kernel,
     },
     macros::{kprobe, map},
     maps::LruHashMap,
@@ -68,8 +67,7 @@ pub struct SockInfo {
 /// that are still being classified (which would fall back to the racy
 /// /proc path and misattribute under load).
 #[map]
-static SOCK_EVENTS: LruHashMap<SockKey, SockInfo> =
-    LruHashMap::with_max_entries(65536, 0);
+static SOCK_EVENTS: LruHashMap<SockKey, SockInfo> = LruHashMap::with_max_entries(65536, 0);
 
 /// Secondary map keyed by (source port, protocol) ONLY. Unconnected UDP
 /// sockets (the common case: nc, DNS stubs, most one-shot clients) have
@@ -155,24 +153,39 @@ unsafe fn try_sock_tcp_connect(ctx: &ProbeContext) -> Result<(), ()> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let uid_gid = bpf_get_current_uid_gid();
 
-    let info = SockInfo {
-        pid: (pid_tgid >> 32) as u32,
-        uid: uid_gid as u32,
-        timestamp_ns: bpf_ktime_get_ns(),
-        comm: current_comm(),
-    };
+    // Build SockInfo field-by-field via volatile writes: a struct literal with
+    // a `[u8; 16]` array field lowers to llvm.memset, which bpf-linker >= 0.11
+    // rejects on the no_std eBPF target.
+    let mut info = core::mem::MaybeUninit::<SockInfo>::uninit();
+    unsafe {
+        core::ptr::write_volatile(&mut (*info.as_mut_ptr()).pid, (pid_tgid >> 32) as u32);
+        core::ptr::write_volatile(&mut (*info.as_mut_ptr()).uid, uid_gid as u32);
+        core::ptr::write_volatile(&mut (*info.as_mut_ptr()).timestamp_ns, bpf_ktime_get_ns());
+        core::ptr::copy_nonoverlapping(
+            current_comm().as_ptr(),
+            (*info.as_mut_ptr()).comm.as_mut_ptr(),
+            16,
+        );
+    }
+    let info = unsafe { info.assume_init() };
 
-    let mut key = SockKey {
-        src_ip: zeroed_ip16(),
-        src_port,
-        protocol: IPPROTO_TCP as u8,
-        _pad: 0,
-    };
+    // Build SockKey field-by-field for the same reason.
+    let mut key = core::mem::MaybeUninit::<SockKey>::uninit();
+    unsafe {
+        let kp = key.as_mut_ptr();
+        for i in 0..16 {
+            core::ptr::write_volatile(&mut (*kp).src_ip[i], 0);
+        }
+        core::ptr::write_volatile(&mut (*kp).src_port, src_port);
+        core::ptr::write_volatile(&mut (*kp).protocol, IPPROTO_TCP as u8);
+        core::ptr::write_volatile(&mut (*kp)._pad, 0);
+    }
+    let mut key = unsafe { key.assume_init() };
 
     if family == AF_INET as u16 {
         // IPv4: read 4-byte source address (network byte order).
-        let src_ip4: u32 = bpf_probe_read_kernel(sk_ptr.add(SKC_RCV_SADDR_OFF) as *const u32)
-            .map_err(|_| ())?;
+        let src_ip4: u32 =
+            bpf_probe_read_kernel(sk_ptr.add(SKC_RCV_SADDR_OFF) as *const u32).map_err(|_| ())?;
         // Normalize to IPv4-mapped IPv6.
         key.src_ip[10] = 0xff;
         key.src_ip[11] = 0xff;
@@ -238,36 +251,52 @@ unsafe fn try_sock_udp_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let uid_gid = bpf_get_current_uid_gid();
 
-    let info = SockInfo {
-        pid: (pid_tgid >> 32) as u32,
-        uid: uid_gid as u32,
-        timestamp_ns: bpf_ktime_get_ns(),
-        comm: current_comm(),
-    };
+    // Build SockInfo field-by-field via volatile writes: a struct literal with
+    // a `[u8; 16]` array field lowers to llvm.memset, which bpf-linker >= 0.11
+    // rejects on the no_std eBPF target.
+    let mut info = core::mem::MaybeUninit::<SockInfo>::uninit();
+    unsafe {
+        core::ptr::write_volatile(&mut (*info.as_mut_ptr()).pid, (pid_tgid >> 32) as u32);
+        core::ptr::write_volatile(&mut (*info.as_mut_ptr()).uid, uid_gid as u32);
+        core::ptr::write_volatile(&mut (*info.as_mut_ptr()).timestamp_ns, bpf_ktime_get_ns());
+        core::ptr::copy_nonoverlapping(
+            current_comm().as_ptr(),
+            (*info.as_mut_ptr()).comm.as_mut_ptr(),
+            16,
+        );
+    }
+    let info = unsafe { info.assume_init() };
 
     // Always record the port-only key — an in-flight ephemeral port uniquely
     // identifies the socket even when the source address is not yet known.
-    let port_key = PortKey {
-        src_port,
-        protocol: IPPROTO_UDP as u8,
-        _pad: 0,
-    };
+    let mut port_key = core::mem::MaybeUninit::<PortKey>::uninit();
+    unsafe {
+        core::ptr::write_volatile(&mut (*port_key.as_mut_ptr()).src_port, src_port);
+        core::ptr::write_volatile(&mut (*port_key.as_mut_ptr()).protocol, IPPROTO_UDP as u8);
+        core::ptr::write_volatile(&mut (*port_key.as_mut_ptr())._pad, 0);
+    }
+    let port_key = unsafe { port_key.assume_init() };
     let _ = PORT_PIDS.insert(&port_key, &info, 0);
 
     // Full key only when the socket actually has a source address. Unconnected
     // UDP sockets have rcv_saddr == 0.0.0.0 here (address chosen later, during
     // route lookup) — writing that as a full key would only pollute the map.
-    let mut key = SockKey {
-        src_ip: zeroed_ip16(),
-        src_port,
-        protocol: IPPROTO_UDP as u8,
-        _pad: 0,
-    };
+    let mut key = core::mem::MaybeUninit::<SockKey>::uninit();
+    unsafe {
+        let kp = key.as_mut_ptr();
+        for i in 0..16 {
+            core::ptr::write_volatile(&mut (*kp).src_ip[i], 0);
+        }
+        core::ptr::write_volatile(&mut (*kp).src_port, src_port);
+        core::ptr::write_volatile(&mut (*kp).protocol, IPPROTO_UDP as u8);
+        core::ptr::write_volatile(&mut (*kp)._pad, 0);
+    }
+    let mut key = unsafe { key.assume_init() };
 
     if family == AF_INET as u16 {
         // IPv4: read 4-byte source address.
-        let src_ip4: u32 = bpf_probe_read_kernel(sk_ptr.add(SKC_RCV_SADDR_OFF) as *const u32)
-            .map_err(|_| ())?;
+        let src_ip4: u32 =
+            bpf_probe_read_kernel(sk_ptr.add(SKC_RCV_SADDR_OFF) as *const u32).map_err(|_| ())?;
         if src_ip4 == 0 {
             // Unconnected socket — the port-only entry above covers it.
             return Ok(());
@@ -314,25 +343,18 @@ pub fn sock_udp_unhash(ctx: ProbeContext) -> u32 {
 /// /proc for the name, as before).
 #[inline(always)]
 fn current_comm() -> [u8; 16] {
-    match bpf_get_current_comm() {
-        Ok(comm) => comm,
-        Err(_) => [0u8; 16],
-    }
-}
-
-/// Build a zeroed 16-byte IP array via volatile writes: a plain `[0u8; 16]`
-/// literal lowers to llvm.memset, which bpf-linker >= 0.11 rejects on the
-/// no_std eBPF target.
-#[inline(always)]
-fn zeroed_ip16() -> [u8; 16] {
+    // Raw helper instead of aya's wrapper: the wrapper (`bpf_get_current_comm`)
+    // zero-inits a 16-byte stack buffer, which lowers to llvm.memset and
+    // bpf-linker >= 0.11 rejects it. The kernel helper NUL-pads on short
+    // names, so no pre-zeroing is needed.
     let mut buf = core::mem::MaybeUninit::<[u8; 16]>::uninit();
-    // SAFETY: we initialize every byte below before reading.
-    let p = buf.as_mut_ptr() as *mut u8;
-    for i in 0..16 {
-        unsafe { core::ptr::write_volatile(p.add(i), 0) };
+    unsafe {
+        let ret = aya_ebpf::helpers::generated::bpf_get_current_comm(buf.as_mut_ptr().cast(), 16);
+        if ret != 0 {
+            return [0u8; 16];
+        }
+        buf.assume_init()
     }
-    // SAFETY: [u8; 16] has no invalid bit patterns and all bytes are set.
-    unsafe { buf.assume_init() }
 }
 
 // Host-target test-mode builds (rust-analyzer) link std's panic_impl; only
