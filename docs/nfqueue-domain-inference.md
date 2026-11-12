@@ -10,6 +10,8 @@ When a packet arrives at the NFQUEUE, you have IP addresses and ports — not do
 
 `nslookup 1.2.3.4` is slow (network round-trip), unreliable (PTR records are rarely set correctly), and adds latency directly to the packet verdict path. Rule out immediately.
 
+> **What the cache actually did in production.** Shared anycast IPs and no-SNI clients (notably `ssh`) showed that an IP-keyed, process-agnostic cache can decide a connection with a domain that belongs to a different app. The measurements, the proven bad verdicts, and the provenance-based fix are in [`docs/investigations/2026-11-misattribution.md`](investigations/2026-11-misattribution.md).
+
 ## Why a DNS Snoop Cache Alone Doesn't Work
 
 The intuition: intercept DNS responses passing through NFQUEUE, parse A/AAAA answers, store `ip → domain`. Later, when a flow to that IP arrives, look it up.

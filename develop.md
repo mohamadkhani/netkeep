@@ -23,6 +23,7 @@ Read the relevant doc **before** writing code in that area. These docs record le
 | Domain inference (SNI/DNS) | [`docs/nfqueue-domain-inference.md`](docs/nfqueue-domain-inference.md) — SNI timing, TLS wire format |
 | Process resolution | [`docs/process-resolver.md`](docs/process-resolver.md) — /proc lookup chain, byte encoding, per-socket cache |
 | Proc-attribution races / dedup / policy fallback | [`docs/process-attribution-races.md`](docs/process-attribution-races.md) — the three layers that keep duplicate dialogs from leaking out |
+| Wrong process or destination in a verdict | [`docs/investigations/2026-11-misattribution.md`](docs/investigations/2026-11-misattribution.md) — field evidence for the IP→domain cache, pending fallback, `AttrCache`, and `sweep_pending`; fix stages |
 | Architecture / crate boundaries | [`docs/architecture.md`](docs/architecture.md) — components, data flow, design decisions |
 | GPUI async / entity model | [`docs/gpui-async.md`](docs/gpui-async.md) — spawn, background_executor, WeakEntity |
 | Unix socket protocol | [`docs/unix-sockets.md`](docs/unix-sockets.md) — framing, JSON-lines, request/response schema |

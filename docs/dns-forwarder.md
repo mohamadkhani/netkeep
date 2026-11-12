@@ -2,6 +2,8 @@
 
 Read this before modifying any DNS-related code.
 
+> **Related:** the forwarder's answers feed `SniDnsCache`, whose IP-only keying was a proven source of wrong destination attribution. See [`docs/investigations/2026-11-misattribution.md`](investigations/2026-11-misattribution.md).
+
 ## Problem
 
 When an app resolves a domain, the system DNS resolver is used — regardless of any routing rule that says the domain should go through a specific egress (proxy, tun, or device). The app therefore gets an IP that was resolved through the wrong path, and any subsequent TCP connection to that IP may fail or go through the wrong interface.

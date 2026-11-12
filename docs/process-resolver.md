@@ -3,6 +3,8 @@
 This document explains how Netkeep identifies which process owns an intercepted network connection, using the Linux `/proc` filesystem and optional system tools (`ss`, package managers).
 
 > **Adjacent reading.** Race interactions between this resolver, the decision engine, and the policy engine — and the three layers of defense that absorb them — are in [`docs/process-attribution-races.md`](process-attribution-races.md). Read that doc *too* if you are touching the resolver and the failure modes are not just an isolated parse bug.
+>
+> The resolver shares its port-only fallback (`PORT_PIDS`) with the destination pipeline described in [`docs/investigations/2026-11-misattribution.md`](investigations/2026-11-misattribution.md); that report also covers what happens when a process name is not missing but *wrong*.
 
 ---
 
