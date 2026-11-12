@@ -156,10 +156,59 @@ pub enum PushNotification {
     PendingResolved {
         pending_id: String,
         action: RuleAction,
+        /// Egress the decision routed through, when the resolving rule had one.
+        #[serde(default)]
+        egress_id: Option<String>,
+        /// Display name of that egress (falls back to the id when missing).
+        #[serde(default)]
+        egress_name: Option<String>,
     },
     PendingExpired {
         pending_id: String,
     },
+    PolicyMatch {
+        process_name: Option<String>,
+        destination_ip: String,
+        destination_port: u16,
+        destination_domain: Option<String>,
+        rule_id: String,
+        action: RuleAction,
+        /// Egress referenced by the matching rule, if any.
+        #[serde(default)]
+        egress_id: Option<String>,
+        /// Display name of that egress (falls back to the id when missing).
+        #[serde(default)]
+        egress_name: Option<String>,
+    },
+}
+
+impl PushNotification {
+    /// Group key for log dedup: (process_name, destination_ip:port).
+    pub fn group_key(&self) -> (Option<String>, String, u16) {
+        match self {
+            PushNotification::PolicyMatch {
+                process_name,
+                destination_ip,
+                destination_port,
+                ..
+            } => (
+                process_name.clone(),
+                destination_ip.clone(),
+                *destination_port,
+            ),
+            PushNotification::PendingCreated { decision } => (
+                decision.flow.process_name.clone(),
+                decision.flow.destination_ip.clone(),
+                decision.flow.destination_port,
+            ),
+            PushNotification::PendingResolved { pending_id, .. }
+            | PushNotification::PendingExpired { pending_id } => {
+                // Resolve/expire carry no flow; fall back to pending-id so
+                // the row still appears uniquely.
+                (None, pending_id.clone(), 0)
+            }
+        }
+    }
 }
 
 pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
@@ -341,6 +390,8 @@ mod tests {
         let notif = PushNotification::PendingResolved {
             pending_id: "p1".to_string(),
             action: RuleAction::Allow,
+            egress_id: None,
+            egress_name: None,
         };
         let json = serde_json::to_string(&notif).unwrap();
         assert!(json.contains("PendingResolved"));

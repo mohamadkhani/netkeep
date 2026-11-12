@@ -30,6 +30,8 @@ pub enum TrayAction {
     /// Open or raise the settings window. The optional token is the
     /// compositor-minted xdg-activation token to feed `activate_with_token`.
     Settings { token: Option<String> },
+    /// Open or raise the activity log viewer window.
+    LogViewer { token: Option<String> },
     /// Quit the whole app.
     Quit,
 }
@@ -113,6 +115,9 @@ impl Tray for LogiTray {
         let tx_manage = self.action_tx.clone();
         let token_for_manage = token.clone();
 
+        let tx_log = self.action_tx.clone();
+        let token_for_log = token.clone();
+
         let tx_enable = self.action_tx.clone();
         let tx_disable = self.action_tx.clone();
         let tx_quit = self.action_tx.clone();
@@ -133,6 +138,14 @@ impl Tray for LogiTray {
                 ..Default::default()
             }),
             MenuItem::Separator,
+            MenuItem::Standard(StandardItem {
+                label: "Activity Log…".into(),
+                activate: Box::new(move |_this| {
+                    let token = token_for_log.lock().ok().and_then(|mut g| g.take());
+                    let _ = tx_log.send(TrayAction::LogViewer { token });
+                }),
+                ..Default::default()
+            }),
             MenuItem::Standard(StandardItem {
                 label: "Settings…".into(),
                 activate: Box::new(move |_this| {

@@ -230,6 +230,14 @@ impl<R: Repository> ControlService<R> {
         first_available_target(&egress, &self.repo)
     }
 
+    /// Display name for an egress id, when the egress still exists. Log
+    /// notifications carry the name so the viewer can render it without
+    /// holding the egress list.
+    fn egress_name(&self, egress_id: &Option<String>) -> Option<String> {
+        let id = egress_id.as_deref()?;
+        self.repo.get_egress(id).map(|egress| egress.name)
+    }
+
     fn next_event_id(&mut self) -> String {
         self.event_counter += 1;
         format!("evt-{}", self.event_counter)
@@ -284,6 +292,19 @@ impl<R: Repository> ControlService<R> {
             flow.destination_port,
             flow.source_port
         );
+        // Also push a structured log event for clients that listen (e.g. the
+        // --log-viewer) so every request is captured, not just the first in a
+        // 5-min window. The UI groups by (process, destination_ip:port).
+        let _ = self.notification_tx.send(PushNotification::PolicyMatch {
+            process_name: flow.process_name.clone(),
+            destination_ip: flow.destination_ip.clone(),
+            destination_port: flow.destination_port,
+            destination_domain: flow.destination_domain.clone(),
+            rule_id: resolved.rule_id.clone(),
+            action: resolved.action.clone(),
+            egress_id: resolved.egress_id.clone(),
+            egress_name: self.egress_name(&resolved.egress_id),
+        });
     }
 
     pub fn handle(&mut self, request: ControlRequest) -> ControlResponse {
@@ -452,6 +473,8 @@ impl<R: Repository> ControlService<R> {
                         .send(PushNotification::PendingResolved {
                             pending_id: pending_id.clone(),
                             action: chosen.clone(),
+                            egress_id: None,
+                            egress_name: None,
                         });
                     ControlResponse::PendingResolved {
                         action: chosen,
@@ -482,11 +505,14 @@ impl<R: Repository> ControlService<R> {
                     } else {
                         None
                     };
+                    let egress_name = self.egress_name(&egress_id);
                     let _ = self
                         .notification_tx
                         .send(PushNotification::PendingResolved {
                             pending_id: pending_id.clone(),
                             action: chosen.clone(),
+                            egress_id: egress_id.clone(),
+                            egress_name,
                         });
                     ControlResponse::PendingResolved {
                         action: chosen,
@@ -666,11 +692,14 @@ impl<R: Repository> ControlService<R> {
                             resolved.egress_id.clone(),
                         );
                         self.repo.delete_pending(&p.id);
+                        let egress_name = self.egress_name(&resolved.egress_id);
                         let _ = self
                             .notification_tx
                             .send(PushNotification::PendingResolved {
                                 pending_id: p.id,
                                 action,
+                                egress_id: resolved.egress_id.clone(),
+                                egress_name,
                             });
                     }
                 }
