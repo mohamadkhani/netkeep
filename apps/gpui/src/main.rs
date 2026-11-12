@@ -3,6 +3,7 @@ mod colors;
 mod components;
 mod daemon;
 mod decision_dialog;
+mod first_run;
 mod fonts;
 mod monitor;
 mod settings;
@@ -87,6 +88,18 @@ fn run_tray_monitor() {
     let gc = gui_command.clone();
     std::thread::spawn(move || monitor::poll_decision_spawner(sp, gc));
 
+    // First-run / daemon-status check (#18): when the daemon is unreachable
+    // or this is the user's first launch, open the status window. Runs on a
+    // thread because the health check can block on the (dead) socket.
+    let (first_run_tx, first_run_rx) = std::sync::mpsc::channel::<bool>();
+    std::thread::spawn(move || {
+        let status = first_run::current_status();
+        let show_welcome = !first_run::welcome_marker_exists();
+        if status != first_run::DaemonStatus::Running || show_welcome {
+            let _ = first_run_tx.send(show_welcome);
+        }
+    });
+
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         // The tray must survive closing the settings window. Default QuitMode
@@ -105,6 +118,15 @@ fn run_tray_monitor() {
                 app.background_executor()
                     .timer(Duration::from_millis(50))
                     .await;
+                // First-run/status window request from the startup check.
+                while let Ok(show_welcome) = first_run_rx.try_recv() {
+                    app.update(|cx| {
+                        if show_welcome {
+                            first_run::mark_welcome_seen();
+                        }
+                        first_run::open_first_run_window(cx, show_welcome);
+                    });
+                }
                 while let Ok(action) = action_rx.try_recv() {
                     match action {
                         TrayAction::NfqueueEnable => {
