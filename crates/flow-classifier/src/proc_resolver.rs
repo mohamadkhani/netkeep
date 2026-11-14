@@ -232,6 +232,7 @@ impl ProcessResolver for ProcProcessResolver {
                     return Some(ProcessInfo {
                         name: entry.name.clone(),
                         exe: entry.exe.clone(),
+                        pid: entry.pid,
                         app_name: entry.app_name.clone(),
                     });
                 }
@@ -308,6 +309,7 @@ impl ProcessResolver for ProcProcessResolver {
         let info = ProcessInfo {
             name,
             exe: exe_path,
+            pid: Some(pid),
             app_name,
         };
 

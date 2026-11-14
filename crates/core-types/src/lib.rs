@@ -82,6 +82,37 @@ pub enum ProcessPriority {
     Low,
 }
 
+/// Provenance of `FlowContext::destination_domain`.
+///
+/// Only `Sni` and `Host` are *in-band* observations for this connection: the
+/// name was read from the packet being classified. Everything else is a prior
+/// or a hint, so it must never decide a TLS connection before the ClientHello
+/// arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum DomainSource {
+    /// No domain is known.
+    #[default]
+    None,
+    /// TLS `server_name` extension in this packet's ClientHello.
+    Sni,
+    /// `Host:` header in this packet's plaintext HTTP request.
+    Host,
+    /// Learned from DNS or from a shared cache hit — a prior for the IP, not
+    /// an observation for this connection.
+    Dns,
+    /// User-declared intent, e.g. `ssh user@host` from `/proc/<pid>/cmdline`.
+    Cmdline,
+}
+
+impl DomainSource {
+    /// Whether the name came from the packet being classified. In-band names
+    /// may resolve a flow immediately; every other source is deferred until
+    /// the ClientHello supplies the authoritative SNI.
+    pub fn is_in_band(self) -> bool {
+        matches!(self, DomainSource::Sni | DomainSource::Host)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowContext {
     pub process_name: Option<String>,
@@ -98,6 +129,10 @@ pub struct FlowContext {
     pub destination_ip: String,
     pub destination_port: u16,
     pub destination_domain: Option<String>,
+    /// Where `destination_domain` came from. Defaults to `None` for rows and
+    /// pending decisions written before provenance existed.
+    #[serde(default)]
+    pub domain_source: DomainSource,
     pub protocol: TransportProtocol,
     pub direction: FlowDirection,
     pub device_label: Option<String>,

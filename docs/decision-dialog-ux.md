@@ -4,6 +4,8 @@ This document defines the interaction design of the Netkeep connection decision 
 
 The reference visual is `design/decision_dialog_window.html`.
 
+> **Failure context.** The dialog copies `flow.process_name` and `flow.destination_domain` verbatim and defaults to `Permanent`, so any upstream misattribution becomes a durable rule. The field evidence, the sweep amplification, and the proposed provenance UI are in [`docs/investigations/2026-11-misattribution.md`](investigations/2026-11-misattribution.md).
+
 ---
 
 ## Dialog Structure

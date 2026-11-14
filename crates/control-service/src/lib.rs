@@ -31,6 +31,20 @@ impl PolicyLogKey {
     }
 }
 
+/// Two flows belong to the same app when their exe paths match, or — when
+/// either side lacks an exe path — their display names match. An unknown
+/// identity on either side never proves a match, so an unattributed flow is
+/// never treated as "the same process" as anything.
+fn same_process_identity(a: &FlowContext, b: &FlowContext) -> bool {
+    match (a.process_exe.as_deref(), b.process_exe.as_deref()) {
+        (Some(left), Some(right)) => left == right,
+        _ => match (a.process_name.as_deref(), b.process_name.as_deref()) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        },
+    }
+}
+
 /// Callback returning the fwmark to use for a `RouteTarget`, if any.
 type RouteMarkFn = Box<dyn Fn(&RouteTarget) -> Option<u32> + Send>;
 
@@ -343,16 +357,22 @@ impl<R: Repository> ControlService<R> {
 
         let response = match request {
             ControlRequest::AddRule(rule) => {
+                let rule_id = rule.id.clone();
                 self.add_rule_with_seeded_priority(rule, ProcessPriority::High);
-                self.sweep_pending();
+                if let Some(installed) = self.repo.get_rule(&rule_id) {
+                    self.sweep_pending(&installed, None, None);
+                }
                 ControlResponse::Ok
             }
             ControlRequest::AddRuleWithProcessPriority {
                 rule,
                 process_priority,
             } => {
+                let rule_id = rule.id.clone();
                 self.add_rule_with_seeded_priority(rule, process_priority);
-                self.sweep_pending();
+                if let Some(installed) = self.repo.get_rule(&rule_id) {
+                    self.sweep_pending(&installed, None, None);
+                }
                 ControlResponse::Ok
             }
             ControlRequest::MoveRule {
@@ -489,12 +509,18 @@ impl<R: Repository> ControlService<R> {
                 action,
                 rule,
             } => {
-                // Install the rule first, then sweep: any other pending decisions
-                // already in the queue that the new rule covers are auto-resolved
-                // without showing additional dialogs.
+                // Install the rule first, then sweep: any other pending
+                // decision already in the queue that this rule covers *for
+                // the same process* is auto-resolved without showing another
+                // dialog. The answered pending is excluded — it is resolved
+                // explicitly below with the user's chosen action.
                 let egress_id = rule.egress_id.clone();
+                let rule_id = rule.id.clone();
+                let answered = self.decision_engine.pending_flow(&pending_id).cloned();
                 self.add_rule_with_seeded_priority(rule, ProcessPriority::High);
-                self.sweep_pending();
+                if let Some(installed) = self.repo.get_rule(&rule_id) {
+                    self.sweep_pending(&installed, answered.as_ref(), Some(&pending_id));
+                }
                 if let Some(chosen) =
                     self.decision_engine
                         .resolve_pending(&pending_id, action, egress_id.clone())
@@ -670,40 +696,91 @@ impl<R: Repository> ControlService<R> {
         response
     }
 
-    /// Re-evaluate all pending decisions against the current rule set.
-    /// Any pending flow that now matches a non-Ask rule is auto-resolved immediately,
-    /// so the user is never shown a dialog for a flow already covered by a rule they
-    /// just created (e.g. "allow chromium → any" sweeps all other chromium pendings).
-    fn sweep_pending(&mut self) {
+    /// Re-evaluate pending decisions against the rule just installed.
+    ///
+    /// A sweep may only resolve a pending that satisfies all three:
+    ///
+    /// 1. the installed rule matches it ([`policy_engine::rule_matches`]);
+    /// 2. it resolves to *that* rule under current precedence — a different,
+    ///    higher-priority rule's verdict is not what the user just chose;
+    /// 3. it belongs to the same proven process as the answered flow.
+    ///
+    /// Anything else needs its own dialog. A rule for `brave → example.com`
+    /// must never answer a pending for `ssh → 1.2.3.4`, which is how rules
+    /// were previously applied to `(process, destination)` pairs that never
+    /// occurred together.
+    ///
+    /// `answered` is the flow whose dialog the user just answered. When it is
+    /// `None` the rule came from settings or the CLI, so the rule itself must
+    /// pin the process for a pending to inherit it; a process-agnostic rule
+    /// sweeps nothing.
+    fn sweep_pending(
+        &mut self,
+        installed: &Rule,
+        answered: Option<&FlowContext>,
+        skip_pending: Option<&str>,
+    ) {
+        // An Ask rule decides nothing, so there is nothing to inherit.
+        if installed.action == RuleAction::Ask {
+            return;
+        }
+        if answered.is_none() && installed.process_name.is_none() && installed.process_exe.is_none()
+        {
+            return;
+        }
+
         let rules = self.repo.list_rules();
         let pending = self.decision_engine.list_pending();
+        let mut swept: u64 = 0;
         for p in pending {
-            if let Some(resolved) = resolve_action(&rules, &p.flow) {
-                match resolved.action {
-                    RuleAction::Ask => continue,
-                    action => {
-                        eprintln!(
-                            "sweep_pending: auto-resolving {} ({:?} → {:?})",
-                            p.id, p.flow.process_name, action
-                        );
-                        self.decision_engine.resolve_pending(
-                            &p.id,
-                            action.clone(),
-                            resolved.egress_id.clone(),
-                        );
-                        self.repo.delete_pending(&p.id);
-                        let egress_name = self.egress_name(&resolved.egress_id);
-                        let _ = self
-                            .notification_tx
-                            .send(PushNotification::PendingResolved {
-                                pending_id: p.id,
-                                action,
-                                egress_id: resolved.egress_id.clone(),
-                                egress_name,
-                            });
-                    }
+            if skip_pending == Some(p.id.as_str()) {
+                continue;
+            }
+            // Only the app whose dialog was answered may inherit the answer.
+            // Without an answered flow, `rule_matches` already proved the
+            // process, because the rule pins one (checked above).
+            if let Some(answered) = answered {
+                if !same_process_identity(answered, &p.flow) {
+                    continue;
                 }
             }
+            if !policy_engine::rule_matches(installed, &p.flow) {
+                continue;
+            }
+            let Some(resolved) = resolve_action(&rules, &p.flow) else {
+                continue;
+            };
+            if resolved.rule_id != installed.id {
+                continue;
+            }
+            eprintln!(
+                "sweep_pending: auto-resolving {} ({:?} → {:?}) via rule {} domain={:?} source={:?}",
+                p.id,
+                p.flow.process_name,
+                resolved.action,
+                installed.id,
+                p.flow.destination_domain,
+                p.flow.domain_source
+            );
+            swept += 1;
+            self.decision_engine.resolve_pending(
+                &p.id,
+                resolved.action.clone(),
+                resolved.egress_id.clone(),
+            );
+            self.repo.delete_pending(&p.id);
+            let egress_name = self.egress_name(&resolved.egress_id);
+            let _ = self
+                .notification_tx
+                .send(PushNotification::PendingResolved {
+                    pending_id: p.id,
+                    action: resolved.action,
+                    egress_id: resolved.egress_id,
+                    egress_name,
+                });
+        }
+        if swept > 0 {
+            counter!("netkeep.pending.swept").increment(swept);
         }
     }
 
@@ -897,16 +974,19 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                 RuleAction::Ask => {}
             }
         }
-        // Defer unknown TLS connections classified on their SYN. The SYN
-        // carries no ClientHello, so `destination_domain` is unknowable —
-        // and opening the pending now would both show the user a bare IP
-        // and DROP the SYN, blocking the handshake so SNI could never
-        // arrive. Accept the bare handshake instead: the ClientHello is
-        // re-classified (pending verdicts are never cached) and either
-        // matches a rule by hostname — no dialog at all — or opens the
-        // pending with the real domain. No payload flows before a real
-        // verdict: the ClientHello itself is the first gated packet.
-        if flow.destination_domain.is_none()
+        // Defer unknown TLS connections until the name is in-band. A SYN
+        // carries no ClientHello, so any domain on it is only a DNS/cache
+        // prior — possibly learned from another app on the same anycast IP.
+        // Opening the pending now would both show the user a name this
+        // connection never presented and DROP the SYN, blocking the handshake
+        // so SNI could never arrive. Only `Sni`/`Host` (read from the packet
+        // being classified) may decide the flow; everything else defers.
+        // Accept the bare handshake instead: the ClientHello is re-classified
+        // (pending verdicts are never cached) and either matches a rule by
+        // hostname — no dialog at all — or opens the pending with the real
+        // domain. No payload flows before a real verdict: the ClientHello
+        // itself is the first gated packet.
+        if !(flow.domain_source.is_in_band() && flow.destination_domain.is_some())
             && flow.protocol == TransportProtocol::Tcp
             && flow.destination_port == 443
             && flow.tcp_syn
@@ -947,8 +1027,8 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
 mod tests {
     use control_api::{ControlRequest, ControlResponse};
     use core_types::{
-        DestinationMatcher, FlowContext, FlowDirection, ProcessPriority, Rule, RuleAction,
-        RuleDuration, TransportProtocol,
+        DestinationMatcher, DomainSource, FlowContext, FlowDirection, ProcessPriority, Rule,
+        RuleAction, RuleDuration, TransportProtocol,
     };
     use state_store::InMemoryRuleRepository;
 
@@ -980,6 +1060,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -1001,6 +1082,7 @@ mod tests {
         let mut service = ControlService::new(InMemoryRuleRepository::default());
         let mut flow = mk_flow();
         flow.destination_domain = None;
+        flow.domain_source = DomainSource::None;
         flow.tcp_syn = true;
 
         match service.register(flow, 1000) {
@@ -1046,6 +1128,7 @@ mod tests {
 
         let mut syn = mk_flow();
         syn.destination_domain = None;
+        syn.domain_source = DomainSource::None;
         syn.tcp_syn = true;
         assert!(matches!(
             service.register(syn, 1000),
@@ -1070,12 +1153,48 @@ mod tests {
         let mut service = ControlService::new(InMemoryRuleRepository::default());
         let mut flow = mk_flow();
         flow.destination_domain = None;
+        flow.domain_source = DomainSource::None;
         flow.tcp_syn = true;
         flow.destination_port = 8080;
 
         match service.register(flow, 1000) {
             FlowDecision::Pending { .. } => {}
             other => panic!("expected Pending on non-443, got {other:?}"),
+        }
+    }
+
+    /// A name that came only from DNS (or from a cache hit) is a prior for the
+    /// IP, not an observation for this connection: the SYN must still defer
+    /// until the ClientHello supplies the real SNI.
+    #[test]
+    fn dns_only_domain_defers_syn() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let mut flow = mk_flow();
+        flow.destination_domain = Some("api.zed.dev".to_string());
+        flow.domain_source = DomainSource::Dns;
+        flow.tcp_syn = true;
+
+        assert!(
+            matches!(service.register(flow, 1000), FlowDecision::DeferSni),
+            "a cached/DNS name must not decide a TLS connection"
+        );
+        assert!(service.decision_engine.list_pending().is_empty());
+    }
+
+    /// In-band names read from the packet itself (SNI / HTTP Host) are
+    /// authoritative and must not be deferred.
+    #[test]
+    fn in_band_domain_does_not_defer() {
+        for source in [DomainSource::Sni, DomainSource::Host] {
+            let mut service = ControlService::new(InMemoryRuleRepository::default());
+            let mut flow = mk_flow();
+            flow.domain_source = source;
+            flow.tcp_syn = true;
+
+            assert!(
+                matches!(service.register(flow, 1000), FlowDecision::Pending { .. }),
+                "in-band {source:?} must open the pending immediately"
+            );
         }
     }
 
@@ -1500,5 +1619,159 @@ mod tests {
         });
         let live = service.repo.list_live_pending(10);
         assert!(live.is_empty());
+    }
+
+    // -------------------------------------------------------------------
+    // Pending sweep scoping (Stage 1 item 3)
+    //
+    // A rule installed from a dialog may answer other pendings, but only
+    // those of the same proven process that the rule itself covers. Before
+    // this, every pending matching *any* rule was silently resolved, which is
+    // how `ssh → models.dev` was created without an ssh dialog.
+    // -------------------------------------------------------------------
+
+    fn flow_for(process: &str, domain: &str, src_port: u16) -> FlowContext {
+        let mut flow = mk_flow();
+        flow.process_name = Some(process.to_string());
+        flow.source_port = src_port;
+        flow.destination_domain = Some(domain.to_string());
+        if domain != "example.com" {
+            flow.destination_ip = format!("93.184.216.{src_port}");
+        }
+        flow
+    }
+
+    fn create_pending(
+        service: &mut ControlService<InMemoryRuleRepository>,
+        flow: FlowContext,
+    ) -> String {
+        match service.handle(ControlRequest::RegisterUnknownFlow { flow, now_secs: 10 }) {
+            ControlResponse::PendingCreated { pending_id, .. } => pending_id,
+            other => panic!("expected a pending decision, got {other:?}"),
+        }
+    }
+
+    fn any_destination_rule(id: &str, process: Option<&str>, action: RuleAction) -> Rule {
+        let mut rule = mk_rule(id);
+        rule.action = action;
+        rule.process_name = process.map(str::to_string);
+        rule.destination = DestinationMatcher::Any;
+        rule
+    }
+
+    #[test]
+    fn answered_dialog_only_sweeps_pendings_of_the_same_process() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let curl_pending = create_pending(&mut service, flow_for("curl", "example.com", 41001));
+        let ssh_pending = create_pending(&mut service, flow_for("ssh", "shell.example", 41002));
+
+        // Answer the curl dialog with "always allow curl".
+        let rule = any_destination_rule("ui-curl", Some("curl"), RuleAction::Allow);
+        let response = service.handle(ControlRequest::ResolvePendingWithRule {
+            pending_id: curl_pending,
+            action: RuleAction::Allow,
+            rule,
+        });
+        assert!(
+            matches!(response, ControlResponse::PendingResolved { .. }),
+            "the answered pending must still resolve directly, got {response:?}"
+        );
+
+        assert!(
+            service.decision_engine.is_pending(&ssh_pending),
+            "a rule answered for curl must never resolve an ssh dialog"
+        );
+        let live: Vec<Option<String>> = service
+            .decision_engine
+            .list_pending()
+            .into_iter()
+            .map(|p| p.flow.process_name)
+            .collect();
+        assert_eq!(live, vec![Some("ssh".to_string())]);
+    }
+
+    #[test]
+    fn answered_dialog_sweeps_other_pendings_of_the_same_process() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let first = create_pending(&mut service, flow_for("curl", "example.com", 41011));
+        let second = create_pending(&mut service, flow_for("curl", "other.example", 41012));
+
+        let rule = any_destination_rule("ui-curl", Some("curl"), RuleAction::Allow);
+        service.handle(ControlRequest::ResolvePendingWithRule {
+            pending_id: first,
+            action: RuleAction::Allow,
+            rule,
+        });
+
+        assert!(
+            service.decision_engine.list_pending().is_empty(),
+            "the second curl dialog inherits the answered curl rule"
+        );
+        assert!(!service.decision_engine.is_pending(&second));
+    }
+
+    #[test]
+    fn sweep_skips_pendings_the_installed_rule_does_not_cover() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let answered = create_pending(&mut service, flow_for("curl", "example.com", 41021));
+        let other_domain = create_pending(&mut service, flow_for("curl", "other.example", 41022));
+
+        // The rule covers example.com only (mk_rule's default destination).
+        let mut rule = mk_rule("ui-curl-example");
+        rule.process_name = Some("curl".to_string());
+
+        service.handle(ControlRequest::ResolvePendingWithRule {
+            pending_id: answered,
+            action: RuleAction::Allow,
+            rule,
+        });
+
+        assert!(
+            service.decision_engine.is_pending(&other_domain),
+            "a rule for example.com must not answer the other.example dialog"
+        );
+        let remaining: Vec<Option<String>> = service
+            .decision_engine
+            .list_pending()
+            .into_iter()
+            .map(|p| p.flow.destination_domain)
+            .collect();
+        assert_eq!(remaining, vec![Some("other.example".to_string())]);
+    }
+
+    #[test]
+    fn settings_rule_without_a_process_sweeps_nothing() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let pending = create_pending(&mut service, flow_for("curl", "example.com", 41031));
+
+        service.handle(ControlRequest::AddRule(any_destination_rule(
+            "ui-any",
+            None,
+            RuleAction::Allow,
+        )));
+
+        assert!(
+            service.decision_engine.is_pending(&pending),
+            "a process-agnostic rule may not decide an unknown app's dialog"
+        );
+    }
+
+    #[test]
+    fn settings_rule_pinned_to_a_process_sweeps_that_process_only() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let curl_pending = create_pending(&mut service, flow_for("curl", "example.com", 41041));
+        let ssh_pending = create_pending(&mut service, flow_for("ssh", "shell.example", 41042));
+
+        service.handle(ControlRequest::AddRule(any_destination_rule(
+            "ui-curl",
+            Some("curl"),
+            RuleAction::Allow,
+        )));
+
+        assert!(!service.decision_engine.is_pending(&curl_pending));
+        assert!(
+            service.decision_engine.is_pending(&ssh_pending),
+            "a curl rule must never answer an ssh dialog"
+        );
     }
 }

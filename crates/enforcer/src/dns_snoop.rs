@@ -56,10 +56,15 @@ impl DnsSnoopWorker {
                             counter!("netkeep.dns.snoop.parse_success").increment(1);
                             let count = entries.len() as u64;
                             for (ip, domain, ttl) in entries {
-                                self.dns_cache.insert_with_ttl(
+                                // Passive snoop has no process identity; the
+                                // entry is unowned and only served when the
+                                // IP carries a single live name.
+                                self.dns_cache.insert_dns(
                                     ip.to_string(),
                                     domain,
-                                    Some(u64::from(ttl)),
+                                    u64::from(ttl),
+                                    None,
+                                    None,
                                 );
                             }
                             counter!("netkeep.dns.snoop.entries_learned").increment(count);

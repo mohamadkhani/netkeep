@@ -231,6 +231,11 @@ fn build_request(cmd: args::Command) -> Result<ControlRequest, CliError> {
             now_secs,
         } => {
             let domain = domain.filter(|d| d != "-");
+            let domain_source = if domain.is_some() {
+                core_types::DomainSource::Cmdline
+            } else {
+                core_types::DomainSource::None
+            };
             let flow = core_types::FlowContext {
                 process_name: Some(process),
                 process_exe: None,
@@ -240,6 +245,7 @@ fn build_request(cmd: args::Command) -> Result<ControlRequest, CliError> {
                 destination_ip: ip,
                 destination_port: 443,
                 destination_domain: domain,
+                domain_source,
                 protocol: protocol.into_transport(),
                 direction: core_types::FlowDirection::Outbound,
                 device_label: None,
