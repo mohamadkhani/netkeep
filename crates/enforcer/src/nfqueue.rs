@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use core_types::{RuleAction, TransportProtocol};
+use core_types::{DomainSource, RuleAction, TransportProtocol};
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
 use flow_classifier::diag;
 use flow_classifier::sni::{
@@ -42,7 +42,31 @@ struct CachedProcessAttr {
     process_name: String,
     process_exe: Option<String>,
     app_name: Option<String>,
+    pid: Option<u32>,
     expires_at: u64,
+    /// Tombstone: this key was seen serving two different processes and must
+    /// not restore anyone until it expires.
+    poisoned: bool,
+}
+
+impl CachedProcessAttr {
+    /// Whether two resolutions name the same process. The pid is the
+    /// strongest signal, then the executable path, and only then the display
+    /// name — two different pids under the same program name are still two
+    /// owners, and one of them may be a recycled port.
+    fn same_identity(&self, other: &CachedProcessAttr) -> bool {
+        if let (Some(a), Some(b)) = (self.pid, other.pid) {
+            if a != b {
+                return false;
+            }
+        }
+        if let (Some(a), Some(b)) = (&self.process_exe, &other.process_exe) {
+            if a != b {
+                return false;
+            }
+        }
+        self.process_name == other.process_name
+    }
 }
 
 /// IP-based attribution cache TTL and cap.
@@ -95,7 +119,9 @@ impl AttrCache {
             process_name: proc.name.clone(),
             process_exe: proc.exe.clone(),
             app_name: proc.app_name.clone(),
+            pid: proc.pid,
             expires_at: now_secs + PROC_ATTR_TTL_SECS,
+            poisoned: false,
         };
         if self.proc_attr.len() >= PROC_ATTR_MAX {
             self.proc_attr.retain(|_, v| v.expires_at > now_secs);
@@ -119,6 +145,8 @@ impl AttrCache {
                     process_name: proc.name.clone(),
                     process_exe: proc.exe.clone(),
                     app_name: proc.app_name.clone(),
+                    pid: proc.pid,
+                    poisoned: false,
                 },
                 now_secs,
             );
@@ -126,68 +154,94 @@ impl AttrCache {
     }
 
     /// Insert `entry` under `key` unless the key is live and held by a
-    /// different process — in that case remove it entirely: the key can
-    /// never prove which process a future unresolved packet belongs to.
+    /// different process — in that case poison the key for the rest of its
+    /// TTL: the key can never prove which process a future unresolved packet
+    /// belongs to, and letting the next successful resolve refill it would
+    /// reintroduce the same oscillation.
     fn insert_unless_ambiguous(
         map: &mut HashMap<(String, u16), CachedProcessAttr>,
         key: (String, u16),
         entry: CachedProcessAttr,
         now_secs: u64,
     ) {
-        if let Some(existing) = map.get(&key) {
-            if existing.expires_at > now_secs && existing.process_name != entry.process_name {
+        let existing = map.get(&key).filter(|e| e.expires_at > now_secs).cloned();
+        if let Some(existing) = existing {
+            if existing.poisoned {
+                // Already ambiguous for this TTL window — never refill.
+                return;
+            }
+            if !existing.same_identity(&entry) {
                 diag!(
-                    "layer0 key {key:?} AMBIGUOUS ({} vs {}) — entry dropped; \
+                    "layer0 key {key:?} AMBIGUOUS ({} pid={:?} vs {} pid={:?}) — \
+                     key poisoned for the rest of its TTL; \
                      future resolver misses on this destination stay unknown",
                     existing.process_name,
-                    entry.process_name
+                    existing.pid,
+                    entry.process_name,
+                    entry.pid
                 );
-                map.remove(&key);
+                let mut tombstone = entry;
+                tombstone.expires_at = tombstone.expires_at.max(existing.expires_at);
+                tombstone.poisoned = true;
+                map.insert(key, tombstone);
                 return;
             }
         }
         map.insert(key, entry);
     }
 
-    /// Restore attribution for an unresolved packet. IP cache first, then
-    /// domain cache. Returns `None` when both miss or the key was poisoned
-    /// as ambiguous.
+    /// Restore attribution for an unresolved packet.
+    ///
+    /// With an in-band domain the `(domain, port)` key is the stronger
+    /// identity on shared/anycast addresses, so it is consulted first; the IP
+    /// key is the fallback. Without one, the IP key keeps its old priority.
+    /// Returns `None` when every candidate misses, has expired, or is a
+    /// poisoned ambiguity tombstone.
     fn restore(
         &mut self,
         dst_ip: &str,
         dst_port: u16,
         domain: Option<&str>,
+        in_band_domain: bool,
         now_secs: u64,
     ) -> Option<CachedProcessAttr> {
         let ip_key = (dst_ip.to_string(), dst_port);
-        let cached_ip = self
-            .proc_attr
-            .get(&ip_key)
-            .filter(|c| c.expires_at > now_secs)
-            .cloned();
-        if cached_ip.is_none() {
-            self.proc_attr.remove(&ip_key);
-        }
-        if cached_ip.is_some() {
-            return cached_ip;
+        let domain_key = domain.map(|d| (d.to_string(), dst_port));
+
+        if in_band_domain {
+            if let Some(dk) = &domain_key {
+                if let Some(hit) = live_entry(&mut self.domain_proc_attr, dk, now_secs) {
+                    return Some(hit);
+                }
+            }
+            return live_entry(&mut self.proc_attr, &ip_key, now_secs);
         }
 
-        domain.and_then(|d| {
-            let dk = (d.to_string(), dst_port);
-            let cached_dom = self
-                .domain_proc_attr
-                .get(&dk)
-                .filter(|c| c.expires_at > now_secs)
-                .cloned();
-            if cached_dom.is_none() {
-                self.domain_proc_attr.remove(&dk);
-            }
-            cached_dom
-        })
+        if let Some(hit) = live_entry(&mut self.proc_attr, &ip_key, now_secs) {
+            return Some(hit);
+        }
+        domain_key.and_then(|dk| live_entry(&mut self.domain_proc_attr, &dk, now_secs))
     }
 
     fn len(&self) -> (usize, usize) {
         (self.proc_attr.len(), self.domain_proc_attr.len())
+    }
+}
+
+/// Look up a live, non-poisoned entry, pruning the key when it is dead.
+fn live_entry(
+    map: &mut HashMap<(String, u16), CachedProcessAttr>,
+    key: &(String, u16),
+    now_secs: u64,
+) -> Option<CachedProcessAttr> {
+    let entry = map.get(key).filter(|c| c.expires_at > now_secs).cloned();
+    match entry {
+        None => {
+            map.remove(key);
+            None
+        }
+        Some(c) if c.poisoned => None,
+        Some(c) => Some(c),
     }
 }
 
@@ -523,10 +577,22 @@ where
             raw.tcp_fin,
             raw.tcp_rst
         );
-        if let Some(sni) = &raw.sni_hint {
-            self.dns_cache.insert(&raw.dst_ip, sni);
-        }
         let mut flow = self.classifier.classify(raw);
+
+        // Record the in-band hint with the live process identity. Inserting
+        // after classification keeps the binding scoped to the process that
+        // actually owns this socket, and the port keeps an HTTPS name from
+        // describing an unrelated non-TLS connection to the same IP.
+        if let Some(sni) = &raw.sni_hint {
+            self.dns_cache.insert_in_band(
+                raw.dst_ip.clone(),
+                raw.dst_port,
+                sni.clone(),
+                raw.domain_hint_source,
+                flow.process_name.as_deref(),
+                flow.process_exe.as_deref(),
+            );
+        }
 
         if flow.process_name.is_none() {
             // Live resolution failed for this packet. Layer-0 can only
@@ -539,6 +605,7 @@ where
                     &raw.dst_ip,
                     raw.dst_port,
                     flow.destination_domain.as_deref(),
+                    flow.domain_source.is_in_band(),
                     now_secs,
                 ) {
                     let cache_kind = "ip|domain";
@@ -571,6 +638,7 @@ where
                     name: flow.process_name.clone().unwrap_or_default(),
                     exe: flow.process_exe.clone(),
                     app_name: flow.app_name.clone(),
+                    pid: None,
                 },
                 now_secs,
             );
@@ -738,76 +806,107 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         }
     };
 
-    let (src_port, dst_port, protocol, sni_hint, tcp_payload_empty, tcp_fin, tcp_rst, tcp_syn) =
-        match sliced.transport.as_ref() {
-            Some(TransportSlice::Tcp(t)) => {
-                let payload = t.payload();
-                let domain_hint = if payload.is_empty() {
-                    None
-                } else if is_tls_clienthello_packet(payload) {
-                    let extract_start = Instant::now();
-                    counter!("netkeep.sni.extraction.attempts", "kind" => "tls").increment(1);
-                    let hint = if let Some(sni) = extract_tls_sni(payload) {
-                        counter!("netkeep.sni.extraction.success", "source" => "tls").increment(1);
-                        Some(sni)
-                    } else {
-                        counter!("netkeep.sni.extraction.missed", "kind" => "tls").increment(1);
-                        None
-                    };
-                    histogram!("netkeep.sni.extraction.duration")
-                        .record(extract_start.elapsed().as_secs_f64());
-                    hint
-                } else if starts_with_http_method(payload) {
-                    let extract_start = Instant::now();
-                    counter!("netkeep.sni.extraction.attempts", "kind" => "http").increment(1);
-                    let hint = if let Some(host) = extract_http_host(payload) {
-                        counter!("netkeep.sni.extraction.success", "source" => "http_host")
-                            .increment(1);
-                        Some(host)
-                    } else {
-                        counter!("netkeep.sni.extraction.missed", "kind" => "http").increment(1);
-                        None
-                    };
-                    histogram!("netkeep.sni.extraction.duration")
-                        .record(extract_start.elapsed().as_secs_f64());
-                    hint
+    let (
+        src_port,
+        dst_port,
+        protocol,
+        sni_hint,
+        domain_hint_source,
+        tcp_payload_empty,
+        tcp_fin,
+        tcp_rst,
+        tcp_syn,
+    ) = match sliced.transport.as_ref() {
+        Some(TransportSlice::Tcp(t)) => {
+            let payload = t.payload();
+            let (domain_hint, hint_source) = if payload.is_empty() {
+                (None, DomainSource::None)
+            } else if is_tls_clienthello_packet(payload) {
+                let extract_start = Instant::now();
+                counter!("netkeep.sni.extraction.attempts", "kind" => "tls").increment(1);
+                let hint = if let Some(sni) = extract_tls_sni(payload) {
+                    counter!("netkeep.sni.extraction.success", "source" => "tls").increment(1);
+                    Some(sni)
                 } else {
-                    // Encrypted TLS app data, ServerHello, SSH, etc. — not extractable.
-                    counter!("netkeep.sni.extraction.skipped").increment(1);
+                    counter!("netkeep.sni.extraction.missed", "kind" => "tls").increment(1);
                     None
                 };
-                (
-                    t.source_port(),
-                    t.destination_port(),
-                    TransportProtocol::Tcp,
-                    domain_hint,
-                    payload.is_empty(),
-                    t.fin(),
-                    t.rst(),
-                    t.syn(),
-                )
-            }
-            Some(TransportSlice::Udp(u)) => {
-                let (sp, dp) = (u.source_port(), u.destination_port());
-                // Best-effort QUIC detection: UDP to/from port 443.
-                let proto = if dp == 443 || sp == 443 {
-                    TransportProtocol::Quic
+                histogram!("netkeep.sni.extraction.duration")
+                    .record(extract_start.elapsed().as_secs_f64());
+                let source = if hint.is_some() {
+                    DomainSource::Sni
                 } else {
-                    TransportProtocol::Udp
+                    DomainSource::None
                 };
-                (sp, dp, proto, None, false, false, false, false)
-            }
-            _ => (
-                0,
-                0,
-                TransportProtocol::Other,
+                (hint, source)
+            } else if starts_with_http_method(payload) {
+                let extract_start = Instant::now();
+                counter!("netkeep.sni.extraction.attempts", "kind" => "http").increment(1);
+                let hint = if let Some(host) = extract_http_host(payload) {
+                    counter!("netkeep.sni.extraction.success", "source" => "http_host")
+                        .increment(1);
+                    Some(host)
+                } else {
+                    counter!("netkeep.sni.extraction.missed", "kind" => "http").increment(1);
+                    None
+                };
+                histogram!("netkeep.sni.extraction.duration")
+                    .record(extract_start.elapsed().as_secs_f64());
+                let source = if hint.is_some() {
+                    DomainSource::Host
+                } else {
+                    DomainSource::None
+                };
+                (hint, source)
+            } else {
+                // Encrypted TLS app data, ServerHello, SSH, etc. — not extractable.
+                counter!("netkeep.sni.extraction.skipped").increment(1);
+                (None, DomainSource::None)
+            };
+            (
+                t.source_port(),
+                t.destination_port(),
+                TransportProtocol::Tcp,
+                domain_hint,
+                hint_source,
+                payload.is_empty(),
+                t.fin(),
+                t.rst(),
+                t.syn(),
+            )
+        }
+        Some(TransportSlice::Udp(u)) => {
+            let (sp, dp) = (u.source_port(), u.destination_port());
+            // Best-effort QUIC detection: UDP to/from port 443.
+            let proto = if dp == 443 || sp == 443 {
+                TransportProtocol::Quic
+            } else {
+                TransportProtocol::Udp
+            };
+            (
+                sp,
+                dp,
+                proto,
                 None,
+                DomainSource::None,
                 false,
                 false,
                 false,
                 false,
-            ),
-        };
+            )
+        }
+        _ => (
+            0,
+            0,
+            TransportProtocol::Other,
+            None,
+            DomainSource::None,
+            false,
+            false,
+            false,
+            false,
+        ),
+    };
 
     Some(RawPacket {
         src_ip,
@@ -816,6 +915,7 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         dst_port,
         protocol,
         sni_hint,
+        domain_hint_source,
         ingress_interface: None,
         tcp_payload_empty,
         tcp_fin,
@@ -875,6 +975,7 @@ mod tests {
                 dst_port: 443,
                 protocol: TransportProtocol::Tcp,
                 sni_hint: None,
+                domain_hint_source: DomainSource::None,
                 ingress_interface: None,
                 tcp_payload_empty: true,
                 tcp_syn: true,
@@ -892,6 +993,7 @@ mod tests {
                 destination_ip: raw.dst_ip.clone(),
                 destination_port: raw.dst_port,
                 destination_domain: Some("example.com".into()),
+                domain_source: DomainSource::Sni,
                 protocol: raw.protocol,
                 direction: FlowDirection::Outbound,
                 device_label: None,
@@ -958,6 +1060,17 @@ mod tests {
         flow_classifier::ProcessInfo {
             name: name.to_string(),
             exe: None,
+            pid: None,
+            app_name: None,
+        }
+    }
+
+    /// ProcessInfo with a pid and exe — the identity keys the cache compares.
+    fn proc_info_full(name: &str, exe: &str, pid: u32) -> flow_classifier::ProcessInfo {
+        flow_classifier::ProcessInfo {
+            name: name.to_string(),
+            exe: Some(exe.to_string()),
+            pid: Some(pid),
             app_name: None,
         }
     }
@@ -976,7 +1089,7 @@ mod tests {
             1000,
         );
 
-        let restored = cache.restore("1.2.3.4", 443, None, 1100);
+        let restored = cache.restore("1.2.3.4", 443, None, false, 1100);
         assert_eq!(
             restored.map(|c| c.process_name),
             Some("firefox".to_string()),
@@ -984,7 +1097,7 @@ mod tests {
         );
 
         // Domain fallback for a rotated CDN IP.
-        let restored = cache.restore("5.6.7.8", 443, Some("cdn.example.com"), 1200);
+        let restored = cache.restore("5.6.7.8", 443, Some("cdn.example.com"), false, 1200);
         assert_eq!(
             restored.map(|c| c.process_name),
             Some("firefox".to_string()),
@@ -1005,7 +1118,7 @@ mod tests {
         cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1000);
         cache.record_success("8.8.8.8", 53, None, &proc_info("chrome"), 1100);
 
-        let restored = cache.restore("8.8.8.8", 53, None, 1200);
+        let restored = cache.restore("8.8.8.8", 53, None, false, 1200);
         assert_eq!(
             restored, None,
             "destination shared by two processes is ambiguous — must restore nothing"
@@ -1034,16 +1147,130 @@ mod tests {
         // IP keys are distinct, so IP restore works — but the shared DOMAIN
         // key must not restore for a fresh unknown IP.
         assert_eq!(
-            cache.restore("3.3.3.3", 443, Some("shared.example.com"), 1200),
+            cache.restore("3.3.3.3", 443, Some("shared.example.com"), false, 1200),
             None,
             "domain shared by two processes is ambiguous — must restore nothing"
         );
         // The single-process IP keys still restore.
         assert_eq!(
             cache
-                .restore("1.1.1.1", 443, None, 1200)
+                .restore("1.1.1.1", 443, None, false, 1200)
                 .map(|c| c.process_name),
             Some("firefox".to_string())
+        );
+    }
+
+    /// A different pid under the same program name is still a different
+    /// owner (recycled ephemeral port). The key must poison, not accept the
+    /// second process's name.
+    #[test]
+    fn layer0_poisons_on_different_pid_even_with_the_same_name() {
+        let mut cache = AttrCache::new();
+        cache.record_success(
+            "1.2.3.4",
+            443,
+            Some("cdn.example.com"),
+            &proc_info_full("worker", "/usr/bin/worker", 100),
+            1000,
+        );
+        cache.record_success(
+            "1.2.3.4",
+            443,
+            Some("cdn.example.com"),
+            &proc_info_full("worker", "/usr/bin/worker", 200),
+            1100,
+        );
+
+        assert_eq!(
+            cache.restore("1.2.3.4", 443, None, false, 1200),
+            None,
+            "two pids on one destination must not restore either identity"
+        );
+    }
+
+    /// The same name from a different executable is also ambiguous.
+    #[test]
+    fn layer0_poisons_on_different_exe() {
+        let mut cache = AttrCache::new();
+        cache.record_success(
+            "1.2.3.4",
+            443,
+            None,
+            &proc_info_full("python", "/usr/bin/python3.12", 100),
+            1000,
+        );
+        cache.record_success(
+            "1.2.3.4",
+            443,
+            None,
+            &proc_info_full("python", "/opt/venv/bin/python", 200),
+            1100,
+        );
+
+        assert_eq!(cache.restore("1.2.3.4", 443, None, false, 1200), None);
+    }
+
+    /// A poisoned key must stay poisoned for the rest of the TTL instead of
+    /// being removed and refilled by the next successful resolution.
+    #[test]
+    fn layer0_poisoned_key_stays_poisoned_for_ttl() {
+        let mut cache = AttrCache::new();
+        cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1000);
+        cache.record_success("8.8.8.8", 53, None, &proc_info("chrome"), 1100);
+        // A later success for either process must not re-arm the key.
+        cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1200);
+        assert_eq!(
+            cache.restore("8.8.8.8", 53, None, false, 1300),
+            None,
+            "poisoned key must survive the TTL window"
+        );
+
+        // The poison lasts until the last conflicting observation would have
+        // expired — that one was recorded at 1100.
+        let poison_ends = 1100 + PROC_ATTR_TTL_SECS;
+        assert_eq!(
+            cache.restore("8.8.8.8", 53, None, false, poison_ends - 1),
+            None,
+            "still ambiguous one second before the window closes"
+        );
+
+        // After the TTL window the key re-arms normally.
+        let rearm = poison_ends + 20;
+        cache.record_success("8.8.8.8", 53, None, &proc_info("dig"), rearm);
+        assert_eq!(
+            cache
+                .restore("8.8.8.8", 53, None, false, rearm + 10)
+                .map(|c| c.process_name),
+            Some("dig".to_string())
+        );
+    }
+
+    /// On an anycast address the in-band `(domain, port)` key is the stronger
+    /// identity: prefer it over the IP key.
+    #[test]
+    fn layer0_restore_prefers_domain_key_when_in_band() {
+        let mut cache = AttrCache::new();
+        // Same IP served two names by two apps.
+        cache.record_success(
+            "203.0.113.7",
+            443,
+            Some("a.example"),
+            &proc_info("app-a"),
+            1000,
+        );
+        cache.record_success(
+            "203.0.113.7",
+            443,
+            Some("b.example"),
+            &proc_info("app-b"),
+            1000,
+        );
+
+        let restored = cache.restore("203.0.113.7", 443, Some("a.example"), true, 1100);
+        assert_eq!(
+            restored.map(|c| c.process_name),
+            Some("app-a".to_string()),
+            "in-band domain must select the binding that observed it"
         );
     }
 
@@ -1054,9 +1281,10 @@ mod tests {
         let mut cache = AttrCache::new();
         cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1000);
         cache.record_success("8.8.8.8", 53, None, &proc_info("chrome"), 1100);
-        // Both entries expire (> 15 min later).
+        // Both entries — and the poison covering them — expire 15 min after
+        // the newest observation.
         assert_eq!(
-            cache.restore("8.8.8.8", 53, None, 1000 + PROC_ATTR_TTL_SECS + 10),
+            cache.restore("8.8.8.8", 53, None, false, 1100 + PROC_ATTR_TTL_SECS + 10),
             None
         );
         // A fresh single-process success re-arms the key.
@@ -1065,11 +1293,11 @@ mod tests {
             53,
             None,
             &proc_info("dig"),
-            1000 + PROC_ATTR_TTL_SECS + 20,
+            1100 + PROC_ATTR_TTL_SECS + 20,
         );
         assert_eq!(
             cache
-                .restore("8.8.8.8", 53, None, 1000 + PROC_ATTR_TTL_SECS + 30)
+                .restore("8.8.8.8", 53, None, false, 1100 + PROC_ATTR_TTL_SECS + 30)
                 .map(|c| c.process_name),
             Some("dig".to_string())
         );

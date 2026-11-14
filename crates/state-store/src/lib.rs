@@ -1079,8 +1079,8 @@ impl ProxyRepository for SqliteRuleRepository {
 mod tests {
     use super::*;
     use core_types::{
-        DestinationMatcher, Egress, FlowContext, FlowDirection, FlowState, RouteTarget, RuleAction,
-        RuleDuration, TransportProtocol,
+        DestinationMatcher, DomainSource, Egress, FlowContext, FlowDirection, FlowState,
+        RouteTarget, RuleAction, RuleDuration, TransportProtocol,
     };
     use tempfile::NamedTempFile;
 
@@ -1125,6 +1125,7 @@ mod tests {
                 destination_ip: "1.1.1.1".to_string(),
                 destination_port: 443,
                 destination_domain: Some("example.com".to_string()),
+                domain_source: DomainSource::Sni,
                 protocol: TransportProtocol::Tcp,
                 direction: FlowDirection::Outbound,
                 device_label: None,

@@ -213,7 +213,13 @@ impl SockTracker {
             let map = self.sock_map.lock().ok()?;
             map.get(&key, 0).ok()
         };
-        let port_hit = {
+        // `PORT_PIDS` is written by `udp_sendmsg`; a TCP port alone does not
+        // identify a socket. Consulting it for TCP lets a newer entry from a
+        // recycled ephemeral port shadow the correct full-key entry, so it is
+        // never read for TCP.
+        let port_hit = if protocol == TransportProtocol::Tcp {
+            None
+        } else {
             let port_key = build_port_key(src_port, protocol);
             let map = self.port_map.lock().ok()?;
             map.get(&port_key, 0).ok()
@@ -224,20 +230,7 @@ impl SockTracker {
             boot_now_ns.saturating_sub(info.timestamp_ns) <= max_age_s * 1_000_000_000
         };
 
-        // Prefer the NEWER entry; on equal timestamps prefer the full key
-        // (it proves the source address, not just the port).
-        let (info, source) = match (&full_hit, &port_hit) {
-            (Some(f), Some(p)) => {
-                if p.timestamp_ns > f.timestamp_ns {
-                    (p, TrackerSource::PortKey)
-                } else {
-                    (f, TrackerSource::FullKey)
-                }
-            }
-            (Some(f), None) => (f, TrackerSource::FullKey),
-            (None, Some(p)) => (p, TrackerSource::PortKey),
-            (None, None) => return None,
-        };
+        let (info, source) = select_hit(full_hit.as_ref(), port_hit.as_ref(), protocol)?;
 
         let max_age = match source {
             TrackerSource::PortKey => MAX_PORT_ENTRY_AGE_S,
@@ -278,6 +271,35 @@ fn build_port_key(src_port: u16, protocol: TransportProtocol) -> PortKey {
         src_port,
         protocol: proto_num,
         _pad: 0,
+    }
+}
+
+/// Choose between the full-key and port-only map hits.
+///
+/// The full key proves the source address; the port-only map is an inherently
+/// ambiguous fallback for unconnected UDP sockets. It is never considered for
+/// TCP: a TCP port alone does not identify a socket, and a newer entry from a
+/// recycled port would shadow the correct full-key entry. When both maps are
+/// valid, the newer entry wins; equal timestamps prefer the full key.
+fn select_hit<'a>(
+    full_hit: Option<&'a SockInfo>,
+    port_hit: Option<&'a SockInfo>,
+    protocol: TransportProtocol,
+) -> Option<(&'a SockInfo, TrackerSource)> {
+    let port_hit = if protocol == TransportProtocol::Tcp {
+        None
+    } else {
+        port_hit
+    };
+    match (full_hit, port_hit) {
+        (Some(f), Some(p)) => Some(if p.timestamp_ns > f.timestamp_ns {
+            (p, TrackerSource::PortKey)
+        } else {
+            (f, TrackerSource::FullKey)
+        }),
+        (Some(f), None) => Some((f, TrackerSource::FullKey)),
+        (None, Some(p)) => Some((p, TrackerSource::PortKey)),
+        (None, None) => None,
     }
 }
 
@@ -414,6 +436,41 @@ mod tests {
             TransportProtocol::Other,
         );
         assert_eq!(key.protocol, 0);
+    }
+
+    /// `PORT_PIDS` is written by `udp_sendmsg` and identifies only a port.
+    /// For TCP it must never be consulted, even when its entry is newer.
+    #[test]
+    fn port_key_is_never_used_for_tcp() {
+        let full = SockInfo {
+            pid: 111,
+            timestamp_ns: 100,
+            ..Default::default()
+        };
+        let port = SockInfo {
+            pid: 222,
+            timestamp_ns: 200, // newer — would win if the port map were read
+            ..Default::default()
+        };
+
+        let chosen = select_hit(Some(&full), Some(&port), TransportProtocol::Tcp);
+        assert_eq!(
+            chosen.map(|(info, source)| (info.pid, source)),
+            Some((111, TrackerSource::FullKey)),
+            "a newer port-only entry must not shadow the TCP full-key entry"
+        );
+
+        assert!(
+            select_hit(None, Some(&port), TransportProtocol::Tcp).is_none(),
+            "TCP must not fall back to the port-only map"
+        );
+
+        // UDP keeps the fallback, where the full key cannot always be built.
+        assert_eq!(
+            select_hit(Some(&full), Some(&port), TransportProtocol::Udp)
+                .map(|(info, source)| (info.pid, source)),
+            Some((222, TrackerSource::PortKey))
+        );
     }
 
     // -------------------------------------------------------------------

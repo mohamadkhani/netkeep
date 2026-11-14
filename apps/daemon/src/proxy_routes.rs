@@ -107,8 +107,9 @@ mod tests {
     fn egress_edit_selects_replacement_proxy_without_changing_the_rule() {
         use control_api::{ControlRequest, ControlResponse};
         use core_types::{
-            DestinationMatcher, Egress, FlowContext, FlowDirection, ProxyAuth, ProxyConfig,
-            ProxyProtocol, RouteTarget, Rule, RuleAction, RuleDuration, TransportProtocol,
+            DestinationMatcher, DomainSource, Egress, FlowContext, FlowDirection, ProxyAuth,
+            ProxyConfig, ProxyProtocol, RouteTarget, Rule, RuleAction, RuleDuration,
+            TransportProtocol,
         };
         use enforcer::{FlowDecision, FlowRegistrar};
         use std::sync::{Arc, Mutex};
@@ -169,6 +170,7 @@ mod tests {
             destination_ip: "198.51.100.1".into(),
             destination_port: 443,
             destination_domain: Some("example.com".into()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,

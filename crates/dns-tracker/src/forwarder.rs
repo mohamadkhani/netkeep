@@ -56,6 +56,17 @@ fn keep_direct_comm(comm: &str) -> bool {
     is_netkeep_comm(comm) || !is_local_resolver_comm(comm)
 }
 
+/// Owner to store with a DNS answer in the shared cache.
+///
+/// A stub resolver (`systemd-resolved`, `dnsmasq`, …) only relays a query; it
+/// never opens the app's connection. Recording it as the owner would make
+/// [`flow_classifier::SniDnsCache::lookup_for`] refuse the binding for the
+/// real app, so a resolver is stored as "no owner" instead. The daemon keeps
+/// its own identity: it does open its own connections.
+fn cache_owner(process_name: Option<&str>) -> Option<&str> {
+    process_name.filter(|name| keep_direct_comm(name))
+}
+
 /// Pick the single real app among behind-resolver attribution candidates.
 ///
 /// Returns `Some(comm)` when exactly one distinct non-resolver client is
@@ -282,12 +293,22 @@ impl DnsForwarder {
         };
 
         // Populate SniDnsCache: extract (ip, domain, ttl) from DNS response
-        // A/AAAA records. TTL-honored so bindings expire with the answer.
+        // A/AAAA records. TTL-honored so bindings expire with the answer, and
+        // tagged with the resolving app so policy lookups can refuse the
+        // answer for a different process. A stub resolver only relayed the
+        // query — it never opens the connection — so its identity is stored
+        // as "no owner" rather than as an owner that would block every app.
         if !domain.is_empty() {
+            let answer_owner = cache_owner(process_name.as_deref());
             let pairs = parse_dns_response_ips(&response);
             for (ip, d, ttl) in &pairs {
-                self.dns_cache
-                    .insert_with_ttl(ip.to_string(), d.as_str(), Some(u64::from(*ttl)));
+                self.dns_cache.insert_dns(
+                    ip.to_string(),
+                    d.as_str(),
+                    u64::from(*ttl),
+                    answer_owner,
+                    None,
+                );
             }
             if !pairs.is_empty() {
                 eprintln!(
@@ -1090,6 +1111,20 @@ mod tests {
         );
         assert!(!keep_direct_comm("dnsmasq"), "resolver → look behind");
         assert!(!keep_direct_comm(""), "unknown → look behind");
+    }
+
+    /// A stub resolver must not be stored as the owner of a DNS answer: it
+    /// relays the query but never opens the connection, and an owner it did
+    /// not have would block the real app's lookup. The daemon keeps its own
+    /// identity because it does open its own connections.
+    #[test]
+    fn dns_answer_owner_is_never_a_resolver() {
+        assert_eq!(cache_owner(Some("chromium")), Some("chromium"));
+        assert_eq!(cache_owner(Some("systemd-resolved")), None);
+        assert_eq!(cache_owner(Some("systemd-resolve")), None);
+        assert_eq!(cache_owner(Some("dnsmasq")), None);
+        assert_eq!(cache_owner(Some("netkeepd")), Some("netkeepd"));
+        assert_eq!(cache_owner(None), None);
     }
 
     #[test]

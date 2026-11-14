@@ -75,26 +75,27 @@ fn destination_matches(rule: &Rule, flow: &FlowContext) -> bool {
 }
 
 fn process_matches(rule: &Rule, flow: &FlowContext) -> bool {
-    // Prefer exe-path comparison when both sides have it — more unique than
-    // basename alone and immune to comm-name truncation.
-    if let (Some(rule_exe), Some(flow_exe)) = (&rule.process_exe, &flow.process_exe) {
-        return rule_exe == flow_exe;
+    // Every identity field the rule pins must be present on the flow and
+    // equal. When attribution failed the flow has no process, so it cannot
+    // prove it is the app the rule was written for — and an unproven flow
+    // must never inherit someone else's permission. This holds for every
+    // action, including Allow and Route: the dialog is the only way to
+    // establish the pair.
+    //
+    // The exe path is the stronger key when both sides carry one, but a rule
+    // that pins only the exe must not fall through to a flow with no exe
+    // (that fallback matched every unnamed flow).
+    if let Some(rule_exe) = &rule.process_exe {
+        if flow.process_exe.as_ref() != Some(rule_exe) {
+            return false;
+        }
     }
-    match (&rule.process_name, &flow.process_name) {
-        (None, _) => true,
-        (Some(rp), Some(fp)) => rp == fp,
-        // Flow process attribution failed (proc_resolver lost the
-        // /proc/net/tcp race). When the rule pins a *specific* destination
-        // we trust the destination: re-prompting the user for the same
-        // host they already approved is worse UX than letting the rule
-        // apply. Broad destinations (Any / Cidr / Wildcard) still require
-        // an exact process match so a global "allow process X" rule can't
-        // be silently piggy-backed on by a different unattributed process.
-        (Some(_), None) => matches!(
-            rule.destination,
-            DestinationMatcher::IpExact(_) | DestinationMatcher::DomainExact(_)
-        ),
+    if let Some(rule_name) = &rule.process_name {
+        if flow.process_name.as_ref() != Some(rule_name) {
+            return false;
+        }
     }
+    true
 }
 
 /// Built-in restriction ladder — default priority *bases* for new rules.
@@ -144,14 +145,22 @@ fn action_rank(action: &RuleAction) -> u8 {
     }
 }
 
+/// True when `rule` is enabled and every field it pins matches the flow.
+///
+/// `resolve_action` uses this for precedence resolution; callers that already
+/// know which rule they installed (the pending sweep) use it to ask "does this
+/// flow fall under the rule I just added?" without re-running precedence.
+pub fn rule_matches(rule: &Rule, flow: &FlowContext) -> bool {
+    rule.enabled && process_matches(rule, flow) && destination_matches(rule, flow)
+}
+
 pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule> {
     let start = std::time::Instant::now();
     counter!("netkeep.policy.evaluations").increment(1);
 
     let result = rules
         .iter()
-        .filter(|r| r.enabled)
-        .filter(|r| process_matches(r, flow) && destination_matches(r, flow))
+        .filter(|r| rule_matches(r, flow))
         .max_by(|a, b| {
             a.priority
                 .partial_cmp(&b.priority)
@@ -187,7 +196,7 @@ pub fn resolve_action(rules: &[Rule], flow: &FlowContext) -> Option<ResolvedRule
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{FlowDirection, Rule, RuleDuration, TransportProtocol};
+    use core_types::{DomainSource, FlowDirection, Rule, RuleDuration, TransportProtocol};
 
     fn mk_rule(
         id: &str,
@@ -229,6 +238,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -243,6 +253,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -282,6 +293,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -289,14 +301,17 @@ mod tests {
         };
         let flow_deep = FlowContext {
             destination_domain: Some("a.b.c.example.com".to_string()),
+            domain_source: DomainSource::Sni,
             ..flow_sub.clone()
         };
         let flow_apex = FlowContext {
             destination_domain: Some("example.com".to_string()),
+            domain_source: DomainSource::Sni,
             ..flow_sub.clone()
         };
         let flow_unrelated = FlowContext {
             destination_domain: Some("notexample.com".to_string()),
+            domain_source: DomainSource::Sni,
             ..flow_sub.clone()
         };
         let rule = mk_rule(
@@ -343,6 +358,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -384,6 +400,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -414,6 +431,7 @@ mod tests {
             destination_ip: "9.9.9.9".to_string(),
             destination_port: 443,
             destination_domain: Some("api.example.com".to_string()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -447,6 +465,7 @@ mod tests {
             destination_ip: "8.8.8.8".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -478,6 +497,11 @@ mod tests {
             destination_ip: ip.to_string(),
             destination_port: 443,
             destination_domain: domain.map(str::to_string),
+            domain_source: if domain.is_some() {
+                DomainSource::Sni
+            } else {
+                DomainSource::None
+            },
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -485,34 +509,85 @@ mod tests {
         }
     }
 
+    /// A flow with no process cannot prove it is the app the rule names, so it
+    /// must not inherit that app's permission — not even when the destination
+    /// is pinned exactly.
     #[test]
-    fn unknown_process_matches_specific_destination_rule() {
-        // proc_resolver lost the race on this packet; the user has already
-        // approved curl → example.com. The rule must still apply, otherwise
-        // we'd reprompt for an already-trusted destination.
+    fn unknown_process_never_matches_a_process_rule() {
+        for (action, destination, flow) in [
+            (
+                RuleAction::Allow,
+                DestinationMatcher::DomainExact("example.com".to_string()),
+                flow_unknown_proc(Some("example.com"), "93.184.216.34"),
+            ),
+            (
+                RuleAction::Allow,
+                DestinationMatcher::IpExact("1.1.1.1".to_string()),
+                flow_unknown_proc(None, "1.1.1.1"),
+            ),
+            (
+                RuleAction::Route,
+                DestinationMatcher::DomainExact("example.com".to_string()),
+                flow_unknown_proc(Some("example.com"), "93.184.216.34"),
+            ),
+            (
+                RuleAction::Deny,
+                DestinationMatcher::IpExact("1.1.1.1".to_string()),
+                flow_unknown_proc(None, "1.1.1.1"),
+            ),
+        ] {
+            let rule = mk_rule("u-rule", action.clone(), Some("curl"), destination);
+            assert_eq!(
+                resolve_action(&[rule], &flow),
+                None,
+                "{action:?} must not apply to a flow with no process"
+            );
+        }
+    }
+
+    /// The same rule does apply once the process is known.
+    #[test]
+    fn known_process_matches_its_rule() {
         let rule = mk_rule(
             "allow-curl-example",
             RuleAction::Allow,
             Some("curl"),
             DestinationMatcher::DomainExact("example.com".to_string()),
         );
-        let flow = flow_unknown_proc(Some("example.com"), "93.184.216.34");
+        let mut flow = flow_unknown_proc(Some("example.com"), "93.184.216.34");
+        flow.process_name = Some("curl".to_string());
         let resolved = resolve_action(&[rule], &flow).expect("rule must match");
         assert_eq!(resolved.rule_id, "allow-curl-example");
         assert_eq!(resolved.action, RuleAction::Allow);
     }
 
+    /// A rule that pins only the exe path must not fall through to a flow
+    /// whose exe is unknown but whose name happens to match nothing: the old
+    /// `(None, _) => true` name branch did exactly that and let an unnamed
+    /// flow inherit an exe-scoped allowance.
     #[test]
-    fn unknown_process_matches_specific_ip_rule() {
-        let rule = mk_rule(
-            "allow-curl-ip",
+    fn exe_only_rule_requires_the_flows_exe() {
+        let mut rule = mk_rule(
+            "exe-rule",
             RuleAction::Allow,
-            Some("curl"),
-            DestinationMatcher::IpExact("1.1.1.1".to_string()),
+            None,
+            DestinationMatcher::DomainExact("example.com".to_string()),
         );
-        let flow = flow_unknown_proc(None, "1.1.1.1");
-        let resolved = resolve_action(&[rule], &flow).expect("rule must match");
-        assert_eq!(resolved.action, RuleAction::Allow);
+        rule.process_exe = Some("/usr/bin/curl".to_string());
+
+        let mut known = flow_unknown_proc(Some("example.com"), "93.184.216.34");
+        known.process_exe = Some("/usr/bin/curl".to_string());
+        assert!(rule_matches(&rule, &known));
+
+        let mut other_exe = flow_unknown_proc(Some("example.com"), "93.184.216.34");
+        other_exe.process_exe = Some("/usr/bin/wget".to_string());
+        assert!(!rule_matches(&rule, &other_exe));
+
+        let no_exe = flow_unknown_proc(Some("example.com"), "93.184.216.34");
+        assert!(
+            !rule_matches(&rule, &no_exe),
+            "an unattributed flow must not inherit an exe-scoped rule"
+        );
     }
 
     #[test]
@@ -650,6 +725,7 @@ mod tests {
             destination_ip: "0.0.0.0".to_string(),
             destination_port: 443,
             destination_domain: Some("www.digikala.com".to_string()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -783,6 +859,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: None,
+            domain_source: DomainSource::None,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -822,6 +899,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: None,
+            domain_source: DomainSource::None,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,

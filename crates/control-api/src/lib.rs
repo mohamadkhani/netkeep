@@ -220,7 +220,7 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{DestinationMatcher, FlowDirection, RuleDuration};
+    use core_types::{DestinationMatcher, DomainSource, FlowDirection, RuleDuration};
 
     fn mk_rule(id: &str) -> Rule {
         Rule {
@@ -322,6 +322,7 @@ mod tests {
                 destination_ip: "8.8.8.8".to_string(),
                 destination_port: 443,
                 destination_domain: Some("google.com".to_string()),
+                domain_source: DomainSource::Sni,
                 protocol: TransportProtocol::Tcp,
                 direction: FlowDirection::Outbound,
                 device_label: None,

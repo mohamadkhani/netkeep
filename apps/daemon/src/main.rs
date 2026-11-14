@@ -1065,6 +1065,7 @@ fn main() {
                 destination_ip: String::new(),
                 destination_port: 53,
                 destination_domain: Some(domain.to_string()),
+                domain_source: core_types::DomainSource::Dns,
                 protocol: core_types::TransportProtocol::Udp,
                 direction: core_types::FlowDirection::Outbound,
                 device_label: None,
