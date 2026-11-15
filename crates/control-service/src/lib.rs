@@ -443,7 +443,19 @@ impl<R: Repository> ControlService<R> {
                         }
                     }
                     DecisionOutcome::Pending(p) => {
-                        self.record_event(&flow, FlowState::Pending, now_secs);
+                        // A retransmission of a flow that is already pending
+                        // reuses the same pending. Recording another Pending
+                        // event for it added no information and multiplied the
+                        // flow list: five NFS connections showed up as thirty
+                        // unnamed rows, each SYN retransmit adding one.
+                        let reused = self
+                            .repo
+                            .list_live_pending(now_secs)
+                            .iter()
+                            .any(|existing| existing.id == p.id);
+                        if !reused {
+                            self.record_event(&flow, FlowState::Pending, now_secs);
+                        }
                         self.repo.upsert_pending(&p);
                         // NEW: Send push notification to subscribers
                         let decision = p.clone();
@@ -1414,6 +1426,34 @@ mod tests {
                 action: RuleAction::Deny,
                 route_target: None
             }
+        );
+    }
+
+    /// A retransmission of a flow whose dialog is already open must not append
+    /// another Pending event. Five NFS connections produced thirty unnamed rows
+    /// in the flow list because every SYN retransmit was recorded again.
+    #[test]
+    fn retransmission_of_a_pending_flow_records_one_event() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        for now in [10, 11, 12, 13] {
+            let out = service.handle(ControlRequest::RegisterUnknownFlow {
+                flow: mk_flow(),
+                now_secs: now,
+            });
+            assert!(
+                matches!(out, ControlResponse::PendingCreated { .. }),
+                "every retransmit answers with the same pending"
+            );
+        }
+
+        let events = match service.handle(ControlRequest::ListFlows { limit: 100 }) {
+            ControlResponse::FlowList(events) => events,
+            _ => panic!("expected flow list"),
+        };
+        assert_eq!(
+            events.len(),
+            1,
+            "four retransmissions of one connection are one flow, not four"
         );
     }
 
