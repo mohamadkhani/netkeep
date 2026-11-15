@@ -23,6 +23,25 @@ struct ConnectionKey {
     protocol: TransportProtocol,
 }
 
+impl ConnectionKey {
+    /// The same connection seen from the peer's side.
+    ///
+    /// Conntrack treats the reply direction as part of the connection it
+    /// answers. Without that, every reply packet looked like a brand-new
+    /// unknown flow whose destination is the container or LAN client, which
+    /// matched none of the app's rules and raised one dialog per ephemeral
+    /// port.
+    fn mirror(&self) -> Self {
+        Self {
+            src_ip: self.dst_ip.clone(),
+            src_port: self.dst_port,
+            dst_ip: self.src_ip.clone(),
+            dst_port: self.src_port,
+            protocol: self.protocol,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CachedVerdict {
     accept: bool,
@@ -507,7 +526,11 @@ where
         // FIN/RST — connection is closing/resetting. Evict the cached verdict so
         // that a future connection reusing the same 5-tuple gets a fresh decision.
         if raw.tcp_fin || raw.tcp_rst {
-            if self.decided.remove(&key).is_some() {
+            let mut removed = self.decided.remove(&key).is_some();
+            if raw.forwarded && self.decided.remove(&key.mirror()).is_some() {
+                removed = true;
+            }
+            if removed {
                 counter!("netkeep.verdict.cache.evictions", "reason" => "fin_rst").increment(1);
             }
             return (Verdict::Accept, None);
@@ -707,16 +730,34 @@ where
                         .increment(evicted as u64);
                 }
             }
-            self.decided.insert(
-                key,
-                CachedVerdict {
-                    accept: matches!(verdict, Verdict::Accept),
-                    fwmark,
-                    expires_at: now_secs + CACHE_TTL_SECS,
-                    routing_revision: routing_revision
-                        .unwrap_or_else(|| self.registrar.routing_revision()),
-                },
-            );
+            let cached = CachedVerdict {
+                accept: matches!(verdict, Verdict::Accept),
+                fwmark,
+                expires_at: now_secs + CACHE_TTL_SECS,
+                routing_revision: routing_revision
+                    .unwrap_or_else(|| self.registrar.routing_revision()),
+            };
+            self.decided.insert(key.clone(), cached);
+
+            // Forwarded traffic (containers, VMs, LAN clients) reaches us in
+            // both directions. The reply's destination is the container, so it
+            // matches none of the rules written for the app, and every new
+            // ephemeral port used to raise its own dialog. Cache the reply
+            // direction with the same verdict so the connection is decided once.
+            //
+            // The mirror never carries a fwmark: the mark steers the outbound
+            // socket into an egress, and stamping it on the returning packet
+            // would reroute traffic that is already arriving.
+            if raw.forwarded {
+                self.decided.insert(
+                    key.mirror(),
+                    CachedVerdict {
+                        fwmark: None,
+                        ..cached
+                    },
+                );
+                counter!("netkeep.verdict.cache.mirror").increment(1);
+            }
         }
 
         gauge!("netkeep.verdict.cache.entries").set(self.decided.len() as f64);
@@ -959,6 +1000,179 @@ mod tests {
         fn routing_revision(&mut self) -> u64 {
             self.revision
         }
+    }
+
+    /// Registrar that always allows, counting how often it was asked to decide.
+    struct AllowRegistrar {
+        attempts: usize,
+    }
+
+    impl FlowRegistrar for AllowRegistrar {
+        fn register(&mut self, _flow: FlowContext, _now_secs: u64) -> FlowDecision {
+            self.attempts += 1;
+            FlowDecision::Immediate(RuleAction::Allow, None)
+        }
+
+        fn route_mark(&mut self, _target: &RouteTarget) -> Option<u32> {
+            None
+        }
+
+        fn routing_revision(&mut self) -> u64 {
+            0
+        }
+    }
+
+    fn tcp_packet(src: &str, src_port: u16, dst: &str, dst_port: u16) -> RawPacket {
+        RawPacket {
+            src_ip: src.into(),
+            src_port,
+            dst_ip: dst.into(),
+            dst_port,
+            protocol: TransportProtocol::Tcp,
+            sni_hint: None,
+            domain_hint_source: DomainSource::None,
+            ingress_interface: None,
+            tcp_payload_empty: false,
+            tcp_fin: false,
+            tcp_rst: false,
+            tcp_syn: true,
+            sk_uid: None,
+            forwarded: true,
+        }
+    }
+
+    /// Container and VM traffic arrives in both directions. The reply packet's
+    /// destination is the container, so it matches none of the rules written
+    /// for the app; before this fix every reply with a new ephemeral port was
+    /// classified as a fresh unknown flow and raised its own dialog. One
+    /// container connecting to a CDN produced 20 queued dialogs in the same
+    /// second (journal 21:27:22, pending-303 … pending-320).
+    #[test]
+    fn forwarded_reply_reuses_the_decided_connection() {
+        let flow = FlowContext {
+            process_name: Some("node".into()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "172.23.0.2".into(),
+            source_port: 42372,
+            destination_ip: "143.64.80.214".into(),
+            destination_port: 443,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: AllowRegistrar { attempts: 0 },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+
+        let outbound = tcp_packet("172.23.0.2", 42372, "143.64.80.214", 443);
+        assert_eq!(processor.decide(&outbound, 1000), (Verdict::Accept, None));
+        assert_eq!(processor.registrar.attempts, 1);
+
+        let reply = tcp_packet("143.64.80.214", 443, "172.23.0.2", 42372);
+        assert_eq!(
+            processor.decide(&reply, 1001),
+            (Verdict::Accept, None),
+            "the reply direction of an allowed connection must be accepted"
+        );
+        assert_eq!(
+            processor.registrar.attempts, 1,
+            "the reply must not be classified again, so it cannot prompt"
+        );
+    }
+
+    /// A `Route` decision marks the outbound socket so nftables sends it into
+    /// the egress. The reply arrives *from* that egress; stamping the mark on
+    /// it would reroute traffic that is already arriving.
+    #[test]
+    fn forwarded_reply_does_not_inherit_the_route_mark() {
+        let flow = FlowContext {
+            process_name: Some("node".into()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "172.23.0.2".into(),
+            source_port: 42372,
+            destination_ip: "143.64.80.214".into(),
+            destination_port: 443,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: RouteRegistrar {
+                target: RouteTarget::Tun("test-tun".into()),
+                mark: Some(20000),
+                attempts: 0,
+                revision: 0,
+            },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+
+        let outbound = tcp_packet("172.23.0.2", 42372, "143.64.80.214", 443);
+        assert_eq!(
+            processor.decide(&outbound, 1000),
+            (Verdict::Accept, Some(20000))
+        );
+
+        let reply = tcp_packet("143.64.80.214", 443, "172.23.0.2", 42372);
+        assert_eq!(
+            processor.decide(&reply, 1001),
+            (Verdict::Accept, None),
+            "the reply must not carry the egress mark"
+        );
+    }
+
+    /// Locally generated traffic never needs a mirror entry: its replies are
+    /// delivered through INPUT, which is not queued.
+    #[test]
+    fn local_connections_do_not_cache_a_mirror() {
+        let flow = FlowContext {
+            process_name: Some("curl".into()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "192.0.2.1".into(),
+            source_port: 12345,
+            destination_ip: "198.51.100.1".into(),
+            destination_port: 443,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: AllowRegistrar { attempts: 0 },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+
+        let mut local = tcp_packet("192.0.2.1", 12345, "198.51.100.1", 443);
+        local.forwarded = false;
+        assert_eq!(processor.decide(&local, 1000), (Verdict::Accept, None));
+        assert_eq!(
+            processor.decided.len(),
+            1,
+            "only the connection's own key is cached for local traffic"
+        );
     }
 
     #[test]
