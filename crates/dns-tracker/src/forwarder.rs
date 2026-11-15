@@ -98,10 +98,31 @@ fn comm_for_pid(pid: u32) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Dispatch function: given `(process_name, domain)`, return the `RouteTarget`
-/// and the list of DNS servers to use, or `None` for system DNS.
+/// A DNS query's resolved client identity.
+///
+/// The name is always present; the exe path is known only when the identity
+/// came from `/proc` (`ProcessInfo::exe`). The eBPF tracker carries a comm
+/// name and no path, so its answers legitimately have `exe: None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedApp {
+    pub name: String,
+    pub exe: Option<String>,
+}
+
+impl ResolvedApp {
+    fn name_only(name: String) -> Self {
+        Self { name, exe: None }
+    }
+}
+
+/// Dispatch function: given `(process_name, process_exe, domain)`, return the
+/// `RouteTarget` and the list of DNS servers to use, or `None` for system DNS.
+///
+/// The exe is passed separately because a rule that pins `process_exe` can
+/// only match when the flow carries the same path; omitting it silently
+/// downgraded every exe-pinned `Route` rule to system DNS.
 pub type EgressResolver =
-    Arc<dyn Fn(&str, &str) -> Option<(RouteTarget, Vec<String>)> + Send + Sync>;
+    Arc<dyn Fn(&str, Option<&str>, &str) -> Option<(RouteTarget, Vec<String>)> + Send + Sync>;
 
 /// Resolves a `RouteTarget` to its policy-routing fwmark.
 /// Returns `None` if no mark is available (fall back to plain UDP).
@@ -259,18 +280,20 @@ impl DnsForwarder {
         let domain = parse_qname_from_query(&query).unwrap_or_default();
 
         // Identify source process.
-        let process_name = self.resolve_process(peer, &domain);
+        let app = self.resolve_process(peer, &domain);
 
         eprintln!(
             "dns-forwarder: {} process={} domain={}",
             peer,
-            process_name.as_deref().unwrap_or("?"),
+            app.as_ref().map(|a| a.name.as_str()).unwrap_or("?"),
             domain
         );
 
         // Match rule: (process, domain) → (egress target, dns servers).
-        let response = if let Some(name) = &process_name {
-            if let Some((target, dns_servers)) = (self.egress_resolver)(name, &domain) {
+        let response = if let Some(app) = &app {
+            if let Some((target, dns_servers)) =
+                (self.egress_resolver)(&app.name, app.exe.as_deref(), &domain)
+            {
                 if dns_servers.is_empty() {
                     // Fail closed: an egress with no DNS servers cannot resolve
                     // through its own path, and falling back to system DNS
@@ -284,7 +307,7 @@ impl DnsForwarder {
                     self.resolve_via_egress(&query, &target, &dns_servers)?
                 }
             } else {
-                self.warn_rules_not_evaluated(&domain, Some(name));
+                self.warn_rules_not_evaluated(&domain, Some(&app.name));
                 self.forward_system(&query)?
             }
         } else {
@@ -299,7 +322,7 @@ impl DnsForwarder {
         // query — it never opens the connection — so its identity is stored
         // as "no owner" rather than as an owner that would block every app.
         if !domain.is_empty() {
-            let answer_owner = cache_owner(process_name.as_deref());
+            let answer_owner = cache_owner(app.as_ref().map(|a| a.name.as_str()));
             let pairs = parse_dns_response_ips(&response);
             for (ip, d, ttl) in &pairs {
                 self.dns_cache.insert_dns(
@@ -352,14 +375,14 @@ impl DnsForwarder {
     /// When that is a local stub resolver (systemd-resolved, dnsmasq, …) the
     /// real application is hidden behind it, so [`Self::resolve_behind_resolver`]
     /// recovers the app that asked for `domain`.
-    fn resolve_process(&self, peer: SocketAddr, domain: &str) -> Option<String> {
+    fn resolve_process(&self, peer: SocketAddr, domain: &str) -> Option<ResolvedApp> {
         // Try eBPF tracker first (100% accurate, no /proc race).
         let mut direct = None;
         if let Some(tracker) = &self.tracker {
             if let SocketAddr::V4(v4) = peer {
                 if let Some(info) = tracker.lookup(*v4.ip(), v4.port()) {
                     if !info.comm.is_empty() {
-                        direct = Some(info.comm);
+                        direct = Some(ResolvedApp::name_only(info.comm));
                     }
                 }
             }
@@ -375,14 +398,17 @@ impl DnsForwarder {
                         .resolve(&src_ip, v4.port(), TransportProtocol::Udp, None)
                 {
                     if !proc_info.name.is_empty() {
-                        direct = Some(proc_info.name);
+                        direct = Some(ResolvedApp {
+                            name: proc_info.name,
+                            exe: proc_info.exe,
+                        });
                     }
                 }
             }
         }
 
         match direct {
-            Some(name) if keep_direct_comm(&name) => Some(name),
+            Some(app) if keep_direct_comm(&app.name) => Some(app),
             direct => self.resolve_behind_resolver(domain).or(direct),
         }
     }
@@ -408,7 +434,7 @@ impl DnsForwarder {
     /// non-resolver client names the app. Several concurrent resolvers are
     /// ambiguous and we refuse to guess (returns `None`), so the query keeps
     /// the resolver's identity rather than a wrong one.
-    fn resolve_behind_resolver(&self, domain: &str) -> Option<String> {
+    fn resolve_behind_resolver(&self, domain: &str) -> Option<ResolvedApp> {
         if let Some(tracker) = &self.tracker {
             for candidate in tracker.lookup_all_by_domain(domain) {
                 if is_local_resolver_comm(&candidate.info.comm) {
@@ -423,14 +449,17 @@ impl DnsForwarder {
                     None,
                 ) {
                     if !owner.name.is_empty() && !is_local_resolver_comm(&owner.name) {
-                        return Some(owner.name);
+                        return Some(ResolvedApp {
+                            name: owner.name,
+                            exe: owner.exe,
+                        });
                     }
                 }
                 // Socket already closed: trust the eBPF comm if still alive.
                 if candidate.info.pid != 0
                     && std::path::Path::new(&format!("/proc/{}", candidate.info.pid)).exists()
                 {
-                    return Some(candidate.info.comm);
+                    return Some(ResolvedApp::name_only(candidate.info.comm));
                 }
             }
         }
@@ -439,7 +468,7 @@ impl DnsForwarder {
             .into_iter()
             .chain(flow_classifier::proc_resolver::resolved_varlink_client_pids())
             .filter_map(comm_for_pid);
-        pick_behind_resolver_comm(candidates)
+        pick_behind_resolver_comm(candidates).map(ResolvedApp::name_only)
     }
 
     fn resolve_via_egress(

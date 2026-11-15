@@ -1049,16 +1049,20 @@ fn main() {
             system_dns.as_ref().map(|s| s.addr)
         );
 
-        // Build egress resolver closure: (process_name, domain) → (target, dns_servers).
+        // Build egress resolver closure: (process_name, process_exe, domain) →
+        // (target, dns_servers).
         let service_for_dns = Arc::clone(&service);
         let db_for_dns = db_path.clone();
-        let egress_resolver: EgressResolver = Arc::new(move |process_name, domain| {
+        let egress_resolver: EgressResolver = Arc::new(move |process_name, process_exe, domain| {
             let svc = service_for_dns.lock().ok()?;
             // We use the existing RegisterFlow path to match rules without side effects.
-            // Build a minimal FlowContext for policy matching.
+            // Build a minimal FlowContext for policy matching. The exe comes
+            // from the resolver when /proc supplied it: a Route rule that pins
+            // an exe path cannot match without it, and dropping it sent the
+            // query to system DNS instead of the egress's resolvers.
             let flow = core_types::FlowContext {
                 process_name: Some(process_name.to_string()),
-                process_exe: None,
+                process_exe: process_exe.map(str::to_string),
                 app_name: None,
                 source_ip: String::new(),
                 source_port: 0,
