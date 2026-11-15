@@ -559,6 +559,28 @@ There is no startup spike in attribution, and no flow ever gains a name on a lat
 
 **Still open.** The DNS eBPF program fails to load on every start, so DNS-based attribution permanently runs on the SOCK_DIAG fallback. The errno and verifier output are only visible on the next start of the installed build; the cause is not yet identified.
 
+### 9.7 Unknown-process report after the fixes
+
+Report: after the reply-direction fix, many flows still showed no process. Measured on the build from 22:15, over the newest 500 flow events (22:10–22:19): 56 rows unnamed, but only **13 distinct connections**. The rows were retransmissions: `2049 → 192.168.7.18:788` alone produced 10 rows, `2049 → 192.168.7.17:885` nine.
+
+Composition of the 13 connections:
+
+| connections | what | why there is no process |
+|---|---|---|
+| 5 | NFS server: `192.168.7.6:2049 → 192.168.7.17/18:788…949` | the socket belongs to the kernel `nfsd`; `/proc/net/tcp` has the inode but no process owns an fd, so there is no PID to name |
+| 4 | container ↔ VPN gateway: `192.168.7.3:1080/1082/25344 ↔ 172.23.0.2:*` | the socket lives in the container's network namespace; host `/proc` cannot see it, and the eBPF probe only knows sockets created after it attached — these predate the 22:15 restart |
+| 1 | `gvfsd-http` → `104.26.12.205:443` | one `/proc` lookup missed the socket; a rule now covers it |
+
+At the decision layer the same window shows 80 rule decisions and only 4 unnamed (5%). For comparison, 21:00–21:29 on the previous build was 241 of 400 rows (60%), all container traffic.
+
+This is not a regression: the `src=:2049` NFS flows carried `process=None` on 2026-11-12 as well (53 `policy` lines, all unnamed). What changed is that Stage 0 stopped lending them another app's name, so flows that used to look named now look unknown.
+
+**Fixed.** `RegisterUnknownFlow` records a flow event only when the pending is new (`d4e9958`), so retransmissions no longer multiply rows.
+
+**Fixed.** The DNS tracker loaded with `DEBUG|STATS` verifier logging, and the kernel rejected `BPF_PROG_LOAD` with `E2BIG` ("Argument list too long") because the log did not fit the buffer. It now loads with logging disabled and retries with `VERBOSE` only if the quiet attempt fails (`1519506`). Unverified until the next install: whether the program is then accepted, and how much of the 9 s startup cost the log was responsible for.
+
+**Not fixed.** Nothing labels a kernel-owned socket as such. The dialog says "Unidentified process" for an NFS server socket, which reads as a detection failure when the truth is that no process exists. Distinguishing the two needs a provenance field on the flow (proved process / kernel socket / lookup failed); inferring "kernel" from a missing fd owner is not sound, because a `/proc` gap produces the same observation.
+
 ---
 
 ## 10. Open decisions
