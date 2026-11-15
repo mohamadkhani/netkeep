@@ -12,7 +12,7 @@ mod metrics;
 mod proxy_routes;
 
 use dns_tracker::forwarder::{DnsForwarder, EgressResolver, FwmarkResolver, SystemDns};
-use dns_tracker::{DnsTracker, SockTracker};
+use dns_tracker::{DnsTracker, DnsTrackerSlot, SockTracker};
 
 use control_api::{ControlRequest, ControlResponse, PushNotification};
 use control_service::{ControlService, HealthConfig, SharedService};
@@ -1030,17 +1030,31 @@ fn main() {
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
     {
-        // Try to load eBPF DNS tracker.
-        let ebpf_tracker = match DnsTracker::load() {
-            Ok(t) => {
-                let t = Arc::new(t);
-                Some(t)
-            }
-            Err(e) => {
-                eprintln!("dns-tracker: eBPF load failed ({e}); will use SOCK_DIAG fallback only");
-                None
-            }
-        };
+        // Load the eBPF DNS tracker on a worker thread, not here.
+        //
+        // `DnsTracker::load()` sends a large program through the kernel
+        // verifier and took 9 s on this machine (journal: "daemon listening"
+        // at 08:25:34, "eBPF load failed" + "nftables rules applied" at
+        // 08:25:43). Doing it inline left the daemon enforcing nothing — no
+        // nftables table, no NFQUEUE, no socket tracker — for that whole
+        // window, so every restart silently let traffic through unfiltered.
+        // The forwarder starts immediately and picks the tracker up when the
+        // slot is filled.
+        let dns_tracker_slot = DnsTrackerSlot::new();
+        {
+            let slot = Arc::clone(&dns_tracker_slot);
+            std::thread::spawn(move || match DnsTracker::load() {
+                Ok(t) => slot.install(Some(Arc::new(t))),
+                Err(e) => {
+                    // `{e:#}` renders the whole context chain. With `{e}` the
+                    // kernel's rejection reason was dropped, leaving only
+                    // "failed to load kprobe into kernel".
+                    eprintln!("dns-tracker: eBPF load failed: {e:#}");
+                    eprintln!("dns-tracker: will use SOCK_DIAG fallback only");
+                    slot.install(None);
+                }
+            });
+        }
 
         // Capture system DNS before we bind port 53.
         let system_dns = SystemDns::from_resolv_conf();
@@ -1094,7 +1108,7 @@ fn main() {
             Arc::new(|target: &RouteTarget| ensure_route_mark(target).ok());
 
         match DnsForwarder::bind(
-            ebpf_tracker,
+            dns_tracker_slot,
             egress_resolver,
             fwmark_resolver,
             system_dns,

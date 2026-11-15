@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use core_types::{ProxyConfig, RouteTarget, TransportProtocol};
@@ -166,12 +166,40 @@ impl SystemDns {
     }
 }
 
+/// Holder for the eBPF DNS tracker, filled in asynchronously.
+///
+/// Loading the BPF program costs seconds of kernel verifier time (measured:
+/// 9 s on this kernel), so the daemon installs it on a worker thread after
+/// enforcement (nftables + NFQUEUE + socket tracker) is already live. Queries
+/// that arrive before the slot is filled, or that arrive after the program was
+/// rejected, fall through to the SOCK_DIAG//proc paths — the same behaviour as
+/// when the program cannot be loaded at all.
+#[derive(Default)]
+pub struct DnsTrackerSlot(OnceLock<Option<Arc<DnsTracker>>>);
+
+impl DnsTrackerSlot {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Publish the tracker (or `None` when loading failed). Only the first
+    /// call has an effect; the slot is read-only afterwards.
+    pub fn install(&self, tracker: Option<Arc<DnsTracker>>) {
+        let _ = self.0.set(tracker);
+    }
+
+    /// The tracker, or `None` while it is still loading or after a failure.
+    pub fn get(&self) -> Option<&Arc<DnsTracker>> {
+        self.0.get().and_then(Option::as_ref)
+    }
+}
+
 /// DNS forwarder: listens on `127.0.0.1:53`, identifies the source process
 /// via the eBPF tracker, matches against routing rules, and resolves through
 /// the correct egress's DNS servers.
 pub struct DnsForwarder {
     socket: UdpSocket,
-    tracker: Option<Arc<DnsTracker>>,
+    tracker: Arc<DnsTrackerSlot>,
     proc_resolver: ProcProcessResolver,
     egress_resolver: EgressResolver,
     fwmark_resolver: FwmarkResolver,
@@ -201,7 +229,7 @@ impl DnsForwarder {
     /// nftables bypasses NFQUEUE. Must be `>= ROUTE_MARK_BASE` (20000).
     /// Pass 0 to disable marking (e.g. in tests).
     pub fn bind(
-        tracker: Option<Arc<DnsTracker>>,
+        tracker: Arc<DnsTrackerSlot>,
         egress_resolver: EgressResolver,
         fwmark_resolver: FwmarkResolver,
         system_dns: Option<SystemDns>,
@@ -378,7 +406,7 @@ impl DnsForwarder {
     fn resolve_process(&self, peer: SocketAddr, domain: &str) -> Option<ResolvedApp> {
         // Try eBPF tracker first (100% accurate, no /proc race).
         let mut direct = None;
-        if let Some(tracker) = &self.tracker {
+        if let Some(tracker) = self.tracker.get() {
             if let SocketAddr::V4(v4) = peer {
                 if let Some(info) = tracker.lookup(*v4.ip(), v4.port()) {
                     if !info.comm.is_empty() {
@@ -435,7 +463,7 @@ impl DnsForwarder {
     /// ambiguous and we refuse to guess (returns `None`), so the query keeps
     /// the resolver's identity rather than a wrong one.
     fn resolve_behind_resolver(&self, domain: &str) -> Option<ResolvedApp> {
-        if let Some(tracker) = &self.tracker {
+        if let Some(tracker) = self.tracker.get() {
             for candidate in tracker.lookup_all_by_domain(domain) {
                 if is_local_resolver_comm(&candidate.info.comm) {
                     continue;
