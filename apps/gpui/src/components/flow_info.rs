@@ -5,7 +5,12 @@ use gpui_component::{h_flex, v_flex};
 use crate::colors;
 
 pub fn flow_info_section(flow: &FlowContext, mono_font_family: SharedString) -> gpui::AnyElement {
-    let process_name = flow.process_name.as_deref().unwrap_or("unknown");
+    // Not a name: this flow has no proven owner. Say what the dialog can
+    // stand behind instead of inventing "unknown" as if it were an app.
+    let process_name = flow
+        .process_name
+        .as_deref()
+        .unwrap_or("Unidentified process");
     let app_name = &flow.app_name;
     let protocol = format!("{:?}", flow.protocol).to_uppercase();
     let port = flow.destination_port;

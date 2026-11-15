@@ -200,7 +200,21 @@ fn rule_scope_section(
 
     let mut col = h_flex().w_full().flex_col().gap(px(8.));
 
-    if show_warning {
+    // A rule made from an unattributed flow stores no process, so it matches
+    // every app that reaches the destination. When the destination is unknown
+    // too there is nothing to scope at all. Both cases need a warning; which
+    // one depends on what the dialog can show.
+    let warning = if show_warning {
+        Some("Unable to identify this connection. Specify a destination to create a rule.")
+    } else if !process_known {
+        Some(
+            "The process could not be identified. This rule will apply to every app \
+             that reaches this destination.",
+        )
+    } else {
+        None
+    };
+    if let Some(text) = warning {
         col = col.child(
             div()
                 .w_full()
@@ -214,7 +228,7 @@ fn rule_scope_section(
                     div()
                         .text_size(px(10.))
                         .text_color(gpui::hsla(0.07, 0.70, 0.80, 1.))
-                        .child("Unable to identify this connection. Specify a destination to create a rule."),
+                        .child(text),
                 ),
         );
     }
@@ -255,7 +269,9 @@ fn process_scope_row(
 ) -> gpui::AnyElement {
     let display_name = process_name
         .clone()
-        .unwrap_or_else(|| "unknown".to_string());
+        // "unknown" reads like a name. The scope chip has to say what the
+        // rule will actually do: match every app.
+        .unwrap_or_else(|| "any app (unidentified)".to_string());
     let is_specific = *scope == ProcessScope::Specific;
     let sw1 = state_weak.clone();
     let sw2 = state_weak.clone();
@@ -388,7 +404,10 @@ fn rule_summary_line(
     flow: &FlowContext,
 ) -> gpui::AnyElement {
     let proc_label = match process_scope {
-        ProcessScope::Specific => process_name.unwrap_or("unknown").to_string(),
+        // A rule created from an unattributed flow carries no process, so it
+        // matches every app. The summary must not name a process that was
+        // never identified.
+        ProcessScope::Specific => process_name.unwrap_or("any app (unidentified)").to_string(),
         ProcessScope::All => "any process".to_string(),
     };
 
