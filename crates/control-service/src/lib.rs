@@ -426,6 +426,31 @@ impl<R: Repository> ControlService<R> {
                         RuleAction::Ask => {}
                     }
                 }
+                // A socket the kernel itself owns has no user-space process to
+                // ask about: a dialog would name an app that does not exist,
+                // and the rule such a dialog produced would be pinned to a
+                // fiction. Allow it, and publish the decision so the traffic
+                // still appears in the log.
+                if flow.process_origin == core_types::ProcessOrigin::Kernel {
+                    counter!("netkeep.policy.kernel_allowed").increment(1);
+                    eprintln!(
+                        "policy: kernel-owned socket dst={}:{} src=:{} — allowed without a dialog",
+                        flow.destination_ip, flow.destination_port, flow.source_port
+                    );
+                    self.record_event(&flow, FlowState::Allowed, now_secs);
+                    let _ = self.notification_tx.send(PushNotification::KernelAllowed {
+                        source_port: flow.source_port,
+                        destination_ip: flow.destination_ip.clone(),
+                        destination_port: flow.destination_port,
+                        destination_domain: flow.destination_domain.clone(),
+                        protocol: flow.protocol,
+                    });
+                    return ControlResponse::ImmediateVerdict {
+                        action: RuleAction::Allow,
+                        route_target: None,
+                    };
+                }
+
                 match self
                     .decision_engine
                     .register_unknown_flow(flow.clone(), now_secs)
@@ -1039,8 +1064,8 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
 mod tests {
     use control_api::{ControlRequest, ControlResponse};
     use core_types::{
-        DestinationMatcher, DomainSource, FlowContext, FlowDirection, ProcessPriority, Rule,
-        RuleAction, RuleDuration, TransportProtocol,
+        DestinationMatcher, DomainSource, FlowContext, FlowDirection, FlowState, ProcessPriority,
+        Rule, RuleAction, RuleDuration, TransportProtocol,
     };
     use state_store::InMemoryRuleRepository;
 
@@ -1064,6 +1089,7 @@ mod tests {
 
     fn mk_flow() -> FlowContext {
         FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("curl".to_string()),
             process_exe: None,
             app_name: None,
@@ -1401,6 +1427,50 @@ mod tests {
         match out {
             ControlResponse::PendingList(items) => assert_eq!(items.len(), 1),
             _ => panic!("expected pending list"),
+        }
+    }
+
+    /// A kernel-owned socket has no application behind it. Asking would name
+    /// an app that does not exist, and the rule the answer produced would be
+    /// pinned to a fiction. It must be allowed, recorded, published, and must
+    /// leave no rule and no pending behind.
+    #[test]
+    fn kernel_owned_socket_is_allowed_without_a_dialog_or_a_rule() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let mut flow = mk_flow();
+        flow.process_name = None;
+        flow.process_exe = None;
+        flow.app_name = None;
+        flow.process_origin = core_types::ProcessOrigin::Kernel;
+
+        let verdict = service.handle(ControlRequest::RegisterUnknownFlow {
+            flow: flow.clone(),
+            now_secs: 10,
+        });
+        assert_eq!(
+            verdict,
+            ControlResponse::ImmediateVerdict {
+                action: RuleAction::Allow,
+                route_target: None
+            }
+        );
+
+        match service.handle(ControlRequest::ListPending) {
+            ControlResponse::PendingList(items) => {
+                assert!(items.is_empty(), "kernel traffic must not open a dialog")
+            }
+            _ => panic!("expected pending list"),
+        }
+        match service.handle(ControlRequest::ListRules) {
+            ControlResponse::RuleList(rules) => assert!(rules.is_empty(), "no rule may be created"),
+            _ => panic!("expected rule list"),
+        }
+        match service.handle(ControlRequest::ListFlows { limit: 10 }) {
+            ControlResponse::FlowList(events) => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].state, FlowState::Allowed);
+            }
+            _ => panic!("expected flow list"),
         }
     }
 

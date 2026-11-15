@@ -382,6 +382,7 @@ mod tests {
 
     fn mk_flow() -> FlowContext {
         FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("curl".to_string()),
             process_exe: None,
             app_name: None,

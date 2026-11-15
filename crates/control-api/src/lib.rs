@@ -180,6 +180,18 @@ pub enum PushNotification {
         #[serde(default)]
         egress_name: Option<String>,
     },
+    /// A packet from a socket owned by the kernel itself (the `nfsd` threads
+    /// behind an NFS mount, and similar). No user-space process exists, so
+    /// there is nothing to ask about: the flow is allowed without a dialog and
+    /// without a rule. Emitted so the log viewer shows the traffic instead of
+    /// it disappearing.
+    KernelAllowed {
+        source_port: u16,
+        destination_ip: String,
+        destination_port: u16,
+        destination_domain: Option<String>,
+        protocol: TransportProtocol,
+    },
 }
 
 impl PushNotification {
@@ -207,9 +219,23 @@ impl PushNotification {
                 // the row still appears uniquely.
                 (None, pending_id.clone(), 0)
             }
+            PushNotification::KernelAllowed {
+                destination_ip,
+                destination_port,
+                ..
+            } => (
+                Some(KERNEL_PROCESS_LABEL.to_string()),
+                destination_ip.clone(),
+                *destination_port,
+            ),
         }
     }
 }
+
+/// Process column text for traffic the kernel itself owns. It is not a
+/// process name and no rule can pin it: the point is to tell the reader that
+/// no application exists behind the socket, rather than "unknown".
+pub const KERNEL_PROCESS_LABEL: &str = "kernel (no process)";
 
 pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
     match req {
@@ -363,6 +389,7 @@ mod tests {
         let decision = PendingDecision {
             id: "p1".to_string(),
             flow: FlowContext {
+                process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some("firefox".to_string()),
                 process_exe: None,
                 app_name: None,

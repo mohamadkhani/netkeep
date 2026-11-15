@@ -1050,6 +1050,7 @@ mod tests {
     #[test]
     fn forwarded_reply_reuses_the_decided_connection() {
         let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("node".into()),
             process_exe: None,
             app_name: None,
@@ -1095,6 +1096,7 @@ mod tests {
     #[test]
     fn forwarded_reply_does_not_inherit_the_route_mark() {
         let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("node".into()),
             process_exe: None,
             app_name: None,
@@ -1142,6 +1144,7 @@ mod tests {
     #[test]
     fn local_connections_do_not_cache_a_mirror() {
         let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("curl".into()),
             process_exe: None,
             app_name: None,
@@ -1199,6 +1202,7 @@ mod tests {
                 forwarded: false,
             };
             let flow = FlowContext {
+                process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some("curl".into()),
                 process_exe: None,
                 app_name: None,

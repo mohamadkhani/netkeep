@@ -113,9 +113,29 @@ impl DomainSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ProcessOrigin {
+    /// No process could be proven for this socket. The flow may be anyone's.
+    #[default]
+    Unresolved,
+    /// The resolver read the owning process from `/proc`.
+    Proved,
+    /// The socket has no user-space owner, and the scan that established this
+    /// was complete (no permission errors): a kernel service owns it, such as
+    /// the `nfsd` threads behind an NFS mount.
+    Kernel,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowContext {
     pub process_name: Option<String>,
+    /// What the process lookup actually established. `process_name: None`
+    /// alone cannot tell "the kernel owns this socket" from "the lookup
+    /// failed", and those two need different handling: a kernel service has
+    /// no app to ask about, while a failed lookup must never be allowed on a
+    /// guess.
+    #[serde(default)]
+    pub process_origin: ProcessOrigin,
     /// Full executable path from `/proc/<pid>/exe` — the unique identity of
     /// the process binary, used for rule matching and stored in the DB.
     #[serde(default)]

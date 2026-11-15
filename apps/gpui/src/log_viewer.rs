@@ -405,6 +405,25 @@ impl LogViewer {
                 }
                 LogRow::new(None, pending_id, 0, None, "pending-expired", now, None)
             }
+            PushNotification::KernelAllowed {
+                source_port: _,
+                destination_ip,
+                destination_port,
+                destination_domain,
+                protocol: _,
+            } => {
+                let mut r = LogRow::new(
+                    Some(control_api::KERNEL_PROCESS_LABEL.to_string()),
+                    destination_ip.clone(),
+                    *destination_port,
+                    destination_domain.clone(),
+                    "kernel-allowed",
+                    now,
+                    None,
+                );
+                r.action = Some(core_types::RuleAction::Allow);
+                r
+            }
             PushNotification::PolicyMatch {
                 process_name,
                 destination_ip,

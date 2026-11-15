@@ -1075,6 +1075,7 @@ fn main() {
             // an exe path cannot match without it, and dropping it sent the
             // query to system DNS instead of the egress's resolvers.
             let flow = core_types::FlowContext {
+                process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some(process_name.to_string()),
                 process_exe: process_exe.map(str::to_string),
                 app_name: None,

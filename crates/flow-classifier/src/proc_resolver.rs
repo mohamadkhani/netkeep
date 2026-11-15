@@ -10,7 +10,7 @@ use metrics::{counter, histogram};
 
 use crate::diag;
 use crate::sock_diag;
-use crate::{ProcessInfo, ProcessResolver, SocketTracker};
+use crate::{ProcessInfo, ProcessLookup, ProcessResolver, SocketTracker};
 
 /// Real ProcessResolver: (src_ip, src_port, protocol) → ProcessInfo.
 ///
@@ -85,7 +85,7 @@ impl ProcProcessResolver {
     ///   1. SOCK_DIAG netlink (kernel socket table, no /proc race).
     ///   2. /proc/net + /proc/*/fd scan with retries.
     ///   3. `ss` command fallback if both paths miss the inode or fd scan.
-    fn find_pid(&self, ip: IpAddr, port: u16, protocol: TransportProtocol) -> Option<u32> {
+    fn find_pid(&self, ip: IpAddr, port: u16, protocol: TransportProtocol) -> PidLookup {
         let proto_str = proto_label(protocol);
         // Step 0: eBPF socket tracker — instant PID lookup from BPF map.
         // The eBPF program captures the PID at socket creation time (TCP SYN_SENT)
@@ -99,7 +99,7 @@ impl ProcProcessResolver {
                     tracked.pid,
                     tracked.source.label()
                 );
-                return Some(tracked.pid);
+                return PidLookup::Found(tracked.pid);
             }
             counter!("netkeep.proc.resolver.ebpf.misses").increment(1);
             diag!("{proto_str} {ip}:{port} ebpf miss");
@@ -109,25 +109,41 @@ impl ProcProcessResolver {
             .or_else(|| retry_find_socket(ip, port, protocol));
         if let Some((inode, uid)) = inode_uid {
             diag!("{proto_str} {ip}:{port} inode={inode} uid={uid} src=sockdiag|procnet");
-            if let Some(pid) = find_pid_for_inode(inode, Some(uid)) {
+            let (pid, scan_complete) = find_pid_for_inode(inode, Some(uid));
+            if let Some(pid) = pid {
                 diag!("{proto_str} {ip}:{port} fdpid={pid}");
-                return Some(pid);
+                return PidLookup::Found(pid);
+            }
+            // No owner. This is only proof of a kernel socket when two things
+            // hold, and guessing without them would label an ordinary app's
+            // traffic as kernel: the scan actually reached every process (a
+            // permission error produces the same "no owner" observation), and
+            // the socket is in a state a kernel service holds.
+            if scan_complete && kernel_service_socket(inode) {
+                diag!(
+                    "{proto_str} {ip}:{port} inode={inode} uid={uid} no /proc owner, \
+                     complete scan, service state — kernel-owned socket"
+                );
+                return PidLookup::Kernel;
             }
             diag!(
                 "{proto_str} {ip}:{port} inode={inode} uid={uid} no /proc/*/fd owner \
-                 (fork/exec gap?) — trying ss fallback"
+                 (fork/exec gap, unreadable scan, or closing socket) — trying ss fallback"
             );
-            // Inode found but /proc/*/fd scan came up empty (fork/exec gap).
         } else {
             diag!("{proto_str} {ip}:{port} no inode via sock-diag — trying ss fallback");
         }
         let ss_pid = try_ss_fallback(ip, port, protocol);
-        if ss_pid.is_none() {
-            diag!("{proto_str} {ip}:{port} UNRESOLVED — all sources missed");
-        } else {
-            diag!("{proto_str} {ip}:{port} ss pid={:?}", ss_pid);
+        match ss_pid {
+            Some(pid) => {
+                diag!("{proto_str} {ip}:{port} ss pid={pid}");
+                PidLookup::Found(pid)
+            }
+            None => {
+                diag!("{proto_str} {ip}:{port} UNRESOLVED — all sources missed");
+                PidLookup::Missing
+            }
         }
-        ss_pid
     }
 
     /// Look up the Arch Linux package that owns `exe_path` via `pacman -Qo`.
@@ -156,15 +172,17 @@ impl Default for ProcProcessResolver {
 }
 
 impl ProcessResolver for ProcProcessResolver {
-    fn resolve(
+    fn lookup(
         &self,
         src_ip: &str,
         src_port: u16,
         protocol: TransportProtocol,
         sk_uid: Option<u32>,
-    ) -> Option<ProcessInfo> {
+    ) -> ProcessLookup {
         let resolve_start = Instant::now();
-        let ip: IpAddr = src_ip.parse().ok()?;
+        let Some(ip): Option<IpAddr> = src_ip.parse().ok() else {
+            return ProcessLookup::Missing;
+        };
         let key = SocketKey {
             ip,
             port: src_port,
@@ -229,7 +247,7 @@ impl ProcessResolver for ProcProcessResolver {
                     );
                     histogram!("netkeep.proc.resolver.resolve.duration")
                         .record(resolve_start.elapsed().as_secs_f64());
-                    return Some(ProcessInfo {
+                    return ProcessLookup::Found(ProcessInfo {
                         name: entry.name.clone(),
                         exe: entry.exe.clone(),
                         pid: entry.pid,
@@ -253,14 +271,18 @@ impl ProcessResolver for ProcProcessResolver {
                 counter!("netkeep.proc.resolver.ebpf.hits").increment(1);
                 tracked.pid
             }
-            None => self.find_pid(ip, src_port, protocol)?,
+            None => match self.find_pid(ip, src_port, protocol) {
+                PidLookup::Found(pid) => pid,
+                PidLookup::Kernel => return ProcessLookup::KernelOwned,
+                PidLookup::Missing => return ProcessLookup::Missing,
+            },
         };
 
         // Read exe: full path first, fall back to comm. When the process
         // already exited (short-lived CLI raced the resolver), both /proc
         // reads fail — the eBPF hook-time comm is the only surviving name.
         let exe_path = read_exe_path(pid);
-        let raw_name = exe_path
+        let Some(raw_name) = exe_path
             .as_deref()
             .and_then(|p| std::path::Path::new(p).file_name())
             .map(|n| n.to_string_lossy().to_string())
@@ -270,7 +292,10 @@ impl ProcessResolver for ProcProcessResolver {
                     .as_ref()
                     .map(|t| t.comm.clone())
                     .filter(|c| !c.is_empty())
-            })?;
+            })
+        else {
+            return ProcessLookup::Missing;
+        };
 
         // Name fixup: shell wrappers → parent, electron → cmdline / env.
         let name = if raw_name.len() <= 1
@@ -342,8 +367,18 @@ impl ProcessResolver for ProcProcessResolver {
 
         histogram!("netkeep.proc.resolver.resolve.duration")
             .record(resolve_start.elapsed().as_secs_f64());
-        Some(info)
+        ProcessLookup::Found(info)
     }
+}
+
+/// Result of the "which PID owns this socket" search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PidLookup {
+    Found(u32),
+    /// No process owns the socket and every process was scanned successfully.
+    Kernel,
+    /// No answer: the socket may not exist yet, or the scan could not see it.
+    Missing,
 }
 
 // ---------------------------------------------------------------------------
@@ -670,7 +705,12 @@ fn parse_ipv6_hex(hex: &str) -> Option<Ipv6Addr> {
 /// A short retry loop covers multi-process applications (e.g. Electron) where
 /// the network-service subprocess can have a brief window after fork/exec during
 /// which its file descriptors are not yet visible under /proc/<pid>/fd/.
-fn find_pid_for_inode(inode: u64, uid: Option<u32>) -> Option<u32> {
+///
+/// Returns `(pid, complete)`. `complete` is false when any `/proc/<pid>/fd`
+/// could not be read (permission, hidepid, another user): a missing owner only
+/// proves anything — such as "the kernel owns this socket" — when the search
+/// actually reached every process.
+fn find_pid_for_inode(inode: u64, uid: Option<u32>) -> (Option<u32>, bool) {
     let target = format!("socket:[{inode}]");
 
     // Retry delays: 0 ms covers the common case (fd already visible);
@@ -679,26 +719,36 @@ fn find_pid_for_inode(inode: u64, uid: Option<u32>) -> Option<u32> {
     // not have its file descriptors visible under /proc/<pid>/fd/.
     // 20 ms is the extra slot for heavier runtimes (e.g. Cursor AppImage).
     const DELAYS_MS: [u64; 4] = [0, 3, 8, 20];
+    let mut scan_complete = true;
     for &delay in &DELAYS_MS {
         if delay > 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay));
         }
         // UID-filtered pass first (fast path) when the source table has a uid.
         if let Some(uid) = uid {
-            if let Some(pid) = scan_proc_for_inode(&target, Some(uid)) {
-                return Some(pid);
+            let (pid, complete) = scan_proc_for_inode(&target, Some(uid));
+            scan_complete &= complete;
+            if let Some(pid) = pid {
+                return (Some(pid), scan_complete);
             }
         }
         // Full scan — catches setuid, capability-elevated, or socket-passed processes.
-        if let Some(pid) = scan_proc_for_inode(&target, None) {
-            return Some(pid);
+        let (pid, complete) = scan_proc_for_inode(&target, None);
+        scan_complete &= complete;
+        if let Some(pid) = pid {
+            return (Some(pid), scan_complete);
         }
     }
-    None
+    (None, scan_complete)
 }
 
-fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> Option<u32> {
-    let proc = fs::read_dir("/proc").ok()?;
+/// Returns `(pid, complete)`.
+fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> (Option<u32>, bool) {
+    let Ok(proc) = fs::read_dir("/proc") else {
+        return (None, false);
+    };
+
+    let mut complete = true;
 
     for entry in proc.flatten() {
         let pid_str = entry.file_name();
@@ -716,15 +766,58 @@ fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> Option<u32> {
 
         let fd_dir = entry.path().join("fd");
         let Ok(fds) = fs::read_dir(&fd_dir) else {
+            // A process we could not inspect may be the owner. Remember that
+            // so a later "no owner" answer is not read as proof.
+            complete = false;
             continue;
         };
 
         for fd in fds.flatten() {
             if let Ok(link) = fs::read_link(fd.path()) {
                 if link.to_string_lossy() == target {
-                    return Some(pid);
+                    return (Some(pid), complete);
                 }
             }
+        }
+    }
+    (None, complete)
+}
+
+/// Whether the socket with `inode` is in a state a kernel service holds:
+/// ESTABLISHED (01) or LISTEN (0A).
+///
+/// A closing socket — FIN_WAIT, TIME_WAIT, CLOSE_WAIT — belongs to a process
+/// that is going away, and its fd may already be gone from `/proc/<pid>/fd`.
+/// Claiming "kernel" for those would relabel ordinary application traffic.
+fn kernel_service_socket(inode: u64) -> bool {
+    const STATE_ESTABLISHED: u8 = 0x01;
+    const STATE_LISTEN: u8 = 0x0A;
+    matches!(
+        socket_state(inode),
+        Some(STATE_ESTABLISHED) | Some(STATE_LISTEN)
+    )
+}
+
+/// Read the TCP/UDP state column for `inode` from /proc/net/{tcp,tcp6,udp,udp6}.
+fn socket_state(inode: u64) -> Option<u8> {
+    for path in [
+        "/proc/net/tcp",
+        "/proc/net/tcp6",
+        "/proc/net/udp",
+        "/proc/net/udp6",
+    ] {
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        for line in content.lines().skip(1) {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() < 10 {
+                continue;
+            }
+            if cols[9].parse::<u64>() != Ok(inode) {
+                continue;
+            }
+            return u8::from_str_radix(cols[3], 16).ok();
         }
     }
     None
@@ -881,7 +974,7 @@ pub fn stub_resolver_client_pids() -> Vec<u32> {
             continue;
         };
         for (inode, uid) in parse_stub_resolver_clients(&content) {
-            if let Some(pid) = find_pid_for_inode(inode, Some(uid)) {
+            if let (Some(pid), _) = find_pid_for_inode(inode, Some(uid)) {
                 if !pids.contains(&pid) {
                     pids.push(pid);
                 }
@@ -999,7 +1092,7 @@ pub fn varlink_client_pids(socket_path: &str) -> Vec<u32> {
             continue;
         };
         // `/proc/net/unix` carries no uid column → no uid-filtered fast path.
-        if let Some(pid) = find_pid_for_inode(client_inode, None) {
+        if let (Some(pid), _) = find_pid_for_inode(client_inode, None) {
             if !pids.contains(&pid) {
                 pids.push(pid);
             }

@@ -230,6 +230,7 @@ mod tests {
     #[test]
     fn wildcard_matches_apex_and_subdomains() {
         let flow_sub = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: None,
             process_exe: None,
             app_name: None,
@@ -245,6 +246,7 @@ mod tests {
             tcp_syn: false,
         };
         let flow_apex = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: None,
             process_exe: None,
             app_name: None,
@@ -285,6 +287,7 @@ mod tests {
     #[test]
     fn wildcard_matches_with_apex_only_storage_form() {
         let flow_sub = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: None,
             process_exe: None,
             app_name: None,
@@ -350,6 +353,7 @@ mod tests {
     #[test]
     fn wildcard_matches_both_storage_forms_identically() {
         let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: None,
             process_exe: None,
             app_name: None,
@@ -392,6 +396,7 @@ mod tests {
     #[test]
     fn wildcard_empty_pattern_matches_nothing() {
         let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: None,
             process_exe: None,
             app_name: None,
@@ -423,6 +428,7 @@ mod tests {
     #[test]
     fn specific_process_rule_beats_general_rule() {
         let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("firefox".to_string()),
             process_exe: None,
             app_name: None,
@@ -457,6 +463,7 @@ mod tests {
     #[test]
     fn deny_beats_allow_at_same_specificity() {
         let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: None,
             process_exe: None,
             app_name: None,
@@ -489,6 +496,7 @@ mod tests {
 
     fn flow_unknown_proc(domain: Option<&str>, ip: &str) -> FlowContext {
         FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: None,
             process_exe: None,
             app_name: None,
@@ -717,6 +725,7 @@ mod tests {
     #[test]
     fn tie_break_equal_route_rules_prefers_lexicographically_greater_id() {
         let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("socks-client".to_string()),
             process_exe: None,
             app_name: None,
@@ -851,6 +860,7 @@ mod tests {
         low.priority = seed_priority(&low, 2, ProcessPriority::Low);
 
         let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("firefox".to_string()),
             process_exe: None,
             app_name: None,
@@ -891,6 +901,7 @@ mod tests {
         ip_only.priority = seed_priority(&ip_only, 2, ProcessPriority::High);
 
         let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("firefox".to_string()),
             process_exe: None,
             app_name: None,

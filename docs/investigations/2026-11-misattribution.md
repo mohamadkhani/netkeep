@@ -579,7 +579,15 @@ This is not a regression: the `src=:2049` NFS flows carried `process=None` on 20
 
 **Fixed.** The DNS tracker loaded with `DEBUG|STATS` verifier logging, and the kernel rejected `BPF_PROG_LOAD` with `E2BIG` ("Argument list too long") because the log did not fit the buffer. It now loads with logging disabled and retries with `VERBOSE` only if the quiet attempt fails (`1519506`). Unverified until the next install: whether the program is then accepted, and how much of the 9 s startup cost the log was responsible for.
 
-**Not fixed.** Nothing labels a kernel-owned socket as such. The dialog says "Unidentified process" for an NFS server socket, which reads as a detection failure when the truth is that no process exists. Distinguishing the two needs a provenance field on the flow (proved process / kernel socket / lookup failed); inferring "kernel" from a missing fd owner is not sound, because a `/proc` gap produces the same observation.
+**Settled and implemented.** Kernel sockets are allowed without a dialog and do not create a rule; they still appear in the log viewer as `kernel (no process)`.
+
+`FlowContext` now carries `process_origin` (`Unresolved` / `Proved` / `Kernel`, `#[serde(default)]`). The resolver sets `Kernel` only when all three hold:
+
+1. `SOCK_DIAG` or `/proc/net` found an inode for the socket;
+2. the `/proc/*/fd` scan completed without a permission error (`scan_proc_for_inode` now reports that, because a scan that could not read a process produces the same "no owner" answer as a real kernel socket);
+3. the socket is ESTABLISHED or LISTEN — a closing socket's fd may already be gone, and those belong to ordinary applications.
+
+`RegisterUnknownFlow` allows `Kernel` flows after rule matching (an explicit rule still wins), records the flow, and publishes `PushNotification::KernelAllowed`. The log viewer renders it as `kernel (no process)` with action Allow.
 
 ---
 

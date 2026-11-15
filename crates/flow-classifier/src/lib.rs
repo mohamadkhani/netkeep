@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use core_types::{DomainSource, FlowContext, FlowDirection, TransportProtocol};
+use core_types::{DomainSource, FlowContext, FlowDirection, ProcessOrigin, TransportProtocol};
 use metrics::{counter, histogram};
 
 // ── SNI DNS cache ──────────────────────────────────────────────────────────────
@@ -393,13 +393,43 @@ pub struct ProcessInfo {
 /// when available. Implementations use it to reject candidate matches that
 /// belong to a different user (port collisions across users, stale entries).
 pub trait ProcessResolver {
+    /// Resolve the owning process and say how it was established.
+    ///
+    /// The distinction matters: "no process" from a failed lookup and "no
+    /// process, because the kernel owns the socket" lead to different
+    /// decisions, and only the second one may bypass the dialog.
+    fn lookup(
+        &self,
+        src_ip: &str,
+        src_port: u16,
+        protocol: TransportProtocol,
+        sk_uid: Option<u32>,
+    ) -> ProcessLookup;
+
+    /// Convenience wrapper for callers that only need the process.
     fn resolve(
         &self,
         src_ip: &str,
         src_port: u16,
         protocol: TransportProtocol,
         sk_uid: Option<u32>,
-    ) -> Option<ProcessInfo>;
+    ) -> Option<ProcessInfo> {
+        match self.lookup(src_ip, src_port, protocol, sk_uid) {
+            ProcessLookup::Found(info) => Some(info),
+            ProcessLookup::KernelOwned | ProcessLookup::Missing => None,
+        }
+    }
+}
+
+/// Outcome of a process lookup.
+#[derive(Debug, Clone)]
+pub enum ProcessLookup {
+    Found(ProcessInfo),
+    /// Inode found, the `/proc/*/fd` scan completed without permission errors,
+    /// and no process owns it: a kernel service holds the socket.
+    KernelOwned,
+    /// Nothing could be proven. Never treat this as "no app".
+    Missing,
 }
 
 /// Resolves a domain name from the DNS cache for a given destination IP.
@@ -454,12 +484,18 @@ where
             TransportProtocol::Other => "other",
         };
 
-        let proc_info = self.process_resolver.resolve(
+        let lookup = self.process_resolver.lookup(
             &packet.src_ip,
             packet.src_port,
             packet.protocol,
             packet.sk_uid,
         );
+
+        let (proc_info, process_origin) = match lookup {
+            ProcessLookup::Found(info) => (Some(info), ProcessOrigin::Proved),
+            ProcessLookup::KernelOwned => (None, ProcessOrigin::Kernel),
+            ProcessLookup::Missing => (None, ProcessOrigin::Unresolved),
+        };
 
         if proc_info.is_some() {
             counter!("netkeep.process.resolved", "result" => "hit").increment(1);
@@ -488,6 +524,7 @@ where
 
         FlowContext {
             process_name,
+            process_origin,
             process_exe,
             app_name,
             source_ip: packet.src_ip.clone(),
@@ -574,19 +611,22 @@ pub struct FakeProcessResolver {
 }
 
 impl ProcessResolver for FakeProcessResolver {
-    fn resolve(
+    fn lookup(
         &self,
         _src_ip: &str,
         _src_port: u16,
         _protocol: TransportProtocol,
         _sk_uid: Option<u32>,
-    ) -> Option<ProcessInfo> {
-        self.result.as_ref().map(|name| ProcessInfo {
-            name: name.clone(),
-            exe: None,
-            pid: None,
-            app_name: None,
-        })
+    ) -> ProcessLookup {
+        match &self.result {
+            Some(name) => ProcessLookup::Found(ProcessInfo {
+                name: name.clone(),
+                exe: None,
+                pid: None,
+                app_name: None,
+            }),
+            None => ProcessLookup::Missing,
+        }
     }
 }
 

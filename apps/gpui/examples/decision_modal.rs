@@ -105,6 +105,7 @@ fn main() {
     let item = PendingDecision {
         id: "test-decision".to_string(),
         flow: FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: field("--process", "curl"),
             process_exe: field("--exe", "/usr/bin/curl"),
             app_name: field("--app", "cURL"),
