@@ -330,9 +330,29 @@ This is also the acceptance criterion for the fix: every `(process, domain)` pai
 
 ---
 
-## 7. Fix plan (not applied)
+## 7. Fix plan
 
 Ordered by impact per unit of risk. Stage 0 is designed to close the proven cases without a schema migration.
+
+**Status.** Stage 0 and Stage 1 items 1–4 are implemented. Stage 2/3 are not started.
+
+| Stage | Item | State |
+|---|---|---|
+| 0 | 0.1 provenance + deferral on out-of-band names | done |
+| 0 | 0.2 process-scoped, ambiguity-aware `SniDnsCache` (`lookup_for`) | done |
+| 0 | 0.3 source-port-scoped pending upgrade | done |
+| 0 | 0.4 sweep only the just-added rule | superseded by 1.3 |
+| 0 | 0.5 `PORT_PIDS` UDP-only; `AttrCache` poisoning | done |
+| 1 | 1.1 refuse ambiguous IPs (already true in `lookup_for`) | done |
+| 1 | 1.2 port-scope DNS-derived names to `80/443/8080/8443` | done |
+| 1 | 1.3 `sweep_pending` requires rule match + same process identity | done |
+| 1 | 1.4 `process_matches` requires every pinned field, `(Some(_), None)` removed | done |
+| 2 | 2.5 cmdline hint, 2.6 `getaddrinfo` uprobe, 2.7 UI hints | not started |
+| 3 | 3.8 provenance in the dialog, 3.9 rule dedupe, 3.10 batch dialogs | not started |
+
+Commits: `724132e` (Stage 0), then the same branch carries Stage 1 items 1–4. Verification runs on `verify/misattribution-log-viewer`, which stacks the fix on `origin/feat/log-viewer` so the log viewer can be used without merging it into `main`.
+
+Stage 1 also removed the `(Some(_), None)` fallback for every action, not only `Deny`. The consequence is visible and measured in §9.4: an unattributed flow to a destination that already has an exact-destination rule now opens a dialog instead of reusing that rule.
 
 ### Stage 0 — surgical hotfix
 
@@ -379,9 +399,9 @@ Acceptance for Stage 0:
 ### Stage 1 — ambiguity policy
 
 1. **Refuse ambiguous IPs entirely.** If an IP has more than one live domain and no process match, return `None`. A pending then shows `IP:port` (truthful) instead of a fabricated hostname.
-2. **Port-scope non-443 fallbacks.** Key DNS-derived answers by destination port where the port is meaningful (22, 25, 5432, …), or refuse to attach a web-domain answer to a non-web port. Today `ssh:22` can inherit any HTTPS name on the host.
-3. **Scope `sweep_pending`.** Only resolve pendings that match the rule just added **and** belong to the same process as the answered flow. Add the rule id, domain, and provenance to the sweep log. Optionally require an explicit "apply to similar" opt-in.
-4. **Narrow `process_matches`.** Keep the `(Some(_), None)` fallback for `Allow` / `Route` only; a `Deny` on an unattributed flow must not silently block a different app. Re-check the name-only widening against the provenance rules above.
+2. **Port-scope non-443 fallbacks.** A DNS-derived name may only be attached on the hostname-bearing ports `80`, `443`, `8080`, `8443` (`port_accepts_dns_prior`). On every other port the cache is not consulted, so `ssh:22` cannot inherit any HTTPS name. A name on another port needs the Stage 2 cmdline hint.
+3. **Scope `sweep_pending`.** Only pending decisions that the just-added rule matches, that keep the same rule id, and that share the answered flow's process identity are resolved. The sweep log carries the rule id.
+4. **Narrow `process_matches`.** The `(Some(_), None)` fallback is removed for every action, not only `Deny`. A rule applies only when every process field it pins — name and exe path — equals the flow's. An unattributed flow matches no process-pinned rule.
 
 ### Stage 2 — accurate naming for no-SNI clients
 
@@ -462,16 +482,59 @@ The live count is 602 at 2026-11-13 00:25 (599 `Permanent`, 3 `UntilRestart`). R
 - Two apps on the same anycast IP, one allowed and one denied; confirm the Deny applies to the right process and does not leak.
 - Answer a dialog during a burst; confirm only the intended pending resolves.
 
+### 9.4 Results
+
+Checks 1–4 above need raw packets. The daemon logs verdicts, not packets, so they are replayed through the control socket and the log viewer instead of a packet file.
+
+**Unit and static checks.** `just test` 296 passed, 0 failed; `just lint` and `just fmt-check` clean.
+
+**Control-socket replay, before and after.** One probe script drives `RegisterUnknownFlow` against a sandbox daemon, then reads `ListPending`. The flows are four sockets from `synara` to `188.114.98.98:443` with no domain, one `brave` flow to the same address carrying `api.zed.dev`, and one `synara` flow to `188.114.98.98:22`.
+
+| Build | Distinct pending ids | Distribution |
+|---|---|---|
+| `01:35` daemon (Stage 0 only) | 4 | one dialog per source port |
+| this change set | 1 | one dialog for the app and destination |
+
+Both builds keep the named `brave` flow in its own pending, keep `:22` in its own pending, and leave the `synara` pendings without a domain. That is check 2 and check 3 for `synara` and `:22` at the decision layer.
+
+**Log viewer.** `netkeep-gpui --log-viewer <socket>` renders the daemon's push-notification stream. Recording that stream while the probe ran shows one `PendingCreated` per connection and one pending id for all four sockets (`pending-1` four times, then `pending-2` for `brave`, `pending-3` for `:22`). Any consumer of the stream must key on the pending id; the tray monitor already does, because it polls `ListPending` and tracks shown ids.
+
+**Live measurement after the restart (01:35–01:40).** 432 flow events in the first five minutes.
+
+| Window | Events | Pending events | Distinct destinations |
+|---|---|---|---|
+| first 60 s after restart | 144 | 71 (49%) | 10 |
+| 60 s – 7 min after | 288 | 4 (1%) | 67 |
+| 30 min before restart | 1736 | 42 (2%) | 277 |
+
+The steady-state pending rate did not rise. The startup spike has three causes:
+
+1. Forty flows had no process attribution, and all forty went to addresses that already had an exact-destination rule pinned to a different app (`192.168.240.112` → `Allow named` / `Allow adb`, `5.202.198.83` → `Allow app_process64`, `104.16.11.34` → `Allow node`). Removing the `(Some(_), None)` fallback is what makes those flows prompt.
+2. Each socket was its own pending, so one unattributed app produced four dialogs.
+3. A dialog opened on an unattributed flow used to store a process-agnostic rule while the UI said "Specific". Six of the eleven rules created after the restart are of that kind: `ui-1794693938`, `ui-1794693944`, `ui-1794693947` (any process → `192.168.240.112`), `ui-1794693921`, `ui-1794693934` (any process → `5.202.198.83`), `ui-1794693942` (any process → `104.16.11.34`). The journal shows `brave → 5.202.198.83:443` allowed by `ui-1794693921`.
+
+**Follow-up fixes in this change set.**
+
+- Pending dedupe is now destination-scoped: identical process identity (including "unidentified") plus the same destination, port, protocol, and direction share one pending. Nothing is copied from the joining flow, so the dialog still shows only what was proven. An expired pending never absorbs a live flow.
+- The dialog states that the rule will apply to every app when the process is unidentified, and the scope chip and summary say "any app (unidentified)" instead of naming a process that was never proven.
+- `EgressResolver` carries `process_exe`, and the daemon passes the resolved exe into the DNS egress lookup. Before this, the lookup flow had `process_exe: None`, so every `Route` rule that pins an exe (131 rules) could not match its own DNS query and the query fell through to system DNS.
+
+### 9.5 Not yet verified
+
+- Checks 1–4 against real intercepted packets. The installed daemon is still the `01:35` build; the new one is built but not installed. `just dev-install` installs and restarts it.
+- The DNS egress fix under live traffic: it needs a `Route` rule that pins an exe and a query from that app.
+- Rule-store cleanup (§8) waits for a clean replay on the installed build.
+
 ---
 
 ## 10. Open decisions
 
-1. **`synara → synara-account-api-trial.synara-orgs.workers.dev`: allow or deny?** The current `Permanent` Deny (`ui-1794398999`) is being bypassed by the `events.kiloapps.io` Route. The fix will make the Deny effective, so the answer changes user-visible behavior.
-2. **Are the broad `Any` routes intentional?** `brave → Any` and `chromium → Any` Route every flow for those apps through the proxy, which hides destination mistakes behind a plausible action.
-3. **Should an IP-only `ssh` connection prompt with `IP:port`?** The alternative is to allow it silently until a name is known, which weakens the deny-by-default story.
+1. **`synara → synara-account-api-trial.synara-orgs.workers.dev`: allow or deny?** Settled: deny. The existing `Permanent` Deny (`ui-1794398999`) stays, and the fix makes it effective.
+2. **Are the broad `Any` routes intentional?** Settled: keep `brave → Any` and `chromium → Any` as they are.
+3. **Should an IP-only `ssh` connection prompt with `IP:port`?** Settled: yes, prompt with `IP:port` until a name is proven.
 4. **When to clean the store?** Recommendation: after Stage 0 is deployed and replayed clean, then delete the impossible rules and collapse clusters in one reviewed pass.
-5. **Is the `(Some(_), None)` fallback still wanted for `Route`?** It was added for UX (avoid re-prompting the same host), but it also lets a Route apply to an unattributed flow.
-6. **How should CNAME aliases be represented?** The proxy dials the requested name while DNS observes the canonical name; one flow can legitimately have two names. Decide whether rules match either, or only the requested name.
+5. **Is the `(Some(_), None)` fallback still wanted for `Route`?** Settled: no, it is removed for every action. An unattributed flow prompts instead of borrowing another app's rule, and the dialog now says that the resulting rule applies to every app.
+6. **How should CNAME aliases be represented?** Settled for now: exact name matching only. The proxy dials the requested name while DNS may observe the canonical name; a rule matches the name the flow carries and nothing else.
 
 ---
 
@@ -485,6 +548,8 @@ Two Synara tasks were created in project `netkeep` (`e9321962-5312-4343-bc9d-95b
 | `todo:417d6f3aef8a732ce6efce38eea35303` | Stage 0 hotfix: provenance + deferral, process-bound `SniDnsCache`, source-port-scoped pending upgrade, `PORT_PIDS` UDP-only, `AttrCache` hardening. Notes carry the proven cases, file:line pointers, tests, and the `no DB writes` constraint. |
 
 The Stage 0 task notes were later extended with the 12:05 `brave`/`synara` reproduction and the `AttrCache` hardening changes. The full evidence is in this file and the companion.
+
+**Branches.** `fix/misattribution-stage0` holds Stage 0 (`724132e`). Stage 1 items 1–4 and the three follow-up fixes (pending dedupe, dialog wording, DNS egress `process_exe`) sit on top of it. `verify/misattribution-log-viewer` stacks those commits on `origin/feat/log-viewer` so verification can use the log viewer without merging it into `main`.
 
 **Base and artifacts.** This branch starts at `83d0499` (`main`) and is a temporary documentation branch; it can be deleted after review without affecting `main`. The investigation used `/tmp/opencode/netkeep-investigation/` (`rules.json`, `rules_now.json`, `rules_live_2026-11-13.json`, `flows.json`, `journal.txt`, `parsed.json`, `mismatches.json`). Those files are not committed; the evidence tables reproduce every number cited here.
 
