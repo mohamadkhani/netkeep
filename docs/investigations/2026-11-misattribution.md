@@ -525,6 +525,40 @@ The steady-state pending rate did not rise. The startup spike has three causes:
 - The DNS egress fix under live traffic: it needs a `Route` rule that pins an exe and a query from that app.
 - Rule-store cleanup (§8) waits for a clean replay on the installed build.
 
+### 9.6 Restart enforcement gap (found while checking the startup attribution report)
+
+**Report.** Process names look undetected for the first seconds after a daemon restart, then everything appears correct at once.
+
+**Measurement.** Unattributed decisions (`process=None`) in the first 120 s after each restart, compared with the following 30 minutes, over 10 restarts:
+
+| restart | first 120 s | next 30 min |
+|---|---|---|
+| 11-13 21:29 | 2 / 170 | 5 / 359 |
+| 11-14 19:07 | 3 / 27 | 8 / 23 |
+| 11-14 20:07 | 2 / 74 | 3 / 383 |
+| 11-14 22:55 | 0 / 39 | 8 / 368 |
+| 11-15 01:35 | 2 / 54 | 7 / 373 |
+| 11-15 08:25 | 2 / 44 | 1 / 193 |
+
+There is no startup spike in attribution, and no flow ever gains a name on a later record: across 20 000 events, zero `(src_port, dst_ip, dst_port)` groups contain an unnamed row followed by a named one. The resolver is not slow to warm up.
+
+**Cause.** The daemon enforced nothing for the first 9–15 s after start. Journal for 11-15:
+
+```
+08:25:34  daemon listening on /run/netkeep/netkeep.sock
+08:25:43  dns-tracker: eBPF load failed (failed to load kprobe into kernel)
+08:25:43  nftables rules applied (nfqueue=Some(0))
+08:25:43  sock-tracker: eBPF programs attached
+08:25:43  nfqueue processor running on queue 0
+08:25:43  first policy decision
+```
+
+`DnsTracker::load()` ran inline on the startup path (`apps/daemon/src/main.rs`), before the transparent proxies, nftables, the socket tracker, and NFQUEUE. The kernel spent 9 s on the BPF object and then rejected it, so no nftables table and no NFQUEUE existed for that window: traffic passed unfiltered and nothing was classified. The same gap appears at every restart (19:07:37→19:07:46, 21:29:22→21:29:37).
+
+**Fix.** The tracker now loads on a worker thread. The forwarder holds a `DnsTrackerSlot` (`crates/dns-tracker/src/forwarder.rs`) that starts empty and is filled when the program is accepted; queries in the meantime use the SOCK_DIAG and `/proc` paths, which is what the forwarder already did when the program could not be loaded at all. The failure message now prints the whole context chain (`{e:#}`) instead of the outer "failed to load kprobe into kernel", which discarded the kernel's reason.
+
+**Still open.** The DNS eBPF program fails to load on every start, so DNS-based attribution permanently runs on the SOCK_DIAG fallback. The errno and verifier output are only visible on the next start of the installed build; the cause is not yet identified.
+
 ---
 
 ## 10. Open decisions
