@@ -119,16 +119,23 @@ impl ProcProcessResolver {
             // traffic as kernel: the scan actually reached every process (a
             // permission error produces the same "no owner" observation), and
             // the socket is in a state a kernel service holds.
-            if scan_complete && kernel_service_socket(inode) {
+            let state = socket_state(inode);
+            if scan_complete && is_service_state(state) {
+                counter!("netkeep.proc.resolver.kernel_socket", "result" => "claimed").increment(1);
                 diag!(
                     "{proto_str} {ip}:{port} inode={inode} uid={uid} no /proc owner, \
                      complete scan, service state — kernel-owned socket"
                 );
                 return PidLookup::Kernel;
             }
+            counter!(
+                "netkeep.proc.resolver.kernel_socket",
+                "result" => if scan_complete { "state" } else { "scan_incomplete" }
+            )
+            .increment(1);
             diag!(
                 "{proto_str} {ip}:{port} inode={inode} uid={uid} no /proc/*/fd owner \
-                 (fork/exec gap, unreadable scan, or closing socket) — trying ss fallback"
+                 (scan_complete={scan_complete} state={state:?}) — trying ss fallback"
             );
         } else {
             diag!("{proto_str} {ip}:{port} no inode via sock-diag — trying ss fallback");
@@ -765,17 +772,29 @@ fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> (Option<u32>, boo
         }
 
         let fd_dir = entry.path().join("fd");
-        let Ok(fds) = fs::read_dir(&fd_dir) else {
-            // A process we could not inspect may be the owner. Remember that
-            // so a later "no owner" answer is not read as proof.
-            complete = false;
-            continue;
+        let fds = match fs::read_dir(&fd_dir) {
+            Ok(fds) => fds,
+            Err(err) => {
+                if fd_error_is_inconclusive(&err) {
+                    // A process we could not inspect may be the owner. Remember
+                    // that so a later "no owner" answer is not read as proof.
+                    complete = false;
+                }
+                continue;
+            }
         };
 
         for fd in fds.flatten() {
-            if let Ok(link) = fs::read_link(fd.path()) {
-                if link.to_string_lossy() == target {
-                    return (Some(pid), complete);
+            match fs::read_link(fd.path()) {
+                Ok(link) => {
+                    if link.to_string_lossy() == target {
+                        return (Some(pid), complete);
+                    }
+                }
+                Err(err) => {
+                    if fd_error_is_inconclusive(&err) {
+                        complete = false;
+                    }
                 }
             }
         }
@@ -789,12 +808,20 @@ fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> (Option<u32>, boo
 /// A closing socket — FIN_WAIT, TIME_WAIT, CLOSE_WAIT — belongs to a process
 /// that is going away, and its fd may already be gone from `/proc/<pid>/fd`.
 /// Claiming "kernel" for those would relabel ordinary application traffic.
-fn kernel_service_socket(inode: u64) -> bool {
+fn is_service_state(state: Option<u8>) -> bool {
     const STATE_ESTABLISHED: u8 = 0x01;
     const STATE_LISTEN: u8 = 0x0A;
+    matches!(state, Some(STATE_ESTABLISHED) | Some(STATE_LISTEN))
+}
+
+/// A failed `/proc/<pid>/fd` read only makes the scan inconclusive when we
+/// were *denied* access. A process that exited between listing `/proc` and
+/// opening its fd directory cannot own a live socket, so its `ENOENT` says
+/// nothing about the socket being searched for.
+fn fd_error_is_inconclusive(err: &std::io::Error) -> bool {
     matches!(
-        socket_state(inode),
-        Some(STATE_ESTABLISHED) | Some(STATE_LISTEN)
+        err.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Other
     )
 }
 
@@ -1143,6 +1170,30 @@ fn parse_varlink_sessions(content: &str, socket_path: &str) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a denied read leaves the scan inconclusive. A process that
+    /// vanished mid-scan (ENOENT) cannot own a live socket, and treating that
+    /// as inconclusive would block the kernel-socket proof on any busy
+    /// machine.
+    #[test]
+    fn only_permission_errors_make_the_scan_inconclusive() {
+        use std::io::{Error, ErrorKind};
+        assert!(fd_error_is_inconclusive(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
+        assert!(!fd_error_is_inconclusive(&Error::from(ErrorKind::NotFound)));
+    }
+
+    /// ESTABLISHED and LISTEN belong to long-lived service sockets; anything
+    /// else may be an application socket on its way out.
+    #[test]
+    fn service_states_are_established_and_listen() {
+        assert!(is_service_state(Some(0x01)));
+        assert!(is_service_state(Some(0x0A)));
+        assert!(!is_service_state(Some(0x06)), "TIME_WAIT");
+        assert!(!is_service_state(Some(0x04)), "FIN_WAIT1");
+        assert!(!is_service_state(None));
+    }
 
     const TCP_SAMPLE: &str = "\
   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
