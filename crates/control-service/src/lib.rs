@@ -427,27 +427,14 @@ impl<R: Repository> ControlService<R> {
                     }
                 }
                 // A socket the kernel itself owns has no user-space process to
-                // ask about: a dialog would name an app that does not exist,
-                // and the rule such a dialog produced would be pinned to a
-                // fiction. Allow it, and publish the decision so the traffic
-                // still appears in the log.
-                if flow.process_origin == core_types::ProcessOrigin::Kernel {
-                    counter!("netkeep.policy.kernel_allowed").increment(1);
-                    eprintln!(
-                        "policy: kernel-owned socket dst={}:{} src=:{} — allowed without a dialog",
-                        flow.destination_ip, flow.destination_port, flow.source_port
-                    );
-                    self.record_event(&flow, FlowState::Allowed, now_secs);
-                    let _ = self.notification_tx.send(PushNotification::KernelAllowed {
-                        source_port: flow.source_port,
-                        destination_ip: flow.destination_ip.clone(),
-                        destination_port: flow.destination_port,
-                        destination_domain: flow.destination_domain.clone(),
-                        protocol: flow.protocol,
-                    });
+                // ask about; see `allow_kernel_owned`.
+                if let Some(decision) = self.allow_kernel_owned(&flow, now_secs) {
+                    let FlowDecision::Immediate(action, route_target) = decision else {
+                        unreachable!("kernel allowance is always an immediate verdict");
+                    };
                     return ControlResponse::ImmediateVerdict {
-                        action: RuleAction::Allow,
-                        route_target: None,
+                        action,
+                        route_target,
                     };
                 }
 
@@ -923,6 +910,36 @@ impl<R: Repository> ControlService<R> {
             ControlResponse::Error("rule not found".to_string())
         }
     }
+
+    /// A socket the kernel itself owns has no user-space process to ask about:
+    /// a dialog would name an app that does not exist, and the rule such a
+    /// dialog produced would be pinned to a fiction. Allow it, record it, and
+    /// publish the decision so the traffic still appears in the log.
+    ///
+    /// Returns `None` for every other flow, so the caller continues its normal
+    /// decision path. Both entry points — intercepted packets
+    /// ([`FlowRegistrar::register`]) and the control API
+    /// (`RegisterUnknownFlow`) — call this, because a branch added to only one
+    /// of them leaves the live path still asking the user.
+    fn allow_kernel_owned(&mut self, flow: &FlowContext, now_secs: u64) -> Option<FlowDecision> {
+        if flow.process_origin != core_types::ProcessOrigin::Kernel {
+            return None;
+        }
+        counter!("netkeep.policy.kernel_allowed").increment(1);
+        eprintln!(
+            "policy: kernel-owned socket dst={}:{} src=:{} — allowed without a dialog",
+            flow.destination_ip, flow.destination_port, flow.source_port
+        );
+        self.record_event(flow, FlowState::Allowed, now_secs);
+        let _ = self.notification_tx.send(PushNotification::KernelAllowed {
+            source_port: flow.source_port,
+            destination_ip: flow.destination_ip.clone(),
+            destination_port: flow.destination_port,
+            destination_domain: flow.destination_domain.clone(),
+            protocol: flow.protocol,
+        });
+        Some(FlowDecision::Immediate(RuleAction::Allow, None))
+    }
 }
 
 /// Walk an egress's target list and return the first one that is currently
@@ -1011,6 +1028,13 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                 RuleAction::Ask => {}
             }
         }
+        // Kernel-owned sockets have no app to ask about, and the SNI deferral
+        // below assumes a TLS client that could send a ClientHello — a kernel
+        // service cannot. Decide it first.
+        if let Some(decision) = self.allow_kernel_owned(&flow, now_secs) {
+            return decision;
+        }
+
         // Defer unknown TLS connections until the name is in-band. A SYN
         // carries no ClientHello, so any domain on it is only a DNS/cache
         // prior — possibly learned from another app on the same anycast IP.
@@ -1471,6 +1495,36 @@ mod tests {
                 assert_eq!(events[0].state, FlowState::Allowed);
             }
             _ => panic!("expected flow list"),
+        }
+    }
+
+    /// REGRESSION: intercepted packets enter the service through
+    /// `FlowRegistrar::register`, not through the control API. The kernel
+    /// allowance existed only on `RegisterUnknownFlow`, so live NFS traffic
+    /// kept prompting while a control-socket probe passed.
+    #[test]
+    fn registrar_entry_point_allows_kernel_owned_flows() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let mut flow = mk_flow();
+        flow.process_name = None;
+        flow.process_exe = None;
+        flow.app_name = None;
+        flow.process_origin = core_types::ProcessOrigin::Kernel;
+
+        let decision = service.register(flow, 10);
+        assert!(
+            matches!(decision, FlowDecision::Immediate(RuleAction::Allow, None)),
+            "the live packet path must allow a kernel-owned flow"
+        );
+        match service.handle(ControlRequest::ListPending) {
+            ControlResponse::PendingList(items) => {
+                assert!(items.is_empty(), "no dialog for a kernel-owned flow")
+            }
+            _ => panic!("expected pending list"),
+        }
+        match service.handle(ControlRequest::ListRules) {
+            ControlResponse::RuleList(rules) => assert!(rules.is_empty(), "no rule may be created"),
+            _ => panic!("expected rule list"),
         }
     }
 
