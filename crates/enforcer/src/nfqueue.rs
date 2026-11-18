@@ -293,6 +293,10 @@ pub struct NfqueueProcessor<C, FR> {
 // Cached decisions expire after 10 minutes. TCP FINs evict the entry early
 // (handled below), so this TTL is mostly a backstop for UDP and long-lived flows.
 const CACHE_TTL_SECS: u64 = 600;
+/// How long the reply direction of a deferred (SNI-less) handshake stays
+/// accepted. Long enough for the SYN-ACK and the first data segment, short
+/// enough that an unanswered deferral does not turn into a standing permit.
+const DEFER_MIRROR_TTL_SECS: u64 = 15;
 // Maximum cache entries before a sweep evicts expired entries.
 const CACHE_MAX: usize = 8192;
 
@@ -760,6 +764,30 @@ where
             }
         }
 
+        // DeferSni accepts the handshake without a verdict: the ClientHello
+        // that can decide the connection has not arrived yet. The server's
+        // SYN-ACK comes *before* it, in the reply direction, where no local
+        // socket exists (the app lives in the container's network namespace).
+        // Without this entry that packet looked like a brand-new unattributed
+        // flow, and the daemon raised a dialog for a connection it had already
+        // let through.
+        //
+        // The window is short on purpose: it covers the handshake, not the
+        // transfer, and it only opens for traffic whose SYN we accepted.
+        if !should_cache && matches!(&decision, FlowDecision::DeferSni) && raw.forwarded {
+            self.decided.insert(
+                key.mirror(),
+                CachedVerdict {
+                    accept: true,
+                    fwmark: None,
+                    expires_at: now_secs + DEFER_MIRROR_TTL_SECS,
+                    routing_revision: routing_revision
+                        .unwrap_or_else(|| self.registrar.routing_revision()),
+                },
+            );
+            counter!("netkeep.verdict.cache.deferred_mirror").increment(1);
+        }
+
         gauge!("netkeep.verdict.cache.entries").set(self.decided.len() as f64);
         let (ip_entries, domain_entries) = self.attr_cache.len();
         gauge!("netkeep.proc.attr.cache.entries", "cache" => "ip").set(ip_entries as f64);
@@ -1020,6 +1048,116 @@ mod tests {
         fn routing_revision(&mut self) -> u64 {
             0
         }
+    }
+
+    /// Registrar that always defers, counting how often it was asked.
+    struct DeferRegistrar {
+        attempts: usize,
+    }
+
+    impl FlowRegistrar for DeferRegistrar {
+        fn register(&mut self, _flow: FlowContext, _now_secs: u64) -> FlowDecision {
+            self.attempts += 1;
+            FlowDecision::DeferSni
+        }
+
+        fn route_mark(&mut self, _target: &RouteTarget) -> Option<u32> {
+            None
+        }
+
+        fn routing_revision(&mut self) -> u64 {
+            0
+        }
+    }
+
+    /// A container's TLS SYN is accepted while the daemon waits for the SNI.
+    /// The server's SYN-ACK arrives first, in the reply direction, where no
+    /// local socket exists — it used to look like a brand-new unattributed
+    /// flow and raised a dialog for a connection the daemon had just accepted.
+    #[test]
+    fn deferred_handshake_reply_is_accepted_without_a_new_question() {
+        let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
+            process_name: Some("app_process64".into()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "192.168.240.112".into(),
+            source_port: 55988,
+            destination_ip: "172.217.118.4".into(),
+            destination_port: 443,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: DeferRegistrar { attempts: 0 },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+
+        let syn = tcp_packet("192.168.240.112", 55988, "172.217.118.4", 443);
+        assert_eq!(processor.decide(&syn, 1000), (Verdict::Accept, None));
+        assert_eq!(processor.registrar.attempts, 1);
+
+        let syn_ack = tcp_packet("172.217.118.4", 443, "192.168.240.112", 55988);
+        assert_eq!(
+            processor.decide(&syn_ack, 1001),
+            (Verdict::Accept, None),
+            "the reply to a handshake we accepted must not prompt"
+        );
+        assert_eq!(
+            processor.registrar.attempts, 1,
+            "the reply must not be classified again"
+        );
+    }
+
+    /// The deferral window is bounded: once it lapses the reply is classified
+    /// again, so an unanswered SYN cannot become a standing permit.
+    #[test]
+    fn deferred_reply_grace_expires() {
+        let flow = FlowContext {
+            process_origin: core_types::ProcessOrigin::Unresolved,
+            process_name: Some("app_process64".into()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "192.168.240.112".into(),
+            source_port: 55988,
+            destination_ip: "172.217.118.4".into(),
+            destination_port: 443,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: DeferRegistrar { attempts: 0 },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+
+        let syn = tcp_packet("192.168.240.112", 55988, "172.217.118.4", 443);
+        assert_eq!(processor.decide(&syn, 1000), (Verdict::Accept, None));
+
+        let syn_ack = tcp_packet("172.217.118.4", 443, "192.168.240.112", 55988);
+        assert_eq!(
+            processor.decide(&syn_ack, 1000 + DEFER_MIRROR_TTL_SECS + 1),
+            (Verdict::Accept, None)
+        );
+        assert_eq!(
+            processor.registrar.attempts, 2,
+            "after the grace period the reply must be classified again"
+        );
     }
 
     fn tcp_packet(src: &str, src_port: u16, dst: &str, dst_port: u16) -> RawPacket {
