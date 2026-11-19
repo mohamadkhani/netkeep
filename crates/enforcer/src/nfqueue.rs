@@ -1077,6 +1077,7 @@ mod tests {
     #[test]
     fn deferred_handshake_reply_is_accepted_without_a_new_question() {
         let flow = FlowContext {
+            reverse_dns: None,
             process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("app_process64".into()),
             process_exe: None,
@@ -1122,6 +1123,7 @@ mod tests {
     #[test]
     fn deferred_reply_grace_expires() {
         let flow = FlowContext {
+            reverse_dns: None,
             process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("app_process64".into()),
             process_exe: None,
@@ -1188,6 +1190,7 @@ mod tests {
     #[test]
     fn forwarded_reply_reuses_the_decided_connection() {
         let flow = FlowContext {
+            reverse_dns: None,
             process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("node".into()),
             process_exe: None,
@@ -1234,6 +1237,7 @@ mod tests {
     #[test]
     fn forwarded_reply_does_not_inherit_the_route_mark() {
         let flow = FlowContext {
+            reverse_dns: None,
             process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("node".into()),
             process_exe: None,
@@ -1282,6 +1286,7 @@ mod tests {
     #[test]
     fn local_connections_do_not_cache_a_mirror() {
         let flow = FlowContext {
+            reverse_dns: None,
             process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("curl".into()),
             process_exe: None,
@@ -1340,6 +1345,7 @@ mod tests {
                 forwarded: false,
             };
             let flow = FlowContext {
+                reverse_dns: None,
                 process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some("curl".into()),
                 process_exe: None,

@@ -1087,6 +1087,7 @@ fn main() {
             // an exe path cannot match without it, and dropping it sent the
             // query to system DNS instead of the egress's resolvers.
             let flow = core_types::FlowContext {
+                reverse_dns: None,
                 process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some(process_name.to_string()),
                 process_exe: process_exe.map(str::to_string),
@@ -1306,7 +1307,11 @@ fn main() {
                 resolver,
                 dns_cache.clone(),
                 FakeDeviceLabelResolver { result: None },
-            );
+            )
+            // Reverse-DNS names are display hints for destinations that carry
+            // no name of their own (an SSH connection to an IP). The lookup
+            // runs on a worker thread; classification only reads its cache.
+            .with_reverse_ptr(flow_classifier::ptr::PtrCache::spawn());
             let registrar = SharedService(Arc::clone(&service));
             match NfqueueProcessor::open(queue_num, classifier, registrar, dns_cache.clone()) {
                 Err(e) => {

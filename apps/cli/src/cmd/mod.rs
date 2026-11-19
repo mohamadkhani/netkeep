@@ -238,6 +238,7 @@ fn build_request(cmd: args::Command) -> Result<ControlRequest, CliError> {
                 core_types::DomainSource::None
             };
             let flow = core_types::FlowContext {
+                reverse_dns: None,
                 process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some(process),
                 process_exe: None,

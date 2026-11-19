@@ -195,6 +195,7 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
         DomainSource::None
     };
     let flow = FlowContext {
+        reverse_dns: None,
         process_origin: core_types::ProcessOrigin::Unresolved,
         process_name: Some("socks-client".to_string()),
         process_exe: None,

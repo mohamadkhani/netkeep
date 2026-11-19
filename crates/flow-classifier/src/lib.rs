@@ -1,5 +1,6 @@
 pub mod diag;
 pub mod proc_resolver;
+pub mod ptr;
 pub mod sni;
 pub mod sock_diag;
 
@@ -459,6 +460,8 @@ pub struct FlowClassifier<P, D, L> {
     process_resolver: P,
     dns_resolver: D,
     device_label_resolver: L,
+    /// Reverse-DNS names, display-only. `None` disables the lookup entirely.
+    reverse_ptr: Option<std::sync::Arc<ptr::PtrCache>>,
 }
 
 impl<P, D, L> FlowClassifier<P, D, L>
@@ -472,7 +475,15 @@ where
             process_resolver,
             dns_resolver,
             device_label_resolver,
+            reverse_ptr: None,
         }
+    }
+
+    /// Attach the reverse-DNS cache. Names from it are display hints and are
+    /// never used for rule matching.
+    pub fn with_reverse_ptr(mut self, cache: std::sync::Arc<ptr::PtrCache>) -> Self {
+        self.reverse_ptr = Some(cache);
+        self
     }
 
     pub fn classify(&self, packet: &RawPacket) -> FlowContext {
@@ -511,6 +522,17 @@ where
 
         let (destination_domain, domain_source) = self.resolve_domain(packet, proc_info.as_ref());
 
+        // Only ask when the packet itself gave no name: SNI/Host and the DNS
+        // cache are observations about this connection, a PTR is a hint about
+        // the address.
+        let reverse_dns = if destination_domain.is_none() {
+            self.reverse_ptr
+                .as_ref()
+                .and_then(|cache| cache.lookup(&packet.dst_ip))
+        } else {
+            None
+        };
+
         let device_label = if process_name.is_none() {
             packet
                 .ingress_interface
@@ -532,6 +554,7 @@ where
             destination_ip: packet.dst_ip.clone(),
             destination_port: packet.dst_port,
             destination_domain,
+            reverse_dns,
             domain_source,
             protocol: packet.protocol,
             direction: FlowDirection::Outbound,

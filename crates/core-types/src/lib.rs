@@ -190,6 +190,11 @@ pub struct FlowContext {
     pub destination_ip: String,
     pub destination_port: u16,
     pub destination_domain: Option<String>,
+    /// Reverse-DNS name for `destination_ip`, when the packet gave no name of
+    /// its own. A display hint only: it never takes part in rule matching,
+    /// because the owner of the reverse zone can claim any name.
+    #[serde(default)]
+    pub reverse_dns: Option<String>,
     /// Where `destination_domain` came from. Defaults to `None` for rows and
     /// pending decisions written before provenance existed.
     #[serde(default)]

@@ -162,6 +162,7 @@ mod tests {
             ControlResponse::Ok
         );
         let flow = FlowContext {
+            reverse_dns: None,
             process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("curl".into()),
             process_exe: None,

@@ -434,6 +434,7 @@ mod tests {
         let decision = PendingDecision {
             id: "p1".to_string(),
             flow: FlowContext {
+                reverse_dns: None,
                 process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some("firefox".to_string()),
                 process_exe: None,

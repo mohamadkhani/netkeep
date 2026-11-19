@@ -1117,6 +1117,7 @@ mod tests {
         PendingDecision {
             id: id.to_string(),
             flow: FlowContext {
+                reverse_dns: None,
                 process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some("curl".to_string()),
                 process_exe: None,
