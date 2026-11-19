@@ -1,0 +1,12 @@
+== tray alive
+    PID     ELAPSED CMD
+ 191395       00:23 netkeep-gpui
+== its log lines
+== dry run dev-install
+cargo xtask build-ebpf-release
+cargo build --workspace --release
+sudo install -Dm755 target/release/netkeep-daemon /usr/bin/netkeepd
+sudo install -Dm755 target/release/netkeep-cli    /usr/bin/netkeep-cli
+sudo install -Dm755 target/release/netkeep-gpui   /usr/bin/netkeep-gpui
+sudo systemctl restart netkeepd
+just dev-restart-tray
