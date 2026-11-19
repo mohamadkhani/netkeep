@@ -3,7 +3,9 @@ use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use core_types::{ProxyConfig, RouteTarget, TransportProtocol};
+use core_types::{
+    EgressAlert, EgressAlertKind, EgressAlertSink, ProxyConfig, RouteTarget, TransportProtocol,
+};
 use flow_classifier::{proc_resolver::ProcProcessResolver, ProcessResolver, SniDnsCache};
 use state_store::ProxyRepository;
 
@@ -207,6 +209,9 @@ pub struct DnsForwarder {
     dns_cache: SniDnsCache,
     /// Cache of proxy configs keyed by proxy_id to avoid per-query SQLite opens.
     proxy_cache: Arc<Mutex<HashMap<String, ProxyConfig>>>,
+    /// Reports data-path failures so the activity log and the tray can show
+    /// them. Without it, "the proxy's DNS is down" lives only in the journal.
+    alerts: Option<EgressAlertSink>,
     /// Fwmark stamped on all daemon-originated sockets so nftables bypasses
     /// NFQUEUE. Without this, the daemon's own DNS/TCP relay connections are
     /// intercepted and attributed to "netkeep-daemon" instead of the real
@@ -235,6 +240,7 @@ impl DnsForwarder {
         system_dns: Option<SystemDns>,
         dns_cache: SniDnsCache,
         daemon_mark: u32,
+        alerts: Option<EgressAlertSink>,
     ) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("127.0.0.1:53")?;
         socket.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -252,6 +258,7 @@ impl DnsForwarder {
             dns_cache,
             proxy_cache: Arc::new(Mutex::new(HashMap::new())),
             daemon_mark,
+            alerts,
         })
     }
 
@@ -334,6 +341,13 @@ impl DnsForwarder {
                     eprintln!(
                         "dns-forwarder: egress {target:?} matched for '{domain}' but has no DNS servers configured; resolving through system DNS instead (configure DNS servers on this egress to keep the query on its path)"
                     );
+                    if let Some(alerts) = &self.alerts {
+                        alerts(EgressAlert {
+                            kind: EgressAlertKind::NoResolver,
+                            target_id: Some(route_target_id(&target)),
+                            detail: domain.clone(),
+                        });
+                    }
                     self.forward_system(&query)?
                 } else {
                     self.resolve_via_egress(&query, &target, &dns_servers)?
@@ -531,6 +545,13 @@ impl DnsForwarder {
                 eprintln!(
                     "dns-forwarder: egress DNS failed via {target:?} (servers: {dns_servers:?}): {e}; answering SERVFAIL (system DNS fallback disabled to prevent domain leak)"
                 );
+                if let Some(alerts) = &self.alerts {
+                    alerts(EgressAlert {
+                        kind: EgressAlertKind::DnsFailed,
+                        target_id: Some(route_target_id(target)),
+                        detail: e.to_string(),
+                    });
+                }
                 build_dns_error_response(query, RCODE_SERVFAIL).ok_or_else(|| {
                     format!("egress DNS failed ({e}) and malformed query prevented SERVFAIL reply")
                 })
@@ -1074,6 +1095,15 @@ fn skip_name(data: &[u8], pos: &mut usize) -> Option<()> {
         *pos += 1 + len;
     }
     None
+}
+
+/// Stable id for a route target, used to group alerts.
+fn route_target_id(target: &RouteTarget) -> String {
+    match target {
+        RouteTarget::Proxy(id) => format!("proxy:{id}"),
+        RouteTarget::Tun(name) => format!("tun:{name}"),
+        RouteTarget::Device(name) => format!("device:{name}"),
+    }
 }
 
 #[cfg(test)]

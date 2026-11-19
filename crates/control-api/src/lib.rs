@@ -1,6 +1,6 @@
 use core_types::{
-    Egress, FlowContext, FlowEvent, PendingDecision, ProcessPriority, ProxyConfig, RouteTarget,
-    Rule, RuleAction, TransportProtocol,
+    Egress, EgressAlertKind, FlowContext, FlowEvent, PendingDecision, ProcessPriority, ProxyConfig,
+    RouteTarget, Rule, RuleAction, TransportProtocol,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,9 @@ pub enum ControlRequest {
         after_id: Option<String>,
     },
     ListPending,
+    /// Most recent data-path failures (proxy unreachable, egress DNS failed,
+    /// egress without resolvers), one row per (kind, target).
+    EgressAlertStatus,
     ListFlows {
         limit: usize,
     },
@@ -93,6 +96,7 @@ pub enum ControlResponse {
     RuleList(Vec<Rule>),
     PendingList(Vec<PendingDecision>),
     FlowList(Vec<FlowEvent>),
+    EgressAlertList(Vec<EgressAlertRecord>),
     PendingCreated {
         pending_id: String,
         created_at_secs: u64,
@@ -192,6 +196,28 @@ pub enum PushNotification {
         destination_domain: Option<String>,
         protocol: TransportProtocol,
     },
+    /// A data-path failure the user must be able to see: a proxy that cannot
+    /// be reached, an egress whose DNS failed, or a rule that sent a lookup to
+    /// an egress with no resolvers. Aggregated by the daemon, so `count` is
+    /// the number of occurrences since the previous alert for the same target.
+    EgressAlert {
+        kind: EgressAlertKind,
+        target_id: Option<String>,
+        detail: String,
+        count: u32,
+        at_secs: u64,
+    },
+}
+
+/// One row of `ControlRequest::EgressAlertStatus`: the most recent alert per
+/// (kind, target), with how many times it happened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressAlertRecord {
+    pub kind: EgressAlertKind,
+    pub target_id: Option<String>,
+    pub detail: String,
+    pub count: u32,
+    pub last_at_secs: u64,
 }
 
 impl PushNotification {
@@ -227,6 +253,13 @@ impl PushNotification {
                 Some(KERNEL_PROCESS_LABEL.to_string()),
                 destination_ip.clone(),
                 *destination_port,
+            ),
+            PushNotification::EgressAlert {
+                kind, target_id, ..
+            } => (
+                Some(format!("egress {}", target_id.as_deref().unwrap_or("?"))),
+                kind.label().to_string(),
+                0,
             ),
         }
     }

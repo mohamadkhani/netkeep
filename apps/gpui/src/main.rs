@@ -19,7 +19,7 @@ use gpui_component::{Root, Theme, ThemeMode};
 use settings::{SettingsApp, SettingsState};
 
 #[cfg(target_os = "linux")]
-use tray::{spawn_tray, TrayAction};
+use tray::{spawn_tray, TrayAction, TrayUpdate};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -155,6 +155,42 @@ fn run_tray_monitor() {
         .unwrap_or(false);
     let (action_rx, state_tx, _stop_tx) = spawn_tray(nfqueue_enabled);
 
+    // Keep the tray icon honest about the data path: interception can be on
+    // while a proxy is down and connections are failing silently.
+    {
+        let alerts_socket = socket_path.clone();
+        let alerts_tx = state_tx.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(5));
+            if let Ok(control_api::ControlResponse::EgressAlertList(rows)) = daemon::send_request(
+                &alerts_socket,
+                &control_api::ControlRequest::EgressAlertStatus,
+            ) {
+                let now = daemon::unix_now();
+                let recent: Vec<_> = rows
+                    .iter()
+                    .filter(|r| now.saturating_sub(r.last_at_secs) <= 5 * 60)
+                    .collect();
+                let tips: Vec<String> = recent
+                    .iter()
+                    .take(3)
+                    .map(|r| {
+                        format!(
+                            "{}: {} ({}×)",
+                            r.target_id.as_deref().unwrap_or("egress"),
+                            r.kind.label(),
+                            r.count
+                        )
+                    })
+                    .collect();
+                let _ = alerts_tx.send(TrayUpdate::Alerts {
+                    active: !recent.is_empty(),
+                    tips,
+                });
+            }
+        });
+    }
+
     // Pending-decision monitor runs on its own thread (spawns --pending-id GUIs).
     let sp = socket_path.clone();
     let gc = gui_command.clone();
@@ -192,14 +228,14 @@ fn run_tray_monitor() {
                                 diag_log(&format!("failed to enable NFQUEUE: {e}"));
                             } else {
                                 // Refresh the tray icon to reflect the new state.
-                                let _ = state_tx.send(true);
+                                let _ = state_tx.send(TrayUpdate::Nfqueue(true));
                             }
                         }
                         TrayAction::NfqueueDisable => {
                             if let Err(e) = daemon::set_nfqueue_enabled(false) {
                                 diag_log(&format!("failed to disable NFQUEUE: {e}"));
                             } else {
-                                let _ = state_tx.send(false);
+                                let _ = state_tx.send(TrayUpdate::Nfqueue(false));
                             }
                         }
                         TrayAction::Settings { token } => {

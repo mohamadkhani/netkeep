@@ -1014,6 +1014,18 @@ fn main() {
         }
     });
 
+    // Data-path failures (proxy unreachable, egress DNS failed, egress with no
+    // resolvers) must reach the UI. The proxy and forwarder threads call this
+    // closure; the control service aggregates and publishes them.
+    let alert_sink: core_types::EgressAlertSink = {
+        let svc = Arc::clone(&service);
+        Arc::new(move |alert: core_types::EgressAlert| {
+            if let Ok(mut svc) = svc.lock() {
+                svc.record_egress_alert(alert, now_secs());
+            }
+        })
+    };
+
     // Parse optional NFQUEUE config (set NETKEEP_NFQUEUE=<queue_num>).
     let nfqueue_num: Option<u16> = std::env::var("NETKEEP_NFQUEUE")
         .ok()
@@ -1115,6 +1127,7 @@ fn main() {
             system_dns,
             dns_cache.clone(),
             enforcer::DAEMON_BYPASS_MARK,
+            Some(Arc::clone(&alert_sink)),
         ) {
             Ok(forwarder) => {
                 std::thread::spawn(move || forwarder.run());
@@ -1153,6 +1166,7 @@ fn main() {
                 std::time::Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
                 enforcer::DAEMON_BYPASS_MARK,
                 dns_cache.clone(),
+                Some(Arc::clone(&alert_sink)),
             ) {
                 Ok(tp) => tp,
                 Err(e) => {
@@ -1184,6 +1198,7 @@ fn main() {
         let routes_for_fn = Arc::clone(&proxy_routes);
         let db_for_proxy = db_path.clone();
         let dns_for_proxy = dns_cache.clone();
+        let alerts_for_proxy = Arc::clone(&alert_sink);
         svc.set_route_mark_fn(move |target| match target {
             RouteTarget::Proxy(id) => {
                 let result =
@@ -1205,6 +1220,7 @@ fn main() {
                                             Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
                                             enforcer::DAEMON_BYPASS_MARK,
                                             dns_for_proxy.clone(),
+                                            Some(Arc::clone(&alerts_for_proxy)),
                                         )
                                         .map_err(|e| e.to_string())?;
                                     let port =

@@ -559,6 +559,10 @@ pub enum ConfigAction {
 
     /// Unlock: remove any installed nftables rules (emergency recovery).
     Unlock,
+
+    /// Recent data-path failures: proxy unreachable, egress DNS failed,
+    /// egress without resolvers.
+    Alerts,
 }
 
 // ---------- Protocol helpers ----------

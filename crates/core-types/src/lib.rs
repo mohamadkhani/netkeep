@@ -126,6 +126,47 @@ pub enum ProcessOrigin {
     Kernel,
 }
 
+/// A failure in the data path that the user has to see.
+///
+/// These used to exist only as `eprintln!` lines in the journal: a proxy that
+/// could not be reached, an egress whose DNS servers failed, or a rule that
+/// routed a lookup to an egress with no resolvers. The connection simply broke
+/// and nothing said why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressAlert {
+    pub kind: EgressAlertKind,
+    /// Proxy or egress id the failure belongs to, when known.
+    pub target_id: Option<String>,
+    /// Human-readable detail: the error text, the domain, or the destination.
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EgressAlertKind {
+    /// The proxy could not be reached, or refused the connection.
+    Unreachable,
+    /// The proxy answered, but its DNS servers failed.
+    DnsFailed,
+    /// A rule sent this lookup to an egress with no DNS servers configured.
+    NoResolver,
+}
+
+impl EgressAlertKind {
+    /// Short label for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            EgressAlertKind::Unreachable => "proxy unreachable",
+            EgressAlertKind::DnsFailed => "egress DNS failed",
+            EgressAlertKind::NoResolver => "egress has no resolver",
+        }
+    }
+}
+
+/// Callback handed to the subsystems that can fail (transparent proxy, DNS
+/// forwarder). Kept as a plain closure so those crates stay independent of the
+/// control service.
+pub type EgressAlertSink = std::sync::Arc<dyn Fn(EgressAlert) + Send + Sync>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowContext {
     pub process_name: Option<String>,

@@ -36,6 +36,15 @@ pub enum TrayAction {
     Quit,
 }
 
+/// State updates the tray applies to its icon and tooltip.
+#[derive(Debug, Clone)]
+pub enum TrayUpdate {
+    /// Interception was switched on or off.
+    Nfqueue(bool),
+    /// A data-path failure was reported recently; `tips` are the newest ones.
+    Alerts { active: bool, tips: Vec<String> },
+}
+
 /// Netkeep's SNI tray.
 pub struct LogiTray {
     /// Last token delivered by the host before a click; consumed by menu handlers.
@@ -44,6 +53,11 @@ pub struct LogiTray {
     pub action_tx: std::sync::mpsc::Sender<TrayAction>,
     /// Whether network interception is currently enabled (drives the icon).
     pub nfqueue_enabled: bool,
+    /// A proxy or egress failed in the last few minutes. Turns the icon amber:
+    /// interception can be "on" while connections are silently breaking.
+    pub alert_active: bool,
+    /// Newest failures, one line each, shown in the tooltip.
+    pub alert_tips: Vec<String>,
 }
 
 impl LogiTray {
@@ -56,6 +70,8 @@ impl LogiTray {
             token,
             action_tx,
             nfqueue_enabled,
+            alert_active: false,
+            alert_tips: Vec::new(),
         }
     }
 }
@@ -81,7 +97,9 @@ impl Tray for LogiTray {
         String::new()
     }
     fn icon_pixmap(&self) -> Vec<Icon> {
-        let color = if self.nfqueue_enabled {
+        let color = if self.alert_active {
+            0xf59e0b // amber — interception is on, but something is failing
+        } else if self.nfqueue_enabled {
             0x14b8a6 // teal
         } else {
             0x6b7280 // gray
@@ -89,13 +107,21 @@ impl Tray for LogiTray {
         vec![shield_icon(color)]
     }
     fn tool_tip(&self) -> ksni::ToolTip {
+        let mut description = if self.nfqueue_enabled {
+            "Network interception enabled".to_string()
+        } else {
+            "Network interception disabled".to_string()
+        };
+        if self.alert_active {
+            description.push_str("\nConnection problems detected:");
+            for tip in self.alert_tips.iter().take(3) {
+                description.push_str("\n· ");
+                description.push_str(tip);
+            }
+        }
         ksni::ToolTip {
             title: "Netkeep".into(),
-            description: if self.nfqueue_enabled {
-                "Network interception enabled".into()
-            } else {
-                "Network interception disabled".into()
-            },
+            description,
             ..Default::default()
         }
     }
@@ -309,7 +335,7 @@ fn shield_icon(color_rgb: u32) -> Icon {
 ///
 /// Returns the receiver for tray actions plus:
 ///
-/// - `state_tx`: send a new NFQUEUE-enabled bool to refresh the tray icon.
+/// - `state_tx`: send [`TrayUpdate`] values to refresh the tray icon.
 /// - `stop_tx`: signal the tray service to shut down.
 ///
 /// The thread lives until `stop_tx` is dropped or signalled.
@@ -317,7 +343,7 @@ pub fn spawn_tray(
     nfqueue_enabled: bool,
 ) -> (
     std::sync::mpsc::Receiver<TrayAction>,
-    tokio::sync::mpsc::UnboundedSender<bool>,
+    tokio::sync::mpsc::UnboundedSender<TrayUpdate>,
     tokio::sync::oneshot::Sender<()>,
 ) {
     let (action_tx, action_rx) = std::sync::mpsc::channel::<TrayAction>();
@@ -325,7 +351,7 @@ pub fn spawn_tray(
 
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
     // State updates from the GPUI loop → ksni thread (to refresh the icon).
-    let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+    let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel::<TrayUpdate>();
 
     let tray = LogiTray::new(action_tx, token, nfqueue_enabled);
     std::thread::Builder::new()
@@ -350,11 +376,19 @@ pub fn spawn_tray(
                             tokio::select! {
                                 biased;
                                 _ = &mut stop_rx => break,
-                                Some(enabled) = state_rx.recv() => {
+                                Some(update) = state_rx.recv() => {
                                     // Update the tray field and let ksni
                                     // re-emit the changed Icon/ToolTip props.
                                     handle
-                                        .update(|t| { t.nfqueue_enabled = enabled })
+                                        .update(|t| match update {
+                                            TrayUpdate::Nfqueue(enabled) => {
+                                                t.nfqueue_enabled = enabled
+                                            }
+                                            TrayUpdate::Alerts { active, tips } => {
+                                                t.alert_active = active;
+                                                t.alert_tips = tips;
+                                            }
+                                        })
                                         .await;
                                 }
                             }

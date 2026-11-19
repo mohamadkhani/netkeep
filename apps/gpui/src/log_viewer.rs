@@ -92,6 +92,9 @@ struct LogRow {
     egress_id: Option<String>,
     /// Display name for `egress_id`, preferred over the id when present.
     egress_name: Option<String>,
+    /// Extra text for rows that carry a message rather than a destination
+    /// (egress failures). Rendered after the destination, muted.
+    detail: Option<String>,
     occurrences: usize,
     last_occurrence: Instant,
     flash_since: Option<Instant>,
@@ -119,6 +122,7 @@ impl LogRow {
             pending_id,
             egress_id: None,
             egress_name: None,
+            detail: None,
             occurrences: 1,
             last_occurrence: Instant::now(),
             flash_since: None,
@@ -404,6 +408,28 @@ impl LogViewer {
                     return;
                 }
                 LogRow::new(None, pending_id, 0, None, "pending-expired", now, None)
+            }
+            PushNotification::EgressAlert {
+                kind,
+                target_id,
+                detail,
+                count,
+                at_secs: _,
+            } => {
+                let mut r = LogRow::new(
+                    Some(format!(
+                        "egress {}",
+                        target_id.as_deref().unwrap_or("(unknown)")
+                    )),
+                    kind.label().to_string(),
+                    0,
+                    None,
+                    "egress-failure",
+                    now,
+                    None,
+                );
+                r.detail = Some(format!("{detail} · {count}×"));
+                r
             }
             PushNotification::KernelAllowed {
                 source_port: _,
@@ -934,6 +960,7 @@ fn render_row(row: &LogRow, group_by_domain: bool, viewer: Entity<LogViewer>) ->
         "policy-match" => colors::primary(),
         "resolved" => colors::green(),
         "expired" | "pending-expired" => colors::muted(),
+        "egress-failure" => colors::error(),
         _ => colors::orange(),
     };
     // The left bar carries the outcome color: decided rows use the action
@@ -947,6 +974,9 @@ fn render_row(row: &LogRow, group_by_domain: bool, viewer: Entity<LogViewer>) ->
     let process = row.process_name.as_deref().unwrap_or("unknown");
     let destination = if group_by_domain {
         row.domain_group()
+    } else if row.destination_port == 0 {
+        // Alert rows carry a label in `destination_ip`, not an address.
+        row.destination_ip.clone()
     } else {
         format!("{}:{}", row.destination_ip, row.destination_port)
     };
@@ -1000,6 +1030,17 @@ fn render_row(row: &LogRow, group_by_domain: bool, viewer: Entity<LogViewer>) ->
                 .text_color(colors::text())
                 .child(destination),
         );
+
+    if let Some(detail) = row.detail.as_deref() {
+        line = line.child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(colors::muted())
+                .child(detail.to_string()),
+        );
+    }
 
     if group_by_domain {
         // The row is deduped on the domain, but the concrete destination of

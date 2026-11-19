@@ -1,7 +1,9 @@
-use control_api::{validate_request, ControlRequest, ControlResponse, PushNotification};
+use control_api::{
+    validate_request, ControlRequest, ControlResponse, EgressAlertRecord, PushNotification,
+};
 use core_types::{
-    Egress, FlowContext, FlowEvent, FlowState, ProcessPriority, RouteTarget, Rule, RuleAction,
-    TransportProtocol,
+    Egress, EgressAlert, FlowContext, FlowEvent, FlowState, ProcessPriority, RouteTarget, Rule,
+    RuleAction, TransportProtocol,
 };
 use decision_engine::{DecisionEngine, DecisionOutcome, OverflowPolicy};
 use enforcer::{FlowDecision, FlowRegistrar};
@@ -67,7 +69,23 @@ pub struct ControlService<R: Repository> {
     routing_revision: u64,
     /// Suppress repeated `policy:` stderr lines for the same flow identity.
     policy_log_dedup: HashMap<PolicyLogKey, u64>,
+    /// Recent data-path failures, one entry per (kind, target).
+    egress_alerts: Vec<EgressAlertEntry>,
 }
+
+/// Stored alert plus when it was last published to subscribers.
+#[derive(Debug, Clone)]
+struct EgressAlertEntry {
+    record: EgressAlertRecord,
+    last_emit_secs: u64,
+}
+
+/// How often the same (kind, target) failure may be published. The proxy in a
+/// reconnect loop can fail thousands of times an hour; the point is to tell the
+/// user what is broken, not to stream every occurrence.
+const ALERT_EMIT_INTERVAL_SECS: u64 = 30;
+/// How many distinct failures the status endpoint keeps.
+const ALERT_HISTORY_MAX: usize = 20;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HealthConfig {
@@ -128,6 +146,7 @@ impl<R: Repository> ControlService<R> {
             route_mark_fn: None,
             routing_revision: 0,
             policy_log_dedup: HashMap::new(),
+            egress_alerts: Vec::new(),
         }
     }
 
@@ -199,6 +218,7 @@ impl<R: Repository> ControlService<R> {
             route_mark_fn: None,
             routing_revision: 0,
             policy_log_dedup: HashMap::new(),
+            egress_alerts: Vec::new(),
         }
     }
 
@@ -333,6 +353,7 @@ impl<R: Repository> ControlService<R> {
             ControlRequest::ListRules => "list_rules",
             ControlRequest::DeleteRule { .. } => "delete_rule",
             ControlRequest::ListPending => "list_pending",
+            ControlRequest::EgressAlertStatus => "egress_alert_status",
             ControlRequest::ListFlows { .. } => "list_flows",
             ControlRequest::RegisterUnknownFlow { .. } => "register_unknown_flow",
             ControlRequest::AwaitPendingDecision { .. } => "await_pending_decision",
@@ -395,6 +416,9 @@ impl<R: Repository> ControlService<R> {
             }
             ControlRequest::ListPending => {
                 ControlResponse::PendingList(self.decision_engine.list_pending())
+            }
+            ControlRequest::EgressAlertStatus => {
+                ControlResponse::EgressAlertList(self.egress_alert_records())
             }
             ControlRequest::ListFlows { limit } => {
                 ControlResponse::FlowList(self.repo.list_events(limit))
@@ -806,6 +830,75 @@ impl<R: Repository> ControlService<R> {
         if swept > 0 {
             counter!("netkeep.pending.swept").increment(swept);
         }
+    }
+
+    /// Record a data-path failure and publish it, at most once per
+    /// [`ALERT_EMIT_INTERVAL_SECS`] per (kind, target).
+    ///
+    /// The proxy relay and the DNS forwarder can fail thousands of times an
+    /// hour when a proxy is down. The user needs to know *what* is broken; a
+    /// stream of identical rows would bury it.
+    pub fn record_egress_alert(&mut self, alert: EgressAlert, now_secs: u64) {
+        let key_match = |e: &EgressAlertEntry| {
+            e.record.kind == alert.kind && e.record.target_id == alert.target_id
+        };
+
+        let (count, should_emit) =
+            if let Some(entry) = self.egress_alerts.iter_mut().find(|e| key_match(e)) {
+                entry.record.count = entry.record.count.saturating_add(1);
+                entry.record.last_at_secs = now_secs;
+                entry.record.detail = alert.detail.clone();
+                let due = now_secs.saturating_sub(entry.last_emit_secs) >= ALERT_EMIT_INTERVAL_SECS;
+                if due {
+                    entry.last_emit_secs = now_secs;
+                }
+                (entry.record.count, due)
+            } else {
+                if self.egress_alerts.len() >= ALERT_HISTORY_MAX {
+                    // Drop the least recent failure.
+                    if let Some((idx, _)) = self
+                        .egress_alerts
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, e)| e.record.last_at_secs)
+                    {
+                        self.egress_alerts.remove(idx);
+                    }
+                }
+                self.egress_alerts.push(EgressAlertEntry {
+                    record: EgressAlertRecord {
+                        kind: alert.kind,
+                        target_id: alert.target_id.clone(),
+                        detail: alert.detail.clone(),
+                        count: 1,
+                        last_at_secs: now_secs,
+                    },
+                    last_emit_secs: now_secs,
+                });
+                (1, true)
+            };
+
+        if !should_emit {
+            return;
+        }
+        let _ = self.notification_tx.send(PushNotification::EgressAlert {
+            kind: alert.kind,
+            target_id: alert.target_id,
+            detail: alert.detail,
+            count,
+            at_secs: now_secs,
+        });
+    }
+
+    /// Most recent failures, newest first, for the tray and the activity log.
+    pub fn egress_alert_records(&self) -> Vec<EgressAlertRecord> {
+        let mut rows: Vec<EgressAlertRecord> = self
+            .egress_alerts
+            .iter()
+            .map(|e| e.record.clone())
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.last_at_secs));
+        rows
     }
 
     /// Install a rule with its priority seeded from the restriction ladder
@@ -1526,6 +1619,48 @@ mod tests {
             ControlResponse::RuleList(rules) => assert!(rules.is_empty(), "no rule may be created"),
             _ => panic!("expected rule list"),
         }
+    }
+
+    /// Failures must be aggregated per (kind, target): a proxy in a reconnect
+    /// loop fails thousands of times an hour, and the user needs one row that
+    /// says what is broken, not thousands of identical rows.
+    #[test]
+    fn egress_alerts_aggregate_per_target_and_kind() {
+        use core_types::{EgressAlert, EgressAlertKind};
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+
+        for now in [10, 11, 12] {
+            service.record_egress_alert(
+                EgressAlert {
+                    kind: EgressAlertKind::Unreachable,
+                    target_id: Some("px-1".into()),
+                    detail: "connect timed out".into(),
+                },
+                now,
+            );
+        }
+        service.record_egress_alert(
+            EgressAlert {
+                kind: EgressAlertKind::DnsFailed,
+                target_id: Some("px-1".into()),
+                detail: "8.8.8.8".into(),
+            },
+            13,
+        );
+
+        let rows = service.egress_alert_records();
+        assert_eq!(rows.len(), 2, "one row per (kind, target)");
+        let unreachable = rows
+            .iter()
+            .find(|r| r.kind == EgressAlertKind::Unreachable)
+            .expect("unreachable row");
+        assert_eq!(unreachable.count, 3, "repeats are counted, not repeated");
+        assert_eq!(unreachable.last_at_secs, 12);
+        assert_eq!(
+            rows[0].kind,
+            EgressAlertKind::DnsFailed,
+            "newest failure first"
+        );
     }
 
     #[test]

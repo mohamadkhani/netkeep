@@ -1,0 +1,29 @@
+== proxy relay error sites
+crates/proxy-client/src/transparent.rs:72:                            eprintln!("transparent proxy: relay error (from {peer}): {e}");
+== proxy bind sig
+41:    pub fn bind(
+42-        listen_addr: &str,
+43-        proxy: ProxyConfig,
+44-        timeout: Duration,
+45-        daemon_mark: u32,
+46-        dns_cache: SniDnsCache,
+47-    ) -> Result<Self, ProxyClientError> {
+48-        let listener = bind_transparent_listener(listen_addr)?;
+49-        Ok(Self {
+50-            listener,
+51-            proxy,
+52-            timeout,
+53-            daemon_mark,
+== proxy deps
+== tray state
+apps/gpui/src/tray.rs:46:    pub nfqueue_enabled: bool,
+apps/gpui/src/tray.rs:53:        nfqueue_enabled: bool,
+apps/gpui/src/tray.rs:58:            nfqueue_enabled,
+apps/gpui/src/tray.rs:84:        let color = if self.nfqueue_enabled {
+apps/gpui/src/tray.rs:94:            description: if self.nfqueue_enabled {
+apps/gpui/src/tray.rs:312:/// - `state_tx`: send a new NFQUEUE-enabled bool to refresh the tray icon.
+apps/gpui/src/tray.rs:317:    nfqueue_enabled: bool,
+apps/gpui/src/tray.rs:328:    let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+apps/gpui/src/tray.rs:330:    let tray = LogiTray::new(action_tx, token, nfqueue_enabled);
+apps/gpui/src/tray.rs:357:                                        .update(|t| { t.nfqueue_enabled = enabled })
+apps/gpui/src/tray.rs:372:    (action_rx, state_tx, stop_tx)

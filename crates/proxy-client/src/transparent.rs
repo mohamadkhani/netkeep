@@ -4,7 +4,7 @@ use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
-use core_types::ProxyConfig;
+use core_types::{EgressAlert, EgressAlertKind, EgressAlertSink, ProxyConfig};
 use flow_classifier::sni::{extract_http_host, extract_tls_sni};
 use flow_classifier::SniDnsCache;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -34,6 +34,9 @@ pub struct TransparentProxy {
     /// app's own ClientHello/Host when possible, falling back to the cache's
     /// most recent binding for the original destination IP.
     dns_cache: SniDnsCache,
+    /// Reports relay failures so the user sees a proxy that is down instead of
+    /// only a stderr line in the journal.
+    alerts: Option<EgressAlertSink>,
 }
 
 impl TransparentProxy {
@@ -44,6 +47,7 @@ impl TransparentProxy {
         timeout: Duration,
         daemon_mark: u32,
         dns_cache: SniDnsCache,
+        alerts: Option<EgressAlertSink>,
     ) -> Result<Self, ProxyClientError> {
         let listener = bind_transparent_listener(listen_addr)?;
         Ok(Self {
@@ -52,6 +56,7 @@ impl TransparentProxy {
             timeout,
             daemon_mark,
             dns_cache,
+            alerts,
         })
     }
 
@@ -70,6 +75,13 @@ impl TransparentProxy {
                     std::thread::spawn(move || {
                         if let Err(e) = sv.handle_client(client) {
                             eprintln!("transparent proxy: relay error (from {peer}): {e}");
+                            if let Some(alerts) = &sv.alerts {
+                                alerts(EgressAlert {
+                                    kind: EgressAlertKind::Unreachable,
+                                    target_id: Some(sv.proxy.id.clone()),
+                                    detail: e.to_string(),
+                                });
+                            }
                         }
                     });
                 }

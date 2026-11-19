@@ -221,6 +221,7 @@ fn build_request(cmd: args::Command) -> Result<ControlRequest, CliError> {
         args::Command::Config { action } => match action {
             args::ConfigAction::Show => Ok(ControlRequest::Health),
             args::ConfigAction::Unlock => Ok(ControlRequest::Unlock),
+            args::ConfigAction::Alerts => Ok(ControlRequest::EgressAlertStatus),
         },
 
         args::Command::RegisterFlow {
