@@ -20,3 +20,6 @@ packaging/archlinux/*.log
 netkeep-daemon
 netkeep-gpui
 netkeep-emulator
+# Scratch output from local debugging (never commit these).
+/[a-z][0-9]*.txt
+/[a-z][a-z]*[0-9]*.txt

@@ -1,4 +1,0 @@
-== resolver construction
-1284:                Some(ref tracker) => ProcProcessResolver::with_sock_tracker(
-1287:                None => ProcProcessResolver::new(),
-1289:            let classifier = FlowClassifier::new(

@@ -1,9 +1,0 @@
-== desktop files in repo
-./resources/linux/applications/io.logicamp.Netkeep.desktop
-== installed
--rw-r--r-- 1 root root 354 Oct  9 16:02 /usr/share/applications/io.logicamp.Netkeep.desktop
-== autostart
--rw-r--r-- 1 mohamad mohamad 354 Oct  6 00:05 /home/mohamad/.config/autostart/io.logicamp.Netkeep.desktop
-== running
-3718 netkeep-gpui
-188951 /usr/bin/bash -c cd /home/mohamad/Projects/netkeep && { echo "== desktop files in repo"; rg --files -g '*.desktop' . | head; echo "== installed"; ls -l /usr/share/applications/io.logicamp.Netkeep.desktop 2>/dev/null; echo "== autostart"; ls -l ~/.config/autostart/*netkeep* ~/.config/autostart/*Netkeep* 2>/dev/null; echo "== running"; pgrep -af "netkeep-gpui" | head -3; } > e1.txt 2>&1; cat e1.txt

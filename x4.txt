@@ -1,9 +1,0 @@
-== commit time
-32dbfb2 2026-11-15 23:37:52 +0330 fix(policy): allow kernel-owned sockets without a dialog
-== binary strings
-3
- policy: kernel-owned socket dst=
-F no /proc owner, complete scan, service state 
- kernel-owned socket
-== binary mtime
--rwxr-xr-x 1 root root 9367208 2026-11-16 00:30 /usr/bin/netkeepd

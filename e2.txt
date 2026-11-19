@@ -1,7 +1,0 @@
-== before
-3718
-== run
-==> tray relaunched via the desktop entry
-exit=0
-== after
-191395
