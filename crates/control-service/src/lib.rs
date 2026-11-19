@@ -78,7 +78,12 @@ pub struct ControlService<R: Repository> {
 struct EgressAlertEntry {
     record: EgressAlertRecord,
     last_emit_secs: u64,
+    /// Timestamps inside the recent window, oldest first.
+    recent: Vec<u64>,
 }
+
+/// Window used for the tray's "sustained failure" signal.
+const ALERT_RECENT_WINDOW_SECS: u64 = 300;
 
 /// How often the same (kind, target) failure may be published. The proxy in a
 /// reconnect loop can fail thousands of times an hour; the point is to tell the
@@ -848,6 +853,11 @@ impl<R: Repository> ControlService<R> {
                 entry.record.count = entry.record.count.saturating_add(1);
                 entry.record.last_at_secs = now_secs;
                 entry.record.detail = alert.detail.clone();
+                entry.recent.push(now_secs);
+                entry
+                    .recent
+                    .retain(|t| now_secs.saturating_sub(*t) <= ALERT_RECENT_WINDOW_SECS);
+                entry.record.recent_count = entry.recent.len() as u32;
                 let due = now_secs.saturating_sub(entry.last_emit_secs) >= ALERT_EMIT_INTERVAL_SECS;
                 if due {
                     entry.last_emit_secs = now_secs;
@@ -871,9 +881,11 @@ impl<R: Repository> ControlService<R> {
                         target_id: alert.target_id.clone(),
                         detail: alert.detail.clone(),
                         count: 1,
+                        recent_count: 1,
                         last_at_secs: now_secs,
                     },
                     last_emit_secs: now_secs,
+                    recent: vec![now_secs],
                 });
                 (1, true)
             };
@@ -1655,6 +1667,10 @@ mod tests {
             .find(|r| r.kind == EgressAlertKind::Unreachable)
             .expect("unreachable row");
         assert_eq!(unreachable.count, 3, "repeats are counted, not repeated");
+        assert_eq!(
+            unreachable.recent_count, 3,
+            "all three are inside the recent window"
+        );
         assert_eq!(unreachable.last_at_secs, 12);
         assert_eq!(
             rows[0].kind,

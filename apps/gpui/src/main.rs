@@ -166,12 +166,15 @@ fn run_tray_monitor() {
                 &alerts_socket,
                 &control_api::ControlRequest::EgressAlertStatus,
             ) {
-                let now = daemon::unix_now();
-                let recent: Vec<_> = rows
+                // One failed connection is normal life; a proxy failing over
+                // and over is a broken path. Only the latter turns the icon
+                // amber, otherwise it would be amber permanently on a machine
+                // whose proxies are flaky.
+                let failing: Vec<_> = rows
                     .iter()
-                    .filter(|r| now.saturating_sub(r.last_at_secs) <= 5 * 60)
+                    .filter(|r| r.recent_count >= control_api::ALERT_SUSTAINED_THRESHOLD)
                     .collect();
-                let tips: Vec<String> = recent
+                let tips: Vec<String> = failing
                     .iter()
                     .take(3)
                     .map(|r| {
@@ -184,7 +187,7 @@ fn run_tray_monitor() {
                     })
                     .collect();
                 let _ = alerts_tx.send(TrayUpdate::Alerts {
-                    active: !recent.is_empty(),
+                    active: !failing.is_empty(),
                     tips,
                 });
             }

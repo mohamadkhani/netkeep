@@ -209,6 +209,11 @@ pub enum PushNotification {
     },
 }
 
+/// Failures inside the recent window that make a target count as broken.
+/// One reset connection is a log row; a proxy failing repeatedly is a broken
+/// path and drives the tray icon.
+pub const ALERT_SUSTAINED_THRESHOLD: u32 = 3;
+
 /// One row of `ControlRequest::EgressAlertStatus`: the most recent alert per
 /// (kind, target), with how many times it happened.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,7 +221,14 @@ pub struct EgressAlertRecord {
     pub kind: EgressAlertKind,
     pub target_id: Option<String>,
     pub detail: String,
+    /// Occurrences since the daemon started.
     pub count: u32,
+    /// Occurrences in the last five minutes. The tray uses this to tell a
+    /// one-off failure (a row in the activity log) from a broken path (amber
+    /// icon): a proxy in a reconnect loop is a different situation from a
+    /// single reset connection.
+    #[serde(default)]
+    pub recent_count: u32,
     pub last_at_secs: u64,
 }
 
