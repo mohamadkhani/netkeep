@@ -323,14 +323,18 @@ impl DnsForwarder {
                 (self.egress_resolver)(&app.name, app.exe.as_deref(), &domain)
             {
                 if dns_servers.is_empty() {
-                    // Fail closed: an egress with no DNS servers cannot resolve
-                    // through its own path, and falling back to system DNS
-                    // would leak routed domains to the local resolver.
+                    // The egress cannot resolve on its own path. Answering
+                    // SERVFAIL here used to be the only option, but once
+                    // exe-pinned Route rules started matching DNS queries that
+                    // turned into a machine-wide outage: every domain covered
+                    // by such a rule failed to resolve (1 205 SERVFAIL lines on
+                    // 2026-11-15, 9 972 on 2026-11-16). Prefer a working
+                    // resolver and say so; the query leaves the egress's path,
+                    // which is what the old code was trying to prevent.
                     eprintln!(
-                        "dns-forwarder: egress {target:?} matched for '{domain}' but has no DNS servers configured; answering SERVFAIL (configure DNS servers for this egress to enable resolution)"
+                        "dns-forwarder: egress {target:?} matched for '{domain}' but has no DNS servers configured; resolving through system DNS instead (configure DNS servers on this egress to keep the query on its path)"
                     );
-                    build_dns_error_response(&query, RCODE_SERVFAIL)
-                        .ok_or_else(|| "malformed query: cannot build SERVFAIL reply".to_string())?
+                    self.forward_system(&query)?
                 } else {
                     self.resolve_via_egress(&query, &target, &dns_servers)?
                 }

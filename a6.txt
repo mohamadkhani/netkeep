@@ -1,0 +1,6 @@
+== commits on top of origin/feat/log-viewer
+0e59d4a fix(enforcer): accept the reply to a deferred handshake
+67a0c6a fix(policy): allow kernel-owned flows on the intercepted-packet path
+abe0726 fix(proc): do not treat a vanished process as an unreadable scan
+== count
+3
