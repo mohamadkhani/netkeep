@@ -618,3 +618,23 @@ The Stage 0 task notes were later extended with the 12:05 `brave`/`synara` repro
 **Base and artifacts.** This branch starts at `83d0499` (`main`) and is a temporary documentation branch; it can be deleted after review without affecting `main`. The investigation used `/tmp/opencode/netkeep-investigation/` (`rules.json`, `rules_now.json`, `rules_live_2026-11-13.json`, `flows.json`, `journal.txt`, `parsed.json`, `mismatches.json`). Those files are not committed; the evidence tables reproduce every number cited here.
 
 **Related reading:** `docs/process-attribution-races.md`, `docs/process-resolver.md`, `docs/decision-dialog-ux.md`, `docs/nfqueue-domain-inference.md`.
+
+---
+
+## 12. Egress failure visibility (2026-11-19)
+
+**Report.** With interception on, applications lost connections and nothing in the UI said why. The only trace was stderr: `transparent proxy: relay error …`, `dns-forwarder: egress DNS failed via Proxy(…)`, `egress … has no DNS servers configured`. Measured over 24 hours on 2026-11-19: 4 280 SERVFAIL lines from failing proxy DNS, 140 SERVFAIL from egresses without resolvers, and thousands of relay errors per hour in sustained windows (10 000/hour between 08:00 and 16:00 on 2026-11-16). NFQUEUE itself dropped 11 of 1 050 packets, so the interceptor was not the thing breaking connections — the routed path was.
+
+**What was built.** An `EgressAlert` (`kind`, `target_id`, `detail`) is emitted by the two subsystems that can fail: the transparent proxy on a relay error (`Unreachable`) and the DNS forwarder on an egress DNS failure (`DnsFailed`) or a matched egress with no resolvers (`NoResolver`). The daemon hands both an `EgressAlertSink` closure, so neither crate depends on the control service.
+
+The control service aggregates per `(kind, target)`: it counts every occurrence, keeps the newest detail, and publishes at most once per 30 s per key. Three surfaces read that state:
+
+| Surface | Behaviour |
+|---|---|
+| Activity log | `egress-failure` row: target, kind, occurrence count, last detail |
+| Tray | amber icon while any failure is newer than 5 minutes; tooltip lists the three newest |
+| `netkeep-cli config alerts` | the same rows as text |
+
+**Why the "no resolvers" case also changed.** An egress without DNS servers used to answer SERVFAIL for every domain its rules cover — the anti-leak choice. Once exe-pinned Route rules started matching DNS queries, that answered a machine-wide resolution failure. The query now leaves the egress path and resolves through system DNS, with a line saying so; keeping it on the path needs DNS servers configured on that egress.
+
+**Not verified live.** Transparent-proxy bind and the DNS forwarder both need root, so the alert path could not be triggered in the sandbox; the aggregation is unit-tested and the status endpoint was exercised unprivileged. The first real verification is the first failing proxy after install.
