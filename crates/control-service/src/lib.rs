@@ -490,10 +490,7 @@ impl<R: Repository> ControlService<R> {
                 }
                 // A socket the kernel itself owns has no user-space process to
                 // ask about; see `allow_kernel_owned`.
-                if let Some(decision) = self.allow_kernel_owned(&flow, now_secs) {
-                    let FlowDecision::Immediate(action, route_target) = decision else {
-                        unreachable!("kernel allowance is always an immediate verdict");
-                    };
+                if let Some((action, route_target)) = self.allow_kernel_owned(&flow, now_secs) {
                     return ControlResponse::ImmediateVerdict {
                         action,
                         route_target,
@@ -1049,7 +1046,13 @@ impl<R: Repository> ControlService<R> {
     /// ([`FlowRegistrar::register`]) and the control API
     /// (`RegisterUnknownFlow`) — call this, because a branch added to only one
     /// of them leaves the live path still asking the user.
-    fn allow_kernel_owned(&mut self, flow: &FlowContext, now_secs: u64) -> Option<FlowDecision> {
+    /// Returns the immediate verdict as data, so no caller has to unwrap a
+    /// `FlowDecision` it cannot construct any other shape of.
+    fn allow_kernel_owned(
+        &mut self,
+        flow: &FlowContext,
+        now_secs: u64,
+    ) -> Option<(RuleAction, Option<RouteTarget>)> {
         if flow.process_origin != core_types::ProcessOrigin::Kernel {
             return None;
         }
@@ -1066,7 +1069,7 @@ impl<R: Repository> ControlService<R> {
             destination_domain: flow.destination_domain.clone(),
             protocol: flow.protocol,
         });
-        Some(FlowDecision::Immediate(RuleAction::Allow, None))
+        Some((RuleAction::Allow, None))
     }
 }
 
@@ -1159,8 +1162,8 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
         // Kernel-owned sockets have no app to ask about, and the SNI deferral
         // below assumes a TLS client that could send a ClientHello — a kernel
         // service cannot. Decide it first.
-        if let Some(decision) = self.allow_kernel_owned(&flow, now_secs) {
-            return decision;
+        if let Some((action, route_target)) = self.allow_kernel_owned(&flow, now_secs) {
+            return FlowDecision::Immediate(action, route_target);
         }
 
         // Defer unknown TLS connections until the name is in-band. A SYN
