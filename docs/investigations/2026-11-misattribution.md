@@ -491,7 +491,7 @@ The live count is 602 at 2026-11-13 00:25 (599 `Permanent`, 3 `UntilRestart`). R
 
 Checks 1–4 above need raw packets. The daemon logs verdicts, not packets, so they are replayed through the control socket and the log viewer instead of a packet file.
 
-**Unit and static checks.** `just test` 322 passed, 0 failed, 12 ignored; `just lint` and `just fmt-check` clean.
+**Unit and static checks.** `just test` 325 passed, 0 failed, 12 ignored; `just lint` and `just fmt-check` clean.
 
 **Control-socket replay, before and after.** One probe script drives `RegisterUnknownFlow` against a sandbox daemon, then reads `ListPending`. The flows are four sockets from `synara` to `188.114.98.98:443` with no domain, one `brave` flow to the same address carrying `api.zed.dev`, and one `synara` flow to `188.114.98.98:22`.
 
