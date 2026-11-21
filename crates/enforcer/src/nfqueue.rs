@@ -218,12 +218,20 @@ impl AttrCache {
     /// poisoned ambiguity tombstone.
     fn restore(
         &mut self,
+        process_origin: core_types::ProcessOrigin,
         dst_ip: &str,
         dst_port: u16,
         domain: Option<&str>,
         in_band_domain: bool,
         now_secs: u64,
     ) -> Option<CachedProcessAttr> {
+        // Only a flow with no proven owner may borrow a cached identity.
+        // `Kernel` flows have an owner that is deliberately nameless, and a
+        // `Proved` flow whose name is missing already carries more evidence
+        // than this cache does.
+        if process_origin != core_types::ProcessOrigin::Unresolved {
+            return None;
+        }
         let ip_key = (dst_ip.to_string(), dst_port);
         let domain_key = domain.map(|d| (d.to_string(), dst_port));
 
@@ -627,8 +635,14 @@ where
             // packets (no local socket: containers without an eBPF entry,
             // LAN clients behind this host) any restored local process name
             // would be flatly wrong. Never restore for forwarded traffic.
+            //
+            // The same holds for a flow the resolver proved belongs to the
+            // kernel: it has no user-space owner, so lending it a cached app
+            // identity would let kernel traffic (NFS :2049, cifs :445) match
+            // that app's Allow/Route/Deny rule.
             if !raw.forwarded {
                 if let Some(c) = self.attr_cache.restore(
+                    flow.process_origin,
                     &raw.dst_ip,
                     raw.dst_port,
                     flow.destination_domain.as_deref(),
@@ -1070,6 +1084,26 @@ mod tests {
         }
     }
 
+    /// Registrar that records the flow it was asked to decide.
+    struct CapturingRegistrar {
+        flow: Option<FlowContext>,
+    }
+
+    impl FlowRegistrar for CapturingRegistrar {
+        fn register(&mut self, flow: FlowContext, _now_secs: u64) -> FlowDecision {
+            self.flow = Some(flow);
+            FlowDecision::Immediate(RuleAction::Allow, None)
+        }
+
+        fn route_mark(&mut self, _target: &RouteTarget) -> Option<u32> {
+            None
+        }
+
+        fn routing_revision(&mut self) -> u64 {
+            0
+        }
+    }
+
     /// A container's TLS SYN is accepted while the daemon waits for the SNI.
     /// The server's SYN-ACK arrives first, in the reply direction, where no
     /// local socket exists — it used to look like a brand-new unattributed
@@ -1451,7 +1485,14 @@ mod tests {
             1000,
         );
 
-        let restored = cache.restore("1.2.3.4", 443, None, false, 1100);
+        let restored = cache.restore(
+            core_types::ProcessOrigin::Unresolved,
+            "1.2.3.4",
+            443,
+            None,
+            false,
+            1100,
+        );
         assert_eq!(
             restored.map(|c| c.process_name),
             Some("firefox".to_string()),
@@ -1459,7 +1500,14 @@ mod tests {
         );
 
         // Domain fallback for a rotated CDN IP.
-        let restored = cache.restore("5.6.7.8", 443, Some("cdn.example.com"), false, 1200);
+        let restored = cache.restore(
+            core_types::ProcessOrigin::Unresolved,
+            "5.6.7.8",
+            443,
+            Some("cdn.example.com"),
+            false,
+            1200,
+        );
         assert_eq!(
             restored.map(|c| c.process_name),
             Some("firefox".to_string()),
@@ -1480,7 +1528,14 @@ mod tests {
         cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1000);
         cache.record_success("8.8.8.8", 53, None, &proc_info("chrome"), 1100);
 
-        let restored = cache.restore("8.8.8.8", 53, None, false, 1200);
+        let restored = cache.restore(
+            core_types::ProcessOrigin::Unresolved,
+            "8.8.8.8",
+            53,
+            None,
+            false,
+            1200,
+        );
         assert_eq!(
             restored, None,
             "destination shared by two processes is ambiguous — must restore nothing"
@@ -1509,14 +1564,28 @@ mod tests {
         // IP keys are distinct, so IP restore works — but the shared DOMAIN
         // key must not restore for a fresh unknown IP.
         assert_eq!(
-            cache.restore("3.3.3.3", 443, Some("shared.example.com"), false, 1200),
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "3.3.3.3",
+                443,
+                Some("shared.example.com"),
+                false,
+                1200
+            ),
             None,
             "domain shared by two processes is ambiguous — must restore nothing"
         );
         // The single-process IP keys still restore.
         assert_eq!(
             cache
-                .restore("1.1.1.1", 443, None, false, 1200)
+                .restore(
+                    core_types::ProcessOrigin::Unresolved,
+                    "1.1.1.1",
+                    443,
+                    None,
+                    false,
+                    1200
+                )
                 .map(|c| c.process_name),
             Some("firefox".to_string())
         );
@@ -1544,7 +1613,14 @@ mod tests {
         );
 
         assert_eq!(
-            cache.restore("1.2.3.4", 443, None, false, 1200),
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "1.2.3.4",
+                443,
+                None,
+                false,
+                1200
+            ),
             None,
             "two pids on one destination must not restore either identity"
         );
@@ -1569,7 +1645,17 @@ mod tests {
             1100,
         );
 
-        assert_eq!(cache.restore("1.2.3.4", 443, None, false, 1200), None);
+        assert_eq!(
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "1.2.3.4",
+                443,
+                None,
+                false,
+                1200
+            ),
+            None
+        );
     }
 
     /// A poisoned key must stay poisoned for the rest of the TTL instead of
@@ -1582,7 +1668,14 @@ mod tests {
         // A later success for either process must not re-arm the key.
         cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1200);
         assert_eq!(
-            cache.restore("8.8.8.8", 53, None, false, 1300),
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "8.8.8.8",
+                53,
+                None,
+                false,
+                1300
+            ),
             None,
             "poisoned key must survive the TTL window"
         );
@@ -1591,7 +1684,14 @@ mod tests {
         // expired — that one was recorded at 1100.
         let poison_ends = 1100 + PROC_ATTR_TTL_SECS;
         assert_eq!(
-            cache.restore("8.8.8.8", 53, None, false, poison_ends - 1),
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "8.8.8.8",
+                53,
+                None,
+                false,
+                poison_ends - 1
+            ),
             None,
             "still ambiguous one second before the window closes"
         );
@@ -1601,7 +1701,14 @@ mod tests {
         cache.record_success("8.8.8.8", 53, None, &proc_info("dig"), rearm);
         assert_eq!(
             cache
-                .restore("8.8.8.8", 53, None, false, rearm + 10)
+                .restore(
+                    core_types::ProcessOrigin::Unresolved,
+                    "8.8.8.8",
+                    53,
+                    None,
+                    false,
+                    rearm + 10
+                )
                 .map(|c| c.process_name),
             Some("dig".to_string())
         );
@@ -1628,7 +1735,14 @@ mod tests {
             1000,
         );
 
-        let restored = cache.restore("203.0.113.7", 443, Some("a.example"), true, 1100);
+        let restored = cache.restore(
+            core_types::ProcessOrigin::Unresolved,
+            "203.0.113.7",
+            443,
+            Some("a.example"),
+            true,
+            1100,
+        );
         assert_eq!(
             restored.map(|c| c.process_name),
             Some("app-a".to_string()),
@@ -1646,7 +1760,14 @@ mod tests {
         // Both entries — and the poison covering them — expire 15 min after
         // the newest observation.
         assert_eq!(
-            cache.restore("8.8.8.8", 53, None, false, 1100 + PROC_ATTR_TTL_SECS + 10),
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "8.8.8.8",
+                53,
+                None,
+                false,
+                1100 + PROC_ATTR_TTL_SECS + 10
+            ),
             None
         );
         // A fresh single-process success re-arms the key.
@@ -1659,10 +1780,110 @@ mod tests {
         );
         assert_eq!(
             cache
-                .restore("8.8.8.8", 53, None, false, 1100 + PROC_ATTR_TTL_SECS + 30)
+                .restore(
+                    core_types::ProcessOrigin::Unresolved,
+                    "8.8.8.8",
+                    53,
+                    None,
+                    false,
+                    1100 + PROC_ATTR_TTL_SECS + 30
+                )
                 .map(|c| c.process_name),
             Some("dig".to_string())
         );
+    }
+
+    /// REGRESSION (misattribution): a kernel-owned flow has no user-space
+    /// owner. Lending it an app identity from the destination cache would let
+    /// kernel traffic (NFS on :2049, cifs on :445) match that app's
+    /// Allow/Route/Deny rule before the kernel allowance runs.
+    #[test]
+    fn layer0_does_not_restore_onto_a_kernel_owned_flow() {
+        let mut cache = AttrCache::new();
+        cache.record_success("192.168.7.18", 2049, None, &proc_info("mount.nfs"), 1000);
+
+        assert_eq!(
+            cache.restore(
+                core_types::ProcessOrigin::Kernel,
+                "192.168.7.18",
+                2049,
+                None,
+                false,
+                1100
+            ),
+            None,
+            "kernel-owned traffic must not borrow a user-space identity"
+        );
+
+        // The baseline is unchanged: an unresolved flow may still reuse the
+        // last proven owner of the destination.
+        assert_eq!(
+            cache
+                .restore(
+                    core_types::ProcessOrigin::Unresolved,
+                    "192.168.7.18",
+                    2049,
+                    None,
+                    false,
+                    1100
+                )
+                .map(|c| c.process_name),
+            Some("mount.nfs".to_string())
+        );
+    }
+
+    /// The guard must hold at the call site too, not only inside `AttrCache`:
+    /// the classifier's origin is what reaches `decide`, and a seeded cache
+    /// would otherwise rename the flow before the registrar sees it.
+    #[test]
+    fn kernel_owned_packet_does_not_borrow_a_cached_app_identity() {
+        let flow = FlowContext {
+            reverse_dns: None,
+            process_origin: core_types::ProcessOrigin::Kernel,
+            process_name: None,
+            process_exe: None,
+            app_name: None,
+            source_ip: "192.168.240.112".into(),
+            source_port: 55988,
+            destination_ip: "192.168.7.18".into(),
+            destination_port: 2049,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: CapturingRegistrar { flow: None },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+        processor.attr_cache.record_success(
+            "192.168.7.18",
+            2049,
+            None,
+            &proc_info("mount.nfs"),
+            900,
+        );
+
+        let mut pkt = tcp_packet("192.168.240.112", 55988, "192.168.7.18", 2049);
+        pkt.forwarded = false;
+        let _ = processor.decide(&pkt, 1000);
+
+        let seen = processor
+            .registrar
+            .flow
+            .as_ref()
+            .expect("the flow must reach the registrar");
+        assert_eq!(
+            seen.process_name, None,
+            "cached app identity must not be attached to kernel-owned traffic"
+        );
+        assert_eq!(seen.process_origin, core_types::ProcessOrigin::Kernel);
     }
 
     fn build_ipv4_tcp(src: [u8; 4], dst: [u8; 4], src_port: u16, dst_port: u16) -> Vec<u8> {
