@@ -471,10 +471,10 @@ impl<R: Repository> ControlService<R> {
                             } else {
                                 None
                             };
-                            let state = match &resolved.action {
-                                RuleAction::Allow | RuleAction::Route => FlowState::Allowed,
-                                RuleAction::Deny => FlowState::Denied,
-                                RuleAction::Ask => unreachable!(),
+                            let state = if matches!(resolved.action, RuleAction::Deny) {
+                                FlowState::Denied
+                            } else {
+                                FlowState::Allowed
                             };
                             self.record_event(&flow, state, now_secs);
                             let response = ControlResponse::ImmediateVerdict {
@@ -1139,11 +1139,14 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
             self.log_policy_match(&flow, &resolved, now_secs);
             match resolved.action {
                 RuleAction::Allow | RuleAction::Deny | RuleAction::Route => {
-                    let action_str = match resolved.action {
-                        RuleAction::Allow => "allow",
-                        RuleAction::Deny => "deny",
-                        RuleAction::Route => "route",
-                        RuleAction::Ask => unreachable!(),
+                    // `Ask` is the only other variant, so these two wrappers
+                    // are exhaustive by the time this arm runs.
+                    let action_str = if matches!(resolved.action, RuleAction::Deny) {
+                        "deny"
+                    } else if matches!(resolved.action, RuleAction::Route) {
+                        "route"
+                    } else {
+                        "allow"
                     };
                     counter!("netkeep.control.immediate_verdicts", "action" => action_str)
                         .increment(1);
@@ -1152,10 +1155,10 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
                     } else {
                         None
                     };
-                    let state = match &resolved.action {
-                        RuleAction::Allow | RuleAction::Route => FlowState::Allowed,
-                        RuleAction::Deny => FlowState::Denied,
-                        RuleAction::Ask => unreachable!(),
+                    let state = if matches!(resolved.action, RuleAction::Deny) {
+                        FlowState::Denied
+                    } else {
+                        FlowState::Allowed
                     };
                     self.record_event(&flow, state, now_secs);
                     return FlowDecision::Immediate(resolved.action, route_target);
