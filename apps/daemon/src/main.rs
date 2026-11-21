@@ -12,7 +12,7 @@ mod metrics;
 mod proxy_routes;
 
 use dns_tracker::forwarder::{DnsForwarder, EgressResolver, FwmarkResolver, SystemDns};
-use dns_tracker::{DnsTracker, SockTracker};
+use dns_tracker::{DnsTracker, DnsTrackerSlot, SockTracker};
 
 use control_api::{ControlRequest, ControlResponse, PushNotification};
 use control_service::{ControlService, HealthConfig, SharedService};
@@ -34,7 +34,7 @@ use state_store::{
 };
 use tokio::sync::broadcast;
 
-const DEFAULT_SOCKET_PATH: &str = "/tmp/netkeep.sock";
+const DEFAULT_SOCKET_PATH: &str = "/run/netkeep/netkeep.sock";
 const DEFAULT_DB_RELATIVE: &str = ".config/netkeep/netkeep.db";
 const DEFAULT_TIMEOUT_SECS: u64 = 100;
 const DEFAULT_PENDING_LIMIT: usize = 100;
@@ -902,6 +902,18 @@ fn main() {
         10000 + route_mark_base
     );
 
+    // The tray and the CLI default to the packaged runtime directory; a
+    // manually started daemon must land on the same socket or the two never
+    // meet. Create it first, because `/run/netkeep` does not exist without
+    // the systemd unit (`RuntimeDirectory=netkeep`).
+    if let Some(parent) = std::path::Path::new(&socket_path).parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!(
+                "warning: could not create socket directory {}: {e}",
+                parent.display()
+            );
+        }
+    }
     let _ = fs::remove_file(&socket_path);
     let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
@@ -911,7 +923,7 @@ fn main() {
         }
     };
     // Ensure non-root clients (GPUI/CLI) can connect even when daemon runs as root.
-    // This avoids recurring "Permission denied (os error 13)" on /tmp/netkeep.sock.
+    // This avoids recurring "Permission denied (os error 13)" for non-root clients.
     if let Err(err) = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666)) {
         eprintln!("failed to set socket permissions on {socket_path}: {err}");
         std::process::exit(1);
@@ -1014,6 +1026,18 @@ fn main() {
         }
     });
 
+    // Data-path failures (proxy unreachable, egress DNS failed, egress with no
+    // resolvers) must reach the UI. The proxy and forwarder threads call this
+    // closure; the control service aggregates and publishes them.
+    let alert_sink: core_types::EgressAlertSink = {
+        let svc = Arc::clone(&service);
+        Arc::new(move |alert: core_types::EgressAlert| {
+            if let Ok(mut svc) = svc.lock() {
+                svc.record_egress_alert(alert, now_secs());
+            }
+        })
+    };
+
     // Parse optional NFQUEUE config (set NETKEEP_NFQUEUE=<queue_num>).
     let nfqueue_num: Option<u16> = std::env::var("NETKEEP_NFQUEUE")
         .ok()
@@ -1030,17 +1054,31 @@ fn main() {
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
     {
-        // Try to load eBPF DNS tracker.
-        let ebpf_tracker = match DnsTracker::load() {
-            Ok(t) => {
-                let t = Arc::new(t);
-                Some(t)
-            }
-            Err(e) => {
-                eprintln!("dns-tracker: eBPF load failed ({e}); will use SOCK_DIAG fallback only");
-                None
-            }
-        };
+        // Load the eBPF DNS tracker on a worker thread, not here.
+        //
+        // `DnsTracker::load()` sends a large program through the kernel
+        // verifier and took 9 s on this machine (journal: "daemon listening"
+        // at 08:25:34, "eBPF load failed" + "nftables rules applied" at
+        // 08:25:43). Doing it inline left the daemon enforcing nothing — no
+        // nftables table, no NFQUEUE, no socket tracker — for that whole
+        // window, so every restart silently let traffic through unfiltered.
+        // The forwarder starts immediately and picks the tracker up when the
+        // slot is filled.
+        let dns_tracker_slot = DnsTrackerSlot::new();
+        {
+            let slot = Arc::clone(&dns_tracker_slot);
+            std::thread::spawn(move || match DnsTracker::load() {
+                Ok(t) => slot.install(Some(Arc::new(t))),
+                Err(e) => {
+                    // `{e:#}` renders the whole context chain. With `{e}` the
+                    // kernel's rejection reason was dropped, leaving only
+                    // "failed to load kprobe into kernel".
+                    eprintln!("dns-tracker: eBPF load failed: {e:#}");
+                    eprintln!("dns-tracker: will use SOCK_DIAG fallback only");
+                    slot.install(None);
+                }
+            });
+        }
 
         // Capture system DNS before we bind port 53.
         let system_dns = SystemDns::from_resolv_conf();
@@ -1049,22 +1087,29 @@ fn main() {
             system_dns.as_ref().map(|s| s.addr)
         );
 
-        // Build egress resolver closure: (process_name, domain) → (target, dns_servers).
+        // Build egress resolver closure: (process_name, process_exe, domain) →
+        // (target, dns_servers).
         let service_for_dns = Arc::clone(&service);
         let db_for_dns = db_path.clone();
-        let egress_resolver: EgressResolver = Arc::new(move |process_name, domain| {
+        let egress_resolver: EgressResolver = Arc::new(move |process_name, process_exe, domain| {
             let svc = service_for_dns.lock().ok()?;
             // We use the existing RegisterFlow path to match rules without side effects.
-            // Build a minimal FlowContext for policy matching.
+            // Build a minimal FlowContext for policy matching. The exe comes
+            // from the resolver when /proc supplied it: a Route rule that pins
+            // an exe path cannot match without it, and dropping it sent the
+            // query to system DNS instead of the egress's resolvers.
             let flow = core_types::FlowContext {
+                reverse_dns: None,
+                process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some(process_name.to_string()),
-                process_exe: None,
+                process_exe: process_exe.map(str::to_string),
                 app_name: None,
                 source_ip: String::new(),
                 source_port: 0,
                 destination_ip: String::new(),
                 destination_port: 53,
                 destination_domain: Some(domain.to_string()),
+                domain_source: core_types::DomainSource::Dns,
                 protocol: core_types::TransportProtocol::Udp,
                 direction: core_types::FlowDirection::Outbound,
                 device_label: None,
@@ -1089,12 +1134,13 @@ fn main() {
             Arc::new(|target: &RouteTarget| ensure_route_mark(target).ok());
 
         match DnsForwarder::bind(
-            ebpf_tracker,
+            dns_tracker_slot,
             egress_resolver,
             fwmark_resolver,
             system_dns,
             dns_cache.clone(),
             enforcer::DAEMON_BYPASS_MARK,
+            Some(Arc::clone(&alert_sink)),
         ) {
             Ok(forwarder) => {
                 std::thread::spawn(move || forwarder.run());
@@ -1133,6 +1179,7 @@ fn main() {
                 std::time::Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
                 enforcer::DAEMON_BYPASS_MARK,
                 dns_cache.clone(),
+                Some(Arc::clone(&alert_sink)),
             ) {
                 Ok(tp) => tp,
                 Err(e) => {
@@ -1164,6 +1211,7 @@ fn main() {
         let routes_for_fn = Arc::clone(&proxy_routes);
         let db_for_proxy = db_path.clone();
         let dns_for_proxy = dns_cache.clone();
+        let alerts_for_proxy = Arc::clone(&alert_sink);
         svc.set_route_mark_fn(move |target| match target {
             RouteTarget::Proxy(id) => {
                 let result =
@@ -1185,6 +1233,7 @@ fn main() {
                                             Duration::from_secs(ROUTED_CONNECT_TIMEOUT_SECS),
                                             enforcer::DAEMON_BYPASS_MARK,
                                             dns_for_proxy.clone(),
+                                            Some(Arc::clone(&alerts_for_proxy)),
                                         )
                                         .map_err(|e| e.to_string())?;
                                     let port =
@@ -1270,7 +1319,11 @@ fn main() {
                 resolver,
                 dns_cache.clone(),
                 FakeDeviceLabelResolver { result: None },
-            );
+            )
+            // Reverse-DNS names are display hints for destinations that carry
+            // no name of their own (an SSH connection to an IP). The lookup
+            // runs on a worker thread; classification only reads its cache.
+            .with_reverse_ptr(flow_classifier::ptr::PtrCache::spawn());
             let registrar = SharedService(Arc::clone(&service));
             match NfqueueProcessor::open(queue_num, classifier, registrar, dns_cache.clone()) {
                 Err(e) => {

@@ -2,7 +2,7 @@ pub mod forwarder;
 pub mod sock_tracker;
 mod tracker;
 
-pub use forwarder::DnsForwarder;
+pub use forwarder::{DnsForwarder, DnsTrackerSlot};
 pub use sock_tracker::{SockTracker, TrackedProcess};
 pub use tracker::{DnsQueryCandidate, DnsQueryInfo, DnsTracker};
 

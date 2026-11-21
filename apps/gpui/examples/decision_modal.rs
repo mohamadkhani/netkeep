@@ -42,7 +42,8 @@ mod fonts;
 mod state;
 
 use core_types::{
-    Egress, FlowContext, FlowDirection, PendingDecision, RouteTarget, TransportProtocol,
+    DomainSource, Egress, FlowContext, FlowDirection, PendingDecision, RouteTarget,
+    TransportProtocol,
 };
 
 fn main() {
@@ -95,9 +96,17 @@ fn main() {
     };
 
     let now = daemon::unix_now();
+    let destination_domain = field("--domain", "example.com");
+    let domain_source = if destination_domain.is_some() {
+        DomainSource::Cmdline
+    } else {
+        DomainSource::None
+    };
     let item = PendingDecision {
         id: "test-decision".to_string(),
         flow: FlowContext {
+            reverse_dns: None,
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: field("--process", "curl"),
             process_exe: field("--exe", "/usr/bin/curl"),
             app_name: field("--app", "cURL"),
@@ -107,7 +116,8 @@ fn main() {
                 .unwrap_or(52344),
             destination_ip: flag("--ip").unwrap_or("93.184.216.34").to_string(),
             destination_port: port,
-            destination_domain: field("--domain", "example.com"),
+            destination_domain,
+            domain_source,
             protocol: proto,
             direction: FlowDirection::Outbound,
             device_label: specified("--device").unwrap_or(None),

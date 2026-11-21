@@ -5,7 +5,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use control_api::{ControlRequest, ControlResponse};
-use core_types::{FlowContext, FlowDirection, RouteTarget, RuleAction, TransportProtocol};
+use core_types::{
+    DomainSource, FlowContext, FlowDirection, RouteTarget, RuleAction, TransportProtocol,
+};
 
 /// How long `send_control_request` keeps retrying a refused/missing daemon
 /// socket before giving up.
@@ -187,7 +189,14 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
             .unwrap_or_else(|| "0.0.0.0".to_string());
         (resolved_ip, Some(host.clone()))
     };
+    let domain_source = if destination_domain.is_some() {
+        DomainSource::Cmdline
+    } else {
+        DomainSource::None
+    };
     let flow = FlowContext {
+        reverse_dns: None,
+        process_origin: core_types::ProcessOrigin::Unresolved,
         process_name: Some("socks-client".to_string()),
         process_exe: None,
         app_name: None,
@@ -196,6 +205,7 @@ pub fn handle_client(mut stream: TcpStream, socket_path: &str) -> Result<(), Str
         destination_ip,
         destination_port: port,
         destination_domain,
+        domain_source,
         protocol: TransportProtocol::Tcp,
         direction: FlowDirection::Outbound,
         device_label: None,

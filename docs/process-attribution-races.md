@@ -1,8 +1,10 @@
-# Process Attribution Races and the Three Layers of Defense
+# Process Attribution Races and the Layers of Defense
 
 > **Read this before touching any of `proc_resolver.rs`, `decision-engine`, or `process_matches` in `policy-engine`.**
+>
+> **Related:** the November 2026 field investigation found that process attribution can also borrow a *destination* (and vice versa) through the shared IP→domain cache, the pending fallback key, and `AttrCache`. See [`docs/investigations/2026-11-misattribution.md`](investigations/2026-11-misattribution.md).
 
-This document is the post-mortem of the duplicate-dialog bug fixed in session 19 (2026-05-13). The same underlying problem can resurface in many shapes; the three layers below exist so that any *single* layer's miss does not translate into a user-visible duplicate prompt.
+This document is the post-mortem of the duplicate-dialog bug fixed in session 19 (2026-05-13). The same underlying problem can resurface in many shapes; the layers below exist so that any *single* layer's miss does not translate into a user-visible duplicate prompt.
 
 ---
 
@@ -31,7 +33,7 @@ After the user clicked Allow on the first dialog, the second one appeared *anywa
 
 ---
 
-## The three layers, top down
+## The layers, top down
 
 Each layer protects against a different time-slice of the problem.
 
@@ -60,11 +62,9 @@ Each layer protects against a different time-slice of the problem.
                                 ▼
         ┌──────────────────────────────────────────────────────┐
         │ Layer 3: policy_engine::process_matches             │
-        │ (rule.proc=Some, flow.proc=None) is allowed only    │
-        │ when the rule pins a *specific* destination         │
-        │ (IpExact or DomainExact).                           │
-        │ Broad rules (Any / Cidr / Wildcard) still require   │
-        │ a strict process match.                             │
+        │ REMOVED. A rule matches only when every pinned      │
+        │ field matches; (rule.proc=Some, flow.proc=None)     │
+        │ never matches, whatever the destination.            │
         └──────────────────────────────────────────────────────┘
 ```
 
@@ -104,31 +104,30 @@ Two cases match:
 
 The case `(both Some, different names)` is **not** deduped — that is genuinely two different processes connecting to the same destination at the same moment (e.g. chrome and firefox to google.com), and they deserve separate dialogs.
 
-### Layer 3 — Forgiving policy match for specific destinations
+### Layer 3 — Removed: the forgiving policy match for specific destinations
 
 **File:** `crates/policy-engine/src/lib.rs`
 **Function:** `process_matches`
 
-After the user clicks Allow, the rule has `process_name=Some(P)` and some destination matcher. A later packet whose resolver fails would, by strict pairwise comparison, miss this rule and bubble back up to `register_unknown_flow` — re-creating a dialog the user already answered.
+Earlier versions of this document described a third layer: a rule with
+`process_name=Some(P)` and an exact destination (`IpExact` / `DomainExact`) also
+matched a flow whose `process_name` was `None`. It was meant to absorb a resolver
+race on a new socket after the user had already answered for that destination.
 
-The rule used to be:
+That fallback is **gone for every action**. A destination is not proof of a
+process: two apps can share one anycast address, and the 2026-11 investigation
+logged `gvfsd-http` reaching `api.ipify.org` under a rule written for
+`api.zeroeval.com` because both resolve to `188.114.98.0`
+([investigation](investigations/2026-11-misattribution.md)). An unattributed flow
+now matches no process-pinned rule, whatever its destination.
 
-```rust
-(Some(_), None) => false,
-```
+`(Some, Some)` mismatches remain hard rejects.
 
-The current rule is:
-
-```rust
-(Some(_), None) => matches!(
-    rule.destination,
-    DestinationMatcher::IpExact(_) | DestinationMatcher::DomainExact(_)
-),
-```
-
-**Why limit to specific destinations.** A wildcard rule like `allow curl → *.example.com` must *not* silently apply to an unattributed packet, because that would let any local process piggy-back on the wildcard. Pinning to exact IP / exact domain bounds the risk: the user explicitly trusted that single host for that process; an attacker would have to target the exact same host AND defeat process attribution.
-
-`(Some, Some)` mismatches are still hard rejects: if attribution succeeded but yielded a different name, the rule does not match.
+**Consequence.** When the resolver races on a new socket to an already-approved
+destination, the user sees one more dialog instead of the flow silently
+inheriting the rule. That is the intended trade: a dialog is visible, a rule that
+applies to the wrong app is not. The dialog states that the new rule will apply
+to every app when the process is unidentified.
 
 ---
 
@@ -143,10 +142,12 @@ The other layers only fire when something has already gone wrong:
 | First packet attribution failed, retransmit succeeded → two pendings before any rule exists | Layer 2 (upgrade path) |
 | Pending exists with a known name, a later packet's attribution fails before the user clicks → two pendings | Layer 2 (reuse path) |
 | Rule installed, follow-up packet on the *same* socket but attribution races again | Layer 1 (cache hit) |
-| Rule installed, a *new* socket to the same exact destination races and attribution fails | Layer 3 (specific-destination fallback) |
+| Rule installed, a *new* socket to the same exact destination races and attribution fails | nothing — the flow prompts again (Layer 3 was removed) |
 | Two genuinely different processes to the same destination | not caught — separate dialogs by design |
 
-If you remove any layer, an above row reappears as a duplicate dialog.
+If you remove any of the remaining layers, an above row reappears as a duplicate
+dialog. Removing Layer 3 trades a duplicate dialog for the guarantee that no
+unattributed flow inherits another app's rule.
 
 ---
 
@@ -154,14 +155,14 @@ If you remove any layer, an above row reappears as a duplicate dialog.
 
 - **Layer 1:** `flow-classifier::tests::cache_hit_returns_name_without_touching_proc`, `cache_misses_for_different_port_or_protocol`, `cache_entry_expires_after_ttl`.
 - **Layer 2:** `decision-engine::tests::unknown_then_named_packet_reuses_and_upgrades_pending`, `named_then_unknown_packet_reuses_pending`, `distinct_named_processes_to_same_destination_are_not_deduped`.
-- **Layer 3:** `policy-engine::tests::unknown_process_matches_specific_destination_rule`, `unknown_process_matches_specific_ip_rule`, `unknown_process_does_not_piggyback_on_wildcard_rule`, `unknown_process_does_not_piggyback_on_any_rule`, `unknown_process_does_not_piggyback_on_cidr_rule`, `known_process_mismatch_still_blocks_specific_rule`.
+- **Layer 3 (removed):** `policy-engine::tests::unknown_process_never_matches_a_process_rule`, `unknown_process_does_not_piggyback_on_wildcard_rule`, `unknown_process_does_not_piggyback_on_any_rule`, `unknown_process_does_not_piggyback_on_cidr_rule`, `known_process_mismatch_still_blocks_specific_rule`.
 
 ---
 
 ## What this is *not*
 
-- It is **not** a substitute for perfect process attribution. SOCK_DIAG eliminates the `/proc/net` TOCTOU race for inode lookup, but the fork/exec fd-visibility gap and process-exit races remain. Layers 2 and 3 are safety nets for those residual misses.
-- It is **not** a way to relax security for wildcard rules. Layer 3 specifically refuses to apply broad rules to unattributed flows.
+- It is **not** a substitute for perfect process attribution. SOCK_DIAG eliminates the `/proc/net` TOCTOU race for inode lookup, but the fork/exec fd-visibility gap and process-exit races remain. Layers 1 and 2 soften those residual misses; they never invent a process.
+- It is **not** a way to relax security. No layer applies a process-pinned rule to a flow whose process was not proven, not even for an exact destination.
 - It is **not** a way to merge unrelated processes' decisions. Layer 2 only deduplicates when at least one side is `None`; two distinct known names always stay separate.
 
 ---
@@ -243,7 +244,7 @@ Two new fields were added to `RawPacket`: `tcp_fin: bool` and `tcp_rst: bool`, p
 
 ### Why two separate Allow rules were created
 
-Rule `ui-1778793567` was created when `process=Some("electron")` — the GPUI dialog offered a `DomainWildcard("cursor.sh")` destination. Layer 3 (`process_matches`) requires an exact destination (`IpExact` or `DomainExact`) to forgive `process=None`; wildcards still require a strict match. When the next connection arrived with `process=None`, the wildcard rule did not match, and the user was prompted again — producing rule `ui-1778793599` with `DomainExact("api2.cursor.sh")` and no process constraint.
+Rule `ui-1778793567` was created when `process=Some("electron")` — the GPUI dialog offered a `DomainWildcard("cursor.sh")` destination. At the time, Layer 3 (`process_matches`) required an exact destination (`IpExact` or `DomainExact`) to forgive `process=None`; wildcards still required a strict match. When the next connection arrived with `process=None`, the wildcard rule did not match, and the user was prompted again — producing rule `ui-1778793599` with `DomainExact("api2.cursor.sh")` and no process constraint.
 
 ---
 
@@ -285,9 +286,9 @@ This is deterministic (not a race): whenever a port is reused quickly and a TIME
 
 ### Root cause
 
-The three layers described above only help *after* the first packet of a connection races `/proc`. For long-running sessions (e.g. a YouTube video playing for several minutes), a different failure mode appears: the CDN rotates IP addresses. Chromium opens a new connection to a fresh IP that the Layer 1 per-socket cache has no entry for. The new connection races `/proc` — if it loses, `process_name = None` for that packet.
+The layers described above only help *after* the first packet of a connection races `/proc`. For long-running sessions (e.g. a YouTube video playing for several minutes), a different failure mode appears: the CDN rotates IP addresses. Chromium opens a new connection to a fresh IP that the Layer 1 per-socket cache has no entry for. The new connection races `/proc` — if it loses, `process_name = None` for that packet.
 
-Layer 3 helps if the rule used `DomainExact` or `IpExact`, but not if it used `DomainWildcard` or if the new CDN IP is not in the user's approved IP list. The result: one rogue `(unknown)` dialog appearing 4+ minutes into a session, after dozens of successful attributions to the same process.
+At the time, Layer 3 helped if the rule used `DomainExact` or `IpExact`, but not if it used `DomainWildcard` or if the new CDN IP was not in the user's approved IP list. The result: one rogue `(unknown)` dialog appearing 4+ minutes into a session, after dozens of successful attributions to the same process. Layer 3 has since been removed, so an unattributed flow now prompts regardless of its destination.
 
 ### Layer 0 — nfqueue-level attribution caches
 
@@ -362,7 +363,7 @@ Three eBPF hooks populate a shared BPF `HashMap` (`SOCK_EVENTS`, 16384 entries):
 - **Layer 0** (NFQUEUE caches) patches up *after* a miss — it restores attribution from a previous successful lookup. The eBPF tracker *prevents* the miss.
 - **Layer 1** (per-socket cache) avoids redundant lookups for the same socket. The eBPF tracker provides the *first* lookup result.
 - **Layer 2** (dedup) prevents duplicate prompts. The eBPF tracker ensures the *first* prompt has the correct process name.
-- **Layer 3** (forgiving match) tolerates `process=None`. The eBPF tracker aims to make `process=None` rare.
+- **Layer 3** (removed) used to tolerate `process=None` for exact destinations. The eBPF tracker aims to make `process=None` rare, and the policy engine no longer forgives it.
 
 ### Graceful degradation
 
@@ -394,7 +395,7 @@ If the eBPF program fails to load (no `CAP_BPF`, kernel < 5.5, etc.), the daemon
 
 The eBPF socket tracker (Layer −1) addresses the first bullet below — it returns a PID without touching `/proc/net/*`. Remaining areas to revisit:
 
-- a resolver that returns `(name, confidence)` instead of `Option<name>` (Layer 3's "specific destination" guard could be replaced by a confidence threshold);
+- a resolver that returns `(name, confidence)` instead of `Option<name>` (the strict rule could then accept a high-confidence name instead of requiring a proven one);
 - packet-level user-space queues other than NFQUEUE (the race window changes shape);
 - eBPF BTF: runtime validation of hardcoded struct offsets in `sock_tracker.rs` (currently hardcoded for x86_64, Linux 6.x).
 

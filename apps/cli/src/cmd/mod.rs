@@ -221,6 +221,7 @@ fn build_request(cmd: args::Command) -> Result<ControlRequest, CliError> {
         args::Command::Config { action } => match action {
             args::ConfigAction::Show => Ok(ControlRequest::Health),
             args::ConfigAction::Unlock => Ok(ControlRequest::Unlock),
+            args::ConfigAction::Alerts => Ok(ControlRequest::EgressAlertStatus),
         },
 
         args::Command::RegisterFlow {
@@ -231,7 +232,14 @@ fn build_request(cmd: args::Command) -> Result<ControlRequest, CliError> {
             now_secs,
         } => {
             let domain = domain.filter(|d| d != "-");
+            let domain_source = if domain.is_some() {
+                core_types::DomainSource::Cmdline
+            } else {
+                core_types::DomainSource::None
+            };
             let flow = core_types::FlowContext {
+                reverse_dns: None,
+                process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some(process),
                 process_exe: None,
                 app_name: None,
@@ -240,6 +248,7 @@ fn build_request(cmd: args::Command) -> Result<ControlRequest, CliError> {
                 destination_ip: ip,
                 destination_port: 443,
                 destination_domain: domain,
+                domain_source,
                 protocol: protocol.into_transport(),
                 direction: core_types::FlowDirection::Outbound,
                 device_label: None,

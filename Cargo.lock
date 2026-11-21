@@ -4421,6 +4421,7 @@ name = "netkeep-gpui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "control-api",
  "core-types",
  "gpui",

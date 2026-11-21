@@ -19,6 +19,7 @@ gpui_platform = { git = "https://github.com/mohamadkhani/zed", rev = "c612da6503
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "accb9616263b" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "accb9616263b" }
 anyhow = "1.0"
+async-channel = "2"
 core-types = { path = "../../crates/core-types" }
 control-api = { path = "../../crates/control-api" }
 serde_json = "1"

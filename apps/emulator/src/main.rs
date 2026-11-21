@@ -4,7 +4,7 @@ use std::thread;
 use netkeep_emulator::handle_client;
 
 const DEFAULT_SOCKS_ADDR: &str = "127.0.0.1:1080";
-const DEFAULT_SOCKET_PATH: &str = "/tmp/netkeep.sock";
+const DEFAULT_SOCKET_PATH: &str = "/run/netkeep/netkeep.sock";
 
 fn main() {
     let socks_addr =

@@ -82,7 +82,7 @@ pub fn expect_variant(resp: &serde_json::Value, variant: &str) -> serde_json::Va
 /// The socket the suite talks to — the daemon's control socket, overridable
 /// for pointing the suite at a non-default instance.
 pub fn socket_path() -> String {
-    std::env::var("NETKEEP_SOCKET_PATH").unwrap_or_else(|_| "/tmp/netkeep.sock".to_string())
+    std::env::var("NETKEEP_SOCKET_PATH").unwrap_or_else(|_| "/run/netkeep/netkeep.sock".to_string())
 }
 
 /// Preflight: fail the whole suite loudly when the daemon is down, with an

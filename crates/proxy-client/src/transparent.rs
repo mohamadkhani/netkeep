@@ -4,7 +4,7 @@ use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
-use core_types::ProxyConfig;
+use core_types::{EgressAlert, EgressAlertKind, EgressAlertSink, ProxyConfig};
 use flow_classifier::sni::{extract_http_host, extract_tls_sni};
 use flow_classifier::SniDnsCache;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -34,6 +34,9 @@ pub struct TransparentProxy {
     /// app's own ClientHello/Host when possible, falling back to the cache's
     /// most recent binding for the original destination IP.
     dns_cache: SniDnsCache,
+    /// Reports relay failures so the user sees a proxy that is down instead of
+    /// only a stderr line in the journal.
+    alerts: Option<EgressAlertSink>,
 }
 
 impl TransparentProxy {
@@ -44,6 +47,7 @@ impl TransparentProxy {
         timeout: Duration,
         daemon_mark: u32,
         dns_cache: SniDnsCache,
+        alerts: Option<EgressAlertSink>,
     ) -> Result<Self, ProxyClientError> {
         let listener = bind_transparent_listener(listen_addr)?;
         Ok(Self {
@@ -52,6 +56,7 @@ impl TransparentProxy {
             timeout,
             daemon_mark,
             dns_cache,
+            alerts,
         })
     }
 
@@ -70,6 +75,13 @@ impl TransparentProxy {
                     std::thread::spawn(move || {
                         if let Err(e) = sv.handle_client(client) {
                             eprintln!("transparent proxy: relay error (from {peer}): {e}");
+                            if let Some(alerts) = &sv.alerts {
+                                alerts(EgressAlert {
+                                    kind: EgressAlertKind::Unreachable,
+                                    target_id: Some(sv.proxy.id.clone()),
+                                    detail: e.to_string(),
+                                });
+                            }
                         }
                     });
                 }
@@ -91,7 +103,7 @@ impl TransparentProxy {
         // same IP. Peek before choosing the CONNECT target; the peeked bytes
         // are then forwarded as-is.
         let (prefix, hint) = peek_client_hello(&mut client, self.timeout);
-        let host = connect_host(hint, &original_dst.ip().to_string(), &self.dns_cache);
+        let host = connect_host(hint, &original_dst.ip().to_string(), port, &self.dns_cache);
 
         eprintln!(
             "transparent proxy: {} -> {host}:{port} via {}:{}",
@@ -112,7 +124,7 @@ impl TransparentProxy {
                 Ok(upstream) => upstream,
                 Err(hint_err) => {
                     let fallback =
-                        connect_host(None, &original_dst.ip().to_string(), &self.dns_cache);
+                        connect_host(None, &original_dst.ip().to_string(), port, &self.dns_cache);
                     if fallback == host {
                         return Err(format!("proxy connect to {host}:{port}: {hint_err}"));
                     }
@@ -159,11 +171,18 @@ fn peek_client_hello(client: &mut TcpStream, timeout: Duration) -> (Vec<u8>, Opt
 
 /// Pick the hostname used for the upstream proxy CONNECT.
 ///
-/// Order: in-band hint from the app's own traffic → most recent domain the
-/// DNS cache holds for the original IP → the IP itself (pass-through).
-fn connect_host(hint: Option<String>, ip: &str, dns_cache: &SniDnsCache) -> String {
+/// Order: in-band hint from the app's own traffic → the process-scoped DNS
+/// cache for this destination port → the IP itself (pass-through).
+///
+/// The cache is consulted through [`SniDnsCache::lookup_for`] with no process
+/// identity, so a name learned by some local app never becomes this flow's
+/// CONNECT target, and a web name is never attached to a non-web port. When
+/// no name qualifies the IP is passed through: an HTTP proxy CONNECT to an
+/// address is valid, and a TLS handshake inside the tunnel still carries the
+/// real SNI.
+fn connect_host(hint: Option<String>, ip: &str, port: u16, dns_cache: &SniDnsCache) -> String {
     hint.filter(|h| !h.is_empty())
-        .or_else(|| dns_cache.lookup(ip))
+        .or_else(|| dns_cache.lookup_for(ip, port, None, None))
         .unwrap_or_else(|| ip.to_string())
 }
 
@@ -298,11 +317,11 @@ mod tests {
     #[test]
     fn connect_host_prefers_inband_hint_over_cache() {
         let cache = SniDnsCache::new();
-        cache.insert("10.10.34.36", "www.facebook.com");
+        cache.insert_dns("10.10.34.36", "www.facebook.com", 300, None, None);
         // In-band SNI wins even when the cache holds another domain that
         // resolves to the same shared IP.
         assert_eq!(
-            connect_host(Some("a.example".into()), "10.10.34.36", &cache),
+            connect_host(Some("a.example".into()), "10.10.34.36", 443, &cache),
             "a.example"
         );
     }
@@ -310,17 +329,41 @@ mod tests {
     #[test]
     fn connect_host_falls_back_to_cache_then_ip() {
         let cache = SniDnsCache::new();
-        cache.insert("10.10.34.36", "www.facebook.com");
+        cache.insert_dns("10.10.34.36", "www.facebook.com", 300, None, None);
         assert_eq!(
-            connect_host(None, "10.10.34.36", &cache),
+            connect_host(None, "10.10.34.36", 443, &cache),
             "www.facebook.com"
         );
         // Unknown IP passes through unchanged.
-        assert_eq!(connect_host(None, "1.2.3.4", &cache), "1.2.3.4");
+        assert_eq!(connect_host(None, "1.2.3.4", 443, &cache), "1.2.3.4");
         // Empty hint behaves like no hint.
         assert_eq!(
-            connect_host(Some(String::new()), "10.10.34.36", &cache),
+            connect_host(Some(String::new()), "10.10.34.36", 443, &cache),
             "www.facebook.com"
+        );
+    }
+
+    /// Server-first protocols carry no SNI/Host, so a CONNECT must never be
+    /// aimed at a web name cached for a shared IP — the raw IP is correct.
+    #[test]
+    fn connect_host_does_not_put_a_web_name_on_a_non_web_port() {
+        let cache = SniDnsCache::new();
+        cache.insert_dns("5.202.198.83", "www.facebook.com", 300, None, None);
+        assert_eq!(
+            connect_host(None, "5.202.198.83", 22, &cache),
+            "5.202.198.83"
+        );
+    }
+
+    /// A binding learned by a local app is not a target for a flow the proxy
+    /// cannot attribute; only an unowned, unambiguous prior may name it.
+    #[test]
+    fn connect_host_ignores_a_name_owned_by_a_local_app() {
+        let cache = SniDnsCache::new();
+        cache.insert_dns("203.0.113.9", "app.example", 300, Some("brave"), None);
+        assert_eq!(
+            connect_host(None, "203.0.113.9", 443, &cache),
+            "203.0.113.9"
         );
     }
 }

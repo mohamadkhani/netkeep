@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use core_types::{ProxyConfig, RouteTarget, TransportProtocol};
+use core_types::{
+    EgressAlert, EgressAlertKind, EgressAlertSink, ProxyConfig, RouteTarget, TransportProtocol,
+};
 use flow_classifier::{proc_resolver::ProcProcessResolver, ProcessResolver, SniDnsCache};
 use state_store::ProxyRepository;
 
@@ -56,6 +58,17 @@ fn keep_direct_comm(comm: &str) -> bool {
     is_netkeep_comm(comm) || !is_local_resolver_comm(comm)
 }
 
+/// Owner to store with a DNS answer in the shared cache.
+///
+/// A stub resolver (`systemd-resolved`, `dnsmasq`, …) only relays a query; it
+/// never opens the app's connection. Recording it as the owner would make
+/// [`flow_classifier::SniDnsCache::lookup_for`] refuse the binding for the
+/// real app, so a resolver is stored as "no owner" instead. The daemon keeps
+/// its own identity: it does open its own connections.
+fn cache_owner(process_name: Option<&str>) -> Option<&str> {
+    process_name.filter(|name| keep_direct_comm(name))
+}
+
 /// Pick the single real app among behind-resolver attribution candidates.
 ///
 /// Returns `Some(comm)` when exactly one distinct non-resolver client is
@@ -87,10 +100,31 @@ fn comm_for_pid(pid: u32) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Dispatch function: given `(process_name, domain)`, return the `RouteTarget`
-/// and the list of DNS servers to use, or `None` for system DNS.
+/// A DNS query's resolved client identity.
+///
+/// The name is always present; the exe path is known only when the identity
+/// came from `/proc` (`ProcessInfo::exe`). The eBPF tracker carries a comm
+/// name and no path, so its answers legitimately have `exe: None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedApp {
+    pub name: String,
+    pub exe: Option<String>,
+}
+
+impl ResolvedApp {
+    fn name_only(name: String) -> Self {
+        Self { name, exe: None }
+    }
+}
+
+/// Dispatch function: given `(process_name, process_exe, domain)`, return the
+/// `RouteTarget` and the list of DNS servers to use, or `None` for system DNS.
+///
+/// The exe is passed separately because a rule that pins `process_exe` can
+/// only match when the flow carries the same path; omitting it silently
+/// downgraded every exe-pinned `Route` rule to system DNS.
 pub type EgressResolver =
-    Arc<dyn Fn(&str, &str) -> Option<(RouteTarget, Vec<String>)> + Send + Sync>;
+    Arc<dyn Fn(&str, Option<&str>, &str) -> Option<(RouteTarget, Vec<String>)> + Send + Sync>;
 
 /// Resolves a `RouteTarget` to its policy-routing fwmark.
 /// Returns `None` if no mark is available (fall back to plain UDP).
@@ -134,12 +168,40 @@ impl SystemDns {
     }
 }
 
+/// Holder for the eBPF DNS tracker, filled in asynchronously.
+///
+/// Loading the BPF program costs seconds of kernel verifier time (measured:
+/// 9 s on this kernel), so the daemon installs it on a worker thread after
+/// enforcement (nftables + NFQUEUE + socket tracker) is already live. Queries
+/// that arrive before the slot is filled, or that arrive after the program was
+/// rejected, fall through to the SOCK_DIAG//proc paths — the same behaviour as
+/// when the program cannot be loaded at all.
+#[derive(Default)]
+pub struct DnsTrackerSlot(OnceLock<Option<Arc<DnsTracker>>>);
+
+impl DnsTrackerSlot {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Publish the tracker (or `None` when loading failed). Only the first
+    /// call has an effect; the slot is read-only afterwards.
+    pub fn install(&self, tracker: Option<Arc<DnsTracker>>) {
+        let _ = self.0.set(tracker);
+    }
+
+    /// The tracker, or `None` while it is still loading or after a failure.
+    pub fn get(&self) -> Option<&Arc<DnsTracker>> {
+        self.0.get().and_then(Option::as_ref)
+    }
+}
+
 /// DNS forwarder: listens on `127.0.0.1:53`, identifies the source process
 /// via the eBPF tracker, matches against routing rules, and resolves through
 /// the correct egress's DNS servers.
 pub struct DnsForwarder {
     socket: UdpSocket,
-    tracker: Option<Arc<DnsTracker>>,
+    tracker: Arc<DnsTrackerSlot>,
     proc_resolver: ProcProcessResolver,
     egress_resolver: EgressResolver,
     fwmark_resolver: FwmarkResolver,
@@ -147,6 +209,9 @@ pub struct DnsForwarder {
     dns_cache: SniDnsCache,
     /// Cache of proxy configs keyed by proxy_id to avoid per-query SQLite opens.
     proxy_cache: Arc<Mutex<HashMap<String, ProxyConfig>>>,
+    /// Reports data-path failures so the activity log and the tray can show
+    /// them. Without it, "the proxy's DNS is down" lives only in the journal.
+    alerts: Option<EgressAlertSink>,
     /// Fwmark stamped on all daemon-originated sockets so nftables bypasses
     /// NFQUEUE. Without this, the daemon's own DNS/TCP relay connections are
     /// intercepted and attributed to "netkeep-daemon" instead of the real
@@ -169,12 +234,13 @@ impl DnsForwarder {
     /// nftables bypasses NFQUEUE. Must be `>= ROUTE_MARK_BASE` (20000).
     /// Pass 0 to disable marking (e.g. in tests).
     pub fn bind(
-        tracker: Option<Arc<DnsTracker>>,
+        tracker: Arc<DnsTrackerSlot>,
         egress_resolver: EgressResolver,
         fwmark_resolver: FwmarkResolver,
         system_dns: Option<SystemDns>,
         dns_cache: SniDnsCache,
         daemon_mark: u32,
+        alerts: Option<EgressAlertSink>,
     ) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("127.0.0.1:53")?;
         socket.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -192,6 +258,7 @@ impl DnsForwarder {
             dns_cache,
             proxy_cache: Arc::new(Mutex::new(HashMap::new())),
             daemon_mark,
+            alerts,
         })
     }
 
@@ -248,32 +315,45 @@ impl DnsForwarder {
         let domain = parse_qname_from_query(&query).unwrap_or_default();
 
         // Identify source process.
-        let process_name = self.resolve_process(peer, &domain);
+        let app = self.resolve_process(peer, &domain);
 
         eprintln!(
             "dns-forwarder: {} process={} domain={}",
             peer,
-            process_name.as_deref().unwrap_or("?"),
+            app.as_ref().map(|a| a.name.as_str()).unwrap_or("?"),
             domain
         );
 
         // Match rule: (process, domain) → (egress target, dns servers).
-        let response = if let Some(name) = &process_name {
-            if let Some((target, dns_servers)) = (self.egress_resolver)(name, &domain) {
+        let response = if let Some(app) = &app {
+            if let Some((target, dns_servers)) =
+                (self.egress_resolver)(&app.name, app.exe.as_deref(), &domain)
+            {
                 if dns_servers.is_empty() {
-                    // Fail closed: an egress with no DNS servers cannot resolve
-                    // through its own path, and falling back to system DNS
-                    // would leak routed domains to the local resolver.
+                    // The egress cannot resolve on its own path. Answering
+                    // SERVFAIL here used to be the only option, but once
+                    // exe-pinned Route rules started matching DNS queries that
+                    // turned into a machine-wide outage: every domain covered
+                    // by such a rule failed to resolve (1 205 SERVFAIL lines on
+                    // 2026-11-15, 9 972 on 2026-11-16). Prefer a working
+                    // resolver and say so; the query leaves the egress's path,
+                    // which is what the old code was trying to prevent.
                     eprintln!(
-                        "dns-forwarder: egress {target:?} matched for '{domain}' but has no DNS servers configured; answering SERVFAIL (configure DNS servers for this egress to enable resolution)"
+                        "dns-forwarder: egress {target:?} matched for '{domain}' but has no DNS servers configured; resolving through system DNS instead (configure DNS servers on this egress to keep the query on its path)"
                     );
-                    build_dns_error_response(&query, RCODE_SERVFAIL)
-                        .ok_or_else(|| "malformed query: cannot build SERVFAIL reply".to_string())?
+                    if let Some(alerts) = &self.alerts {
+                        alerts(EgressAlert {
+                            kind: EgressAlertKind::NoResolver,
+                            target_id: Some(route_target_id(&target)),
+                            detail: domain.clone(),
+                        });
+                    }
+                    self.forward_system(&query)?
                 } else {
                     self.resolve_via_egress(&query, &target, &dns_servers)?
                 }
             } else {
-                self.warn_rules_not_evaluated(&domain, Some(name));
+                self.warn_rules_not_evaluated(&domain, Some(&app.name));
                 self.forward_system(&query)?
             }
         } else {
@@ -282,12 +362,22 @@ impl DnsForwarder {
         };
 
         // Populate SniDnsCache: extract (ip, domain, ttl) from DNS response
-        // A/AAAA records. TTL-honored so bindings expire with the answer.
+        // A/AAAA records. TTL-honored so bindings expire with the answer, and
+        // tagged with the resolving app so policy lookups can refuse the
+        // answer for a different process. A stub resolver only relayed the
+        // query — it never opens the connection — so its identity is stored
+        // as "no owner" rather than as an owner that would block every app.
         if !domain.is_empty() {
+            let answer_owner = cache_owner(app.as_ref().map(|a| a.name.as_str()));
             let pairs = parse_dns_response_ips(&response);
             for (ip, d, ttl) in &pairs {
-                self.dns_cache
-                    .insert_with_ttl(ip.to_string(), d.as_str(), Some(u64::from(*ttl)));
+                self.dns_cache.insert_dns(
+                    ip.to_string(),
+                    d.as_str(),
+                    u64::from(*ttl),
+                    answer_owner,
+                    None,
+                );
             }
             if !pairs.is_empty() {
                 eprintln!(
@@ -331,14 +421,14 @@ impl DnsForwarder {
     /// When that is a local stub resolver (systemd-resolved, dnsmasq, …) the
     /// real application is hidden behind it, so [`Self::resolve_behind_resolver`]
     /// recovers the app that asked for `domain`.
-    fn resolve_process(&self, peer: SocketAddr, domain: &str) -> Option<String> {
+    fn resolve_process(&self, peer: SocketAddr, domain: &str) -> Option<ResolvedApp> {
         // Try eBPF tracker first (100% accurate, no /proc race).
         let mut direct = None;
-        if let Some(tracker) = &self.tracker {
+        if let Some(tracker) = self.tracker.get() {
             if let SocketAddr::V4(v4) = peer {
                 if let Some(info) = tracker.lookup(*v4.ip(), v4.port()) {
                     if !info.comm.is_empty() {
-                        direct = Some(info.comm);
+                        direct = Some(ResolvedApp::name_only(info.comm));
                     }
                 }
             }
@@ -354,14 +444,17 @@ impl DnsForwarder {
                         .resolve(&src_ip, v4.port(), TransportProtocol::Udp, None)
                 {
                     if !proc_info.name.is_empty() {
-                        direct = Some(proc_info.name);
+                        direct = Some(ResolvedApp {
+                            name: proc_info.name,
+                            exe: proc_info.exe,
+                        });
                     }
                 }
             }
         }
 
         match direct {
-            Some(name) if keep_direct_comm(&name) => Some(name),
+            Some(app) if keep_direct_comm(&app.name) => Some(app),
             direct => self.resolve_behind_resolver(domain).or(direct),
         }
     }
@@ -387,8 +480,8 @@ impl DnsForwarder {
     /// non-resolver client names the app. Several concurrent resolvers are
     /// ambiguous and we refuse to guess (returns `None`), so the query keeps
     /// the resolver's identity rather than a wrong one.
-    fn resolve_behind_resolver(&self, domain: &str) -> Option<String> {
-        if let Some(tracker) = &self.tracker {
+    fn resolve_behind_resolver(&self, domain: &str) -> Option<ResolvedApp> {
+        if let Some(tracker) = self.tracker.get() {
             for candidate in tracker.lookup_all_by_domain(domain) {
                 if is_local_resolver_comm(&candidate.info.comm) {
                     continue;
@@ -402,14 +495,17 @@ impl DnsForwarder {
                     None,
                 ) {
                     if !owner.name.is_empty() && !is_local_resolver_comm(&owner.name) {
-                        return Some(owner.name);
+                        return Some(ResolvedApp {
+                            name: owner.name,
+                            exe: owner.exe,
+                        });
                     }
                 }
                 // Socket already closed: trust the eBPF comm if still alive.
                 if candidate.info.pid != 0
                     && std::path::Path::new(&format!("/proc/{}", candidate.info.pid)).exists()
                 {
-                    return Some(candidate.info.comm);
+                    return Some(ResolvedApp::name_only(candidate.info.comm));
                 }
             }
         }
@@ -418,7 +514,7 @@ impl DnsForwarder {
             .into_iter()
             .chain(flow_classifier::proc_resolver::resolved_varlink_client_pids())
             .filter_map(comm_for_pid);
-        pick_behind_resolver_comm(candidates)
+        pick_behind_resolver_comm(candidates).map(ResolvedApp::name_only)
     }
 
     fn resolve_via_egress(
@@ -449,6 +545,13 @@ impl DnsForwarder {
                 eprintln!(
                     "dns-forwarder: egress DNS failed via {target:?} (servers: {dns_servers:?}): {e}; answering SERVFAIL (system DNS fallback disabled to prevent domain leak)"
                 );
+                if let Some(alerts) = &self.alerts {
+                    alerts(EgressAlert {
+                        kind: EgressAlertKind::DnsFailed,
+                        target_id: Some(route_target_id(target)),
+                        detail: e.to_string(),
+                    });
+                }
                 build_dns_error_response(query, RCODE_SERVFAIL).ok_or_else(|| {
                     format!("egress DNS failed ({e}) and malformed query prevented SERVFAIL reply")
                 })
@@ -994,6 +1097,15 @@ fn skip_name(data: &[u8], pos: &mut usize) -> Option<()> {
     None
 }
 
+/// Stable id for a route target, used to group alerts.
+fn route_target_id(target: &RouteTarget) -> String {
+    match target {
+        RouteTarget::Proxy(id) => format!("proxy:{id}"),
+        RouteTarget::Tun(name) => format!("tun:{name}"),
+        RouteTarget::Device(name) => format!("device:{name}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,6 +1202,20 @@ mod tests {
         );
         assert!(!keep_direct_comm("dnsmasq"), "resolver → look behind");
         assert!(!keep_direct_comm(""), "unknown → look behind");
+    }
+
+    /// A stub resolver must not be stored as the owner of a DNS answer: it
+    /// relays the query but never opens the connection, and an owner it did
+    /// not have would block the real app's lookup. The daemon keeps its own
+    /// identity because it does open its own connections.
+    #[test]
+    fn dns_answer_owner_is_never_a_resolver() {
+        assert_eq!(cache_owner(Some("chromium")), Some("chromium"));
+        assert_eq!(cache_owner(Some("systemd-resolved")), None);
+        assert_eq!(cache_owner(Some("systemd-resolve")), None);
+        assert_eq!(cache_owner(Some("dnsmasq")), None);
+        assert_eq!(cache_owner(Some("netkeepd")), Some("netkeepd"));
+        assert_eq!(cache_owner(None), None);
     }
 
     #[test]

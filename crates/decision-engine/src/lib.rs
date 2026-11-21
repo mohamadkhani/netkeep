@@ -19,11 +19,16 @@ pub enum DecisionOutcome {
     Pending(Box<PendingDecision>),
 }
 
-/// Stable identity for a logical flow, independent of ephemeral src_port or
-/// whether the domain was inferred on this particular packet.
+/// Identity of a pending connection: the local socket plus the destination.
+///
+/// The source port is part of the key because it is part of the connection:
+/// two sockets to the same host are two flows, and a retransmit that arrives
+/// with a different source port must not complete this dialog.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FlowKey {
     process_name: Option<String>,
+    source_ip: String,
+    source_port: u16,
     destination_ip: String,
     destination_port: u16,
     protocol: TransportProtocol,
@@ -33,10 +38,34 @@ impl FlowKey {
     fn from(flow: &FlowContext) -> Self {
         Self {
             process_name: flow.process_name.clone(),
+            source_ip: flow.source_ip.clone(),
+            source_port: flow.source_port,
             destination_ip: flow.destination_ip.clone(),
             destination_port: flow.destination_port,
             protocol: flow.protocol,
         }
+    }
+}
+
+/// True when both flows carry exactly the same process identity.
+///
+/// Two unattributed flows are equal here: if neither side can prove which app
+/// it is, they cannot be told apart, and one dialog answers both. A flow that
+/// names a process never matches a flow with a different or missing name.
+fn same_process_identity(a: &FlowContext, b: &FlowContext) -> bool {
+    a.process_name == b.process_name && a.process_exe == b.process_exe
+}
+
+/// True when a flow may share a pending that already displays `existing`'s
+/// domain. A named destination must not hide behind a dialog that shows a
+/// different name or none at all; a flow with no name yet may join a named
+/// pending, because that pending already holds the proven name for the same
+/// destination address.
+fn destination_name_compatible(existing: &FlowContext, candidate: &FlowContext) -> bool {
+    match (&existing.destination_domain, &candidate.destination_domain) {
+        (Some(a), Some(b)) => a == b,
+        (None, Some(_)) => false,
+        _ => true,
     }
 }
 
@@ -122,43 +151,101 @@ impl DecisionEngine {
         //     "unknown" pending so the dialog shows the real process name.
         // Two pendings with distinct known process_names are kept separate
         // (e.g. chrome and firefox to the same host:port at the same time).
+        let src_ip = flow.source_ip.clone();
+        let src_port = flow.source_port;
         let dst_ip = flow.destination_ip.clone();
         let dst_port = flow.destination_port;
         let protocol = flow.protocol;
-        let fallback = self
-            .pending_by_flow
-            .iter()
-            .find(|(k, _)| {
-                k.destination_ip == dst_ip
-                    && k.destination_port == dst_port
-                    && k.protocol == protocol
-                    && (flow.process_name.is_none() || k.process_name.is_none())
-            })
-            .map(|(k, id)| (k.clone(), id.clone()));
+        // The fallback must identify the *same socket*: a retransmit from a
+        // different source port is a different connection, and patching it
+        // would put another app's name/domain into this dialog. (A different
+        // socket may still *share* the dialog — that is decided further down,
+        // where nothing is patched.)
+        let fallback = self.pending.iter().find_map(|(id, pending)| {
+            let p = &pending.flow;
+            (p.source_ip == src_ip
+                && p.source_port == src_port
+                && p.destination_ip == dst_ip
+                && p.destination_port == dst_port
+                && p.protocol == protocol
+                && (flow.process_name.is_none() || p.process_name.is_none()))
+            .then(|| (FlowKey::from(p), id.clone()))
+        });
         if let Some((existing_key, existing_id)) = fallback {
-            // Upgrade path: rekey the index and patch the stored decision so
-            // subsequent polls see the real process name. Also fill in newly
-            // learned domain / device label if the original entry lacked them.
-            if flow.process_name.is_some() && existing_key.process_name.is_none() {
-                self.pending_by_flow.remove(&existing_key);
-                if let Some(existing) = self.pending.get_mut(&existing_id) {
-                    existing.flow.process_name = flow.process_name.clone();
-                    if existing.flow.destination_domain.is_none() {
-                        existing.flow.destination_domain = flow.destination_domain.clone();
-                    }
-                    if existing.flow.device_label.is_none() {
-                        existing.flow.device_label = flow.device_label.clone();
-                    }
-                    let new_key = FlowKey::from(&existing.flow);
-                    self.pending_by_flow.insert(new_key, existing_id.clone());
-                    counter!("netkeep.pending.deduplicated", "type" => "name_upgrade").increment(1);
+            // Only patch a pending when the new packet agrees with what the
+            // dialog already shows. A contradicting process or domain is
+            // ignored instead of overwriting user-visible data.
+            if let Some(existing) = self.pending.get(&existing_id).cloned() {
+                let process_conflict = match (&existing.flow.process_name, &flow.process_name) {
+                    (Some(a), Some(b)) => a != b,
+                    _ => false,
+                };
+                let domain_conflict =
+                    match (&existing.flow.destination_domain, &flow.destination_domain) {
+                        (Some(a), Some(b)) => a != b,
+                        _ => false,
+                    };
+                let can_upgrade_process =
+                    flow.process_name.is_some() && existing.flow.process_name.is_none();
+                let can_fill_domain =
+                    existing.flow.destination_domain.is_none() && flow.destination_domain.is_some();
+                let can_fill_device =
+                    existing.flow.device_label.is_none() && flow.device_label.is_some();
+
+                if process_conflict || domain_conflict {
+                    counter!("netkeep.pending.deduplicated", "type" => "conflict").increment(1);
                     return DecisionOutcome::Pending(Box::new(existing.clone()));
                 }
-            }
-            if let Some(existing) = self.pending.get(&existing_id) {
+                if can_upgrade_process || can_fill_domain || can_fill_device {
+                    self.pending_by_flow.remove(&existing_key);
+                    if let Some(existing) = self.pending.get_mut(&existing_id) {
+                        if can_upgrade_process {
+                            existing.flow.process_name = flow.process_name.clone();
+                            existing.flow.process_exe = flow.process_exe.clone();
+                            existing.flow.app_name = flow.app_name.clone();
+                        }
+                        if can_fill_domain {
+                            existing.flow.destination_domain = flow.destination_domain.clone();
+                            existing.flow.domain_source = flow.domain_source;
+                        }
+                        if can_fill_device {
+                            existing.flow.device_label = flow.device_label.clone();
+                        }
+                        let new_key = FlowKey::from(&existing.flow);
+                        self.pending_by_flow.insert(new_key, existing_id.clone());
+                        counter!("netkeep.pending.deduplicated", "type" => "name_upgrade")
+                            .increment(1);
+                        return DecisionOutcome::Pending(Box::new(existing.clone()));
+                    }
+                }
                 counter!("netkeep.pending.deduplicated", "type" => "symmetric").increment(1);
                 return DecisionOutcome::Pending(Box::new(existing.clone()));
             }
+        }
+
+        // Destination-scoped reuse. The socket key above keeps a retransmit
+        // from a different connection out of someone else's dialog, but it
+        // also means an app that opens a new socket to the same destination
+        // every few seconds asks the same question again and again. When the
+        // process identity is *identical* — including the "not identified"
+        // case — and the destination is the same, the user's answer can only
+        // be the same decision. Reuse the pending without copying any field
+        // from the new flow, so nothing is fabricated inside the dialog.
+        if let Some(existing) = self.pending.values().find(|pending| {
+            // An expired pending is only waiting for the sweep thread. It
+            // must not absorb a live connection: that flow would wait on a
+            // decision that is already over.
+            let p = &pending.flow;
+            pending.deadline_at_secs > now_secs
+                && same_process_identity(p, &flow)
+                && p.destination_ip == dst_ip
+                && p.destination_port == dst_port
+                && p.protocol == protocol
+                && p.direction == flow.direction
+                && destination_name_compatible(p, &flow)
+        }) {
+            counter!("netkeep.pending.deduplicated", "type" => "destination").increment(1);
+            return DecisionOutcome::Pending(Box::new(existing.clone()));
         }
 
         if self.pending.len() >= self.pending_limit {
@@ -221,6 +308,14 @@ impl DecisionEngine {
 
     pub fn is_pending(&self, pending_id: &str) -> bool {
         self.pending.contains_key(pending_id)
+    }
+
+    /// The flow of a still-unanswered pending decision.
+    ///
+    /// The pending sweep needs the answered flow's process identity to scope
+    /// which other pendings may inherit the answer.
+    pub fn pending_flow(&self, pending_id: &str) -> Option<&FlowContext> {
+        self.pending.get(pending_id).map(|d| &d.flow)
     }
 
     /// Returns `(action, egress_id)` for the resolved pending, consuming the entry.
@@ -287,6 +382,8 @@ mod tests {
 
     fn mk_flow() -> FlowContext {
         FlowContext {
+            reverse_dns: None,
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("curl".to_string()),
             process_exe: None,
             app_name: None,
@@ -295,6 +392,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),
+            domain_source: core_types::DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,
@@ -427,6 +525,151 @@ mod tests {
     }
 
     #[test]
+    fn new_socket_from_the_same_process_reuses_the_destination_pending() {
+        // The same app opening a second connection to the same destination is
+        // the same decision: the user must not see a fresh dialog per socket.
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let out1 = engine.register_unknown_flow(mk_flow(), 0);
+        let id1 = match out1 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+
+        let mut second = mk_flow();
+        second.source_port = 54322;
+        let pending2 = match engine.register_unknown_flow(second, 1) {
+            DecisionOutcome::Pending(p) => p,
+            _ => panic!("expected pending"),
+        };
+
+        assert_eq!(
+            pending2.id, id1,
+            "the same app and destination must reuse the dialog"
+        );
+        assert_eq!(engine.pending_count(), 1);
+        assert_eq!(
+            pending2.flow.source_port, 54321,
+            "the dialog keeps the socket it was created for"
+        );
+    }
+
+    #[test]
+    fn unattributed_sockets_to_one_destination_share_one_pending() {
+        // Every connection from an app the resolver cannot identify used to
+        // open its own dialog. With no identity to tell them apart, one
+        // dialog answers all of them.
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let mut first = mk_flow();
+        first.process_name = None;
+        first.process_exe = None;
+        first.destination_domain = None;
+        first.source_port = 40704;
+        let out1 = engine.register_unknown_flow(first, 0);
+        let id1 = match out1 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+
+        let mut second = mk_flow();
+        second.process_name = None;
+        second.process_exe = None;
+        second.destination_domain = None;
+        second.source_port = 40712;
+        let pending2 = match engine.register_unknown_flow(second, 1) {
+            DecisionOutcome::Pending(p) => p,
+            _ => panic!("expected pending"),
+        };
+
+        assert_eq!(pending2.id, id1);
+        assert_eq!(engine.pending_count(), 1);
+    }
+
+    #[test]
+    fn a_named_destination_does_not_join_a_nameless_pending() {
+        // The pending shows no hostname. Letting a flow that knows its name
+        // share that dialog would let the user answer for a destination they
+        // were never shown.
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let mut first = mk_flow();
+        first.process_name = None;
+        first.process_exe = None;
+        first.destination_domain = None;
+        first.source_port = 1000;
+        let out1 = engine.register_unknown_flow(first, 0);
+        let id1 = match out1 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+
+        let mut second = mk_flow();
+        second.process_name = None;
+        second.process_exe = None;
+        second.destination_domain = Some("api.example.com".to_string());
+        second.source_port = 1001;
+        let pending2 = match engine.register_unknown_flow(second, 1) {
+            DecisionOutcome::Pending(p) => p,
+            _ => panic!("expected pending"),
+        };
+
+        assert_ne!(pending2.id, id1, "a named destination needs its own dialog");
+        assert_eq!(engine.pending_count(), 2);
+        assert_eq!(
+            pending2.flow.destination_domain.as_deref(),
+            Some("api.example.com")
+        );
+    }
+
+    #[test]
+    fn same_name_different_exe_keeps_separate_pendings() {
+        // Two binaries that share a comm name are two apps. Sharing a dialog
+        // between them is the misattribution this change set exists to stop.
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let mut first = mk_flow();
+        first.process_exe = Some("/usr/bin/node".to_string());
+        first.source_port = 2000;
+        let out1 = engine.register_unknown_flow(first, 0);
+        let id1 = match out1 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+
+        let mut second = mk_flow();
+        second.process_exe = Some("/usr/local/bin/node".to_string());
+        second.source_port = 2001;
+        let pending2 = match engine.register_unknown_flow(second, 1) {
+            DecisionOutcome::Pending(p) => p,
+            _ => panic!("expected pending"),
+        };
+
+        assert_ne!(pending2.id, id1);
+        assert_eq!(engine.pending_count(), 2);
+    }
+
+    #[test]
+    fn an_expired_pending_does_not_absorb_a_new_connection() {
+        // The sweep thread runs once a second; a pending whose deadline has
+        // passed must not capture a live flow in that window, or the flow
+        // would wait on a decision that is already over.
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let out1 = engine.register_unknown_flow(mk_flow(), 0);
+        let id1 = match out1 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+
+        let mut second = mk_flow();
+        second.source_port = 54322;
+        let pending2 = match engine.register_unknown_flow(second, 100) {
+            DecisionOutcome::Pending(p) => p,
+            _ => panic!("expected pending"),
+        };
+
+        assert_ne!(pending2.id, id1);
+        assert_eq!(pending2.created_at_secs, 100);
+        assert_eq!(engine.pending_count(), 2);
+    }
+
+    #[test]
     fn different_destination_port_creates_separate_pending() {
         let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
         let _ = engine.register_unknown_flow(mk_flow(), 0);
@@ -434,6 +677,70 @@ mod tests {
         flow2.destination_port = 80;
         let _ = engine.register_unknown_flow(flow2, 0);
         assert_eq!(engine.pending_count(), 2);
+    }
+
+    /// A retransmit from another socket is a different connection: the
+    /// upgrade path must not patch a pending keyed on a different source port.
+    #[test]
+    fn pending_upgrade_refuses_a_different_source_port() {
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let mut first = mk_flow();
+        first.process_name = None;
+        first.source_port = 40000;
+        let out1 = engine.register_unknown_flow(first, 0);
+        let id1 = match out1 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+
+        let mut second = mk_flow();
+        second.source_port = 40001; // different socket, same destination
+        let out2 = engine.register_unknown_flow(second, 1);
+        let id2 = match out2 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+
+        assert_ne!(
+            id1, id2,
+            "a different source socket must keep its own pending"
+        );
+        assert_eq!(engine.pending_count(), 2);
+        assert_eq!(
+            engine.pending_by_flow.len(),
+            engine.pending.len(),
+            "the reverse index must keep one entry per pending, not collapse them"
+        );
+    }
+
+    /// The pending's dialog must not have its domain overwritten by a later
+    /// packet that disagrees. The same applies to a process name.
+    #[test]
+    fn pending_upgrade_refuses_a_contradicting_domain() {
+        let mut engine = DecisionEngine::new(100, 100, OverflowPolicy::DenyNew);
+        let mut first = mk_flow();
+        first.process_name = None;
+        first.destination_domain = Some("api.zed.dev".to_string());
+        let out1 = engine.register_unknown_flow(first, 0);
+        let id1 = match out1 {
+            DecisionOutcome::Pending(p) => p.id,
+            _ => panic!("expected pending"),
+        };
+
+        let mut second = mk_flow(); // process curl, domain example.com
+        second.destination_domain = Some("events.kiloapps.io".to_string());
+        let pending = match engine.register_unknown_flow(second, 1) {
+            DecisionOutcome::Pending(p) => p,
+            _ => panic!("expected pending"),
+        };
+
+        assert_eq!(pending.id, id1);
+        assert_eq!(
+            pending.flow.destination_domain.as_deref(),
+            Some("api.zed.dev"),
+            "a contradicting domain must not replace the dialog's value"
+        );
+        assert_eq!(engine.pending_count(), 1);
     }
 
     #[test]

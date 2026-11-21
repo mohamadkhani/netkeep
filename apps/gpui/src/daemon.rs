@@ -1,11 +1,23 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::mpsc::Sender;
 
-use control_api::{ControlRequest, ControlResponse};
+use control_api::{ControlRequest, ControlResponse, PushNotification};
 use core_types::{Egress, PendingDecision};
 
-pub const SOCKET_PATH: &str = "/tmp/netkeep.sock";
+/// Default control socket location. Matches the systemd unit's
+/// `NETKEEP_SOCKET_PATH` (packaging/archlinux + /usr/lib/systemd/system).
+pub const SOCKET_PATH: &str = "/run/netkeep/netkeep.sock";
+
+/// Resolve the daemon socket path: explicit CLI arg > `NETKEEP_SOCKET_PATH`
+/// env var > built-in default.
+pub fn resolve_socket_path(explicit: Option<&str>) -> String {
+    explicit
+        .map(String::from)
+        .or_else(|| std::env::var("NETKEEP_SOCKET_PATH").ok())
+        .unwrap_or_else(|| SOCKET_PATH.to_string())
+}
 
 pub fn send_request(
     socket_path: &str,
@@ -21,6 +33,57 @@ pub fn send_request(
     reader.read_line(&mut line)?;
     let response: ControlResponse = serde_json::from_str(line.trim_end())?;
     Ok(response)
+}
+
+/// Open a subscription to the daemon's notification channel. Sends
+/// `ControlRequest::SubscribeToPending`, receives the ack, then keeps reading
+/// newline-delimited `PushNotification` payloads and forwards them to the
+/// channel. Returns an error if the socket connection or the ack fails.
+pub fn subscribe_to_notifications(
+    socket_path: &str,
+    tx: Sender<PushNotification>,
+) -> anyhow::Result<()> {
+    let stream = UnixStream::connect(socket_path)?;
+
+    let mut writer = &stream;
+    let payload = serde_json::to_string(&ControlRequest::SubscribeToPending)?;
+    writer.write_all(format!("{payload}\n").as_bytes())?;
+
+    // Read the ack in blocking mode so we don't race the daemon's reply.
+    let mut reader = BufReader::new(&stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let response: ControlResponse = serde_json::from_str(line.trim_end())?;
+    if !matches!(response, ControlResponse::SubscriptionAck) {
+        return Err(anyhow::anyhow!(
+            "unexpected subscription ack: {:?}",
+            response
+        ));
+    }
+
+    // Read with a short timeout instead of non-blocking polling: `read_line`
+    // appends to `line`, so partial reads accumulate and are never dropped.
+    stream.set_read_timeout(Some(std::time::Duration::from_millis(200)))?;
+    line.clear();
+    loop {
+        use std::io::ErrorKind;
+        match reader.read_line(&mut line) {
+            Ok(0) => return Ok(()), // socket closed
+            Ok(_) => {
+                if let Ok(notif) = serde_json::from_str(line.trim_end()) {
+                    if tx.send(notif).is_err() {
+                        return Ok(()); // viewer gone
+                    }
+                }
+                line.clear();
+            }
+            Err(ref e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                // Keep any partial line buffered and try again.
+                continue;
+            }
+            Err(e) => return Err(anyhow::anyhow!("subscription read error: {e}")),
+        }
+    }
 }
 
 pub fn unix_now() -> u64 {

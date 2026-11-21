@@ -39,6 +39,12 @@ pub fn surface_bright() -> gpui::Hsla {
     gpui::rgb(0x2f3a4c).into() // surface-bright
 }
 
+/// Tray icon colours. The SNI icon takes packed 24-bit RGB, not `Hsla`, so
+/// these stay as `u32` next to the rest of the palette.
+pub const TRAY_ALERT: u32 = 0xf59e0b; // amber — interception is on, something is failing
+pub const TRAY_ACTIVE: u32 = 0x14b8a6; // teal — interception is on
+pub const TRAY_IDLE: u32 = 0x6b7280; // gray — interception is off
+
 pub fn border() -> gpui::Hsla {
     gpui::rgb(0x424754).into() // outline-variant
 }

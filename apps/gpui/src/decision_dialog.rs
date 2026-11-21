@@ -32,7 +32,9 @@ pub fn show_decision_dialog(item: PendingDecision, mut egresses: Vec<Egress>) {
             _ => a.id.cmp(&b.id),
         },
     });
-    // Locked: shown as "unknown", cannot switch to All.
+    // Locked to Specific: an unattributed flow cannot switch to All. When the
+    // process is unknown the rule stores no process at all, so it behaves as
+    // any-app; the scope row and rule summary say that explicitly.
     let process_scope = ProcessScope::Specific;
     let dest_scope = if item.flow.destination_domain.is_some() {
         DestScope::DomainExact

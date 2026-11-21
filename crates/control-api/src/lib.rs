@@ -1,6 +1,6 @@
 use core_types::{
-    Egress, FlowContext, FlowEvent, PendingDecision, ProcessPriority, ProxyConfig, RouteTarget,
-    Rule, RuleAction, TransportProtocol,
+    Egress, EgressAlertKind, FlowContext, FlowEvent, PendingDecision, ProcessPriority, ProxyConfig,
+    RouteTarget, Rule, RuleAction, TransportProtocol,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,9 @@ pub enum ControlRequest {
         after_id: Option<String>,
     },
     ListPending,
+    /// Most recent data-path failures (proxy unreachable, egress DNS failed,
+    /// egress without resolvers), one row per (kind, target).
+    EgressAlertStatus,
     ListFlows {
         limit: usize,
     },
@@ -93,6 +96,7 @@ pub enum ControlResponse {
     RuleList(Vec<Rule>),
     PendingList(Vec<PendingDecision>),
     FlowList(Vec<FlowEvent>),
+    EgressAlertList(Vec<EgressAlertRecord>),
     PendingCreated {
         pending_id: String,
         created_at_secs: u64,
@@ -156,11 +160,128 @@ pub enum PushNotification {
     PendingResolved {
         pending_id: String,
         action: RuleAction,
+        /// Egress the decision routed through, when the resolving rule had one.
+        #[serde(default)]
+        egress_id: Option<String>,
+        /// Display name of that egress (falls back to the id when missing).
+        #[serde(default)]
+        egress_name: Option<String>,
     },
     PendingExpired {
         pending_id: String,
     },
+    PolicyMatch {
+        process_name: Option<String>,
+        destination_ip: String,
+        destination_port: u16,
+        destination_domain: Option<String>,
+        rule_id: String,
+        action: RuleAction,
+        /// Egress referenced by the matching rule, if any.
+        #[serde(default)]
+        egress_id: Option<String>,
+        /// Display name of that egress (falls back to the id when missing).
+        #[serde(default)]
+        egress_name: Option<String>,
+    },
+    /// A packet from a socket owned by the kernel itself (the `nfsd` threads
+    /// behind an NFS mount, and similar). No user-space process exists, so
+    /// there is nothing to ask about: the flow is allowed without a dialog and
+    /// without a rule. Emitted so the log viewer shows the traffic instead of
+    /// it disappearing.
+    KernelAllowed {
+        source_port: u16,
+        destination_ip: String,
+        destination_port: u16,
+        destination_domain: Option<String>,
+        protocol: TransportProtocol,
+    },
+    /// A data-path failure the user must be able to see: a proxy that cannot
+    /// be reached, an egress whose DNS failed, or a rule that sent a lookup to
+    /// an egress with no resolvers. Aggregated by the daemon, so `count` is
+    /// the total number of occurrences for the same target since the daemon
+    /// started (not just since the previous alert).
+    EgressAlert {
+        kind: EgressAlertKind,
+        target_id: Option<String>,
+        detail: String,
+        count: u32,
+        at_secs: u64,
+    },
 }
+
+/// Failures inside the recent window that make a target count as broken.
+/// One reset connection is a log row; a proxy failing repeatedly is a broken
+/// path and drives the tray icon.
+pub const ALERT_SUSTAINED_THRESHOLD: u32 = 3;
+
+/// One row of `ControlRequest::EgressAlertStatus`: the most recent alert per
+/// (kind, target), with how many times it happened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressAlertRecord {
+    pub kind: EgressAlertKind,
+    pub target_id: Option<String>,
+    pub detail: String,
+    /// Occurrences since the daemon started.
+    pub count: u32,
+    /// Occurrences in the last five minutes. The tray uses this to tell a
+    /// one-off failure (a row in the activity log) from a broken path (amber
+    /// icon): a proxy in a reconnect loop is a different situation from a
+    /// single reset connection.
+    #[serde(default)]
+    pub recent_count: u32,
+    pub last_at_secs: u64,
+}
+
+impl PushNotification {
+    /// Group key for log dedup: (process_name, destination_ip:port).
+    pub fn group_key(&self) -> (Option<String>, String, u16) {
+        match self {
+            PushNotification::PolicyMatch {
+                process_name,
+                destination_ip,
+                destination_port,
+                ..
+            } => (
+                process_name.clone(),
+                destination_ip.clone(),
+                *destination_port,
+            ),
+            PushNotification::PendingCreated { decision } => (
+                decision.flow.process_name.clone(),
+                decision.flow.destination_ip.clone(),
+                decision.flow.destination_port,
+            ),
+            PushNotification::PendingResolved { pending_id, .. }
+            | PushNotification::PendingExpired { pending_id } => {
+                // Resolve/expire carry no flow; fall back to pending-id so
+                // the row still appears uniquely.
+                (None, pending_id.clone(), 0)
+            }
+            PushNotification::KernelAllowed {
+                destination_ip,
+                destination_port,
+                ..
+            } => (
+                Some(KERNEL_PROCESS_LABEL.to_string()),
+                destination_ip.clone(),
+                *destination_port,
+            ),
+            PushNotification::EgressAlert {
+                kind, target_id, ..
+            } => (
+                Some(format!("egress {}", target_id.as_deref().unwrap_or("?"))),
+                kind.label().to_string(),
+                0,
+            ),
+        }
+    }
+}
+
+/// Process column text for traffic the kernel itself owns. It is not a
+/// process name and no rule can pin it: the point is to tell the reader that
+/// no application exists behind the socket, rather than "unknown".
+pub const KERNEL_PROCESS_LABEL: &str = "kernel (no process)";
 
 pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
     match req {
@@ -220,7 +341,7 @@ pub fn validate_request(req: &ControlRequest) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{DestinationMatcher, FlowDirection, RuleDuration};
+    use core_types::{DestinationMatcher, DomainSource, FlowDirection, RuleDuration};
 
     fn mk_rule(id: &str) -> Rule {
         Rule {
@@ -314,6 +435,8 @@ mod tests {
         let decision = PendingDecision {
             id: "p1".to_string(),
             flow: FlowContext {
+                reverse_dns: None,
+                process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some("firefox".to_string()),
                 process_exe: None,
                 app_name: None,
@@ -322,6 +445,7 @@ mod tests {
                 destination_ip: "8.8.8.8".to_string(),
                 destination_port: 443,
                 destination_domain: Some("google.com".to_string()),
+                domain_source: DomainSource::Sni,
                 protocol: TransportProtocol::Tcp,
                 direction: FlowDirection::Outbound,
                 device_label: None,
@@ -341,6 +465,8 @@ mod tests {
         let notif = PushNotification::PendingResolved {
             pending_id: "p1".to_string(),
             action: RuleAction::Allow,
+            egress_id: None,
+            egress_name: None,
         };
         let json = serde_json::to_string(&notif).unwrap();
         assert!(json.contains("PendingResolved"));

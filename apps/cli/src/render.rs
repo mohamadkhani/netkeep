@@ -126,6 +126,7 @@ fn render_ps(response: &ControlResponse, filter: Option<&RuleFilter>) -> Result<
         ControlResponse::RuleList(rules) => ps_rules(rules, filter),
         ControlResponse::PendingList(pendings) => ps_pending(pendings),
         ControlResponse::FlowList(flows) => ps_flows(flows),
+        ControlResponse::EgressAlertList(rows) => render_alerts_flat(rows),
         ControlResponse::EgressList(egresses) => ps_egress(egresses),
         ControlResponse::ProxyList(proxies) => ps_proxy(proxies),
         ControlResponse::Health {
@@ -428,6 +429,7 @@ fn render_table(response: &ControlResponse, filter: Option<&RuleFilter>) -> Resu
         ControlResponse::RuleList(rules) => render_rules_table(rules, filter),
         ControlResponse::PendingList(pendings) => render_pending_table(pendings),
         ControlResponse::FlowList(flows) => render_flows_table(flows),
+        ControlResponse::EgressAlertList(rows) => render_alerts_flat(rows),
         ControlResponse::EgressList(egresses) => render_egress_table(egresses),
         ControlResponse::ProxyList(proxies) => render_proxy_table(proxies),
         ControlResponse::Health {
@@ -853,6 +855,7 @@ fn render_flat(response: &ControlResponse, filter: Option<&RuleFilter>) -> Resul
         }
         ControlResponse::PendingList(pendings) => render_pending_flat(pendings),
         ControlResponse::FlowList(flows) => render_flows_flat(flows),
+        ControlResponse::EgressAlertList(rows) => render_alerts_flat(rows),
         ControlResponse::EgressList(egresses) => render_egress_flat(egresses),
         ControlResponse::ProxyList(proxies) => render_proxy_flat(proxies),
         ControlResponse::NfqueueStatus { enabled, queue_num } => {
@@ -1022,6 +1025,7 @@ fn render_text(response: &ControlResponse, filter: Option<&RuleFilter>) -> Resul
             }
             Ok(out.trim_end().to_string())
         }
+        ControlResponse::EgressAlertList(rows) => render_alerts_flat(rows),
         ControlResponse::FlowList(flows) => {
             let mut out = String::new();
             if flows.is_empty() {
@@ -1152,6 +1156,7 @@ fn render_md(response: &ControlResponse, filter: Option<&RuleFilter>) -> Result<
         ControlResponse::RuleList(rules) => render_rules_md(rules, filter),
         ControlResponse::PendingList(pendings) => render_pending_md(pendings),
         ControlResponse::FlowList(flows) => render_flows_md(flows),
+        ControlResponse::EgressAlertList(rows) => render_alerts_flat(rows),
         ControlResponse::EgressList(egresses) => render_egress_md(egresses),
         ControlResponse::ProxyList(proxies) => render_proxy_md(proxies),
         ControlResponse::Health {
@@ -1504,4 +1509,23 @@ fn format_proxy_auth(auth: &ProxyAuth) -> String {
         ProxyAuth::Basic { username, .. } => format!("basic:{}", username),
         ProxyAuth::Shadowsocks { method, .. } => format!("ss({})", method),
     }
+}
+
+/// One alert per line: kind, target, count, detail.
+fn render_alerts_flat(rows: &[control_api::EgressAlertRecord]) -> Result<String, String> {
+    if rows.is_empty() {
+        return Ok("no egress alerts".to_string());
+    }
+    let mut out = String::new();
+    for row in rows {
+        out.push_str(&format!(
+            "{} target={} count={} last={} detail={}\n",
+            row.kind.label(),
+            row.target_id.as_deref().unwrap_or("-"),
+            row.count,
+            row.last_at_secs,
+            row.detail,
+        ));
+    }
+    Ok(out.trim_end().to_string())
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use core_types::{RuleAction, TransportProtocol};
+use core_types::{DomainSource, RuleAction, TransportProtocol};
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
 use flow_classifier::diag;
 use flow_classifier::sni::{
@@ -23,6 +23,25 @@ struct ConnectionKey {
     protocol: TransportProtocol,
 }
 
+impl ConnectionKey {
+    /// The same connection seen from the peer's side.
+    ///
+    /// Conntrack treats the reply direction as part of the connection it
+    /// answers. Without that, every reply packet looked like a brand-new
+    /// unknown flow whose destination is the container or LAN client, which
+    /// matched none of the app's rules and raised one dialog per ephemeral
+    /// port.
+    fn mirror(&self) -> Self {
+        Self {
+            src_ip: self.dst_ip.clone(),
+            src_port: self.dst_port,
+            dst_ip: self.src_ip.clone(),
+            dst_port: self.src_port,
+            protocol: self.protocol,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CachedVerdict {
     accept: bool,
@@ -42,7 +61,31 @@ struct CachedProcessAttr {
     process_name: String,
     process_exe: Option<String>,
     app_name: Option<String>,
+    pid: Option<u32>,
     expires_at: u64,
+    /// Tombstone: this key was seen serving two different processes and must
+    /// not restore anyone until it expires.
+    poisoned: bool,
+}
+
+impl CachedProcessAttr {
+    /// Whether two resolutions name the same process. The pid is the
+    /// strongest signal, then the executable path, and only then the display
+    /// name — two different pids under the same program name are still two
+    /// owners, and one of them may be a recycled port.
+    fn same_identity(&self, other: &CachedProcessAttr) -> bool {
+        if let (Some(a), Some(b)) = (self.pid, other.pid) {
+            if a != b {
+                return false;
+            }
+        }
+        if let (Some(a), Some(b)) = (&self.process_exe, &other.process_exe) {
+            if a != b {
+                return false;
+            }
+        }
+        self.process_name == other.process_name
+    }
 }
 
 /// IP-based attribution cache TTL and cap.
@@ -95,7 +138,9 @@ impl AttrCache {
             process_name: proc.name.clone(),
             process_exe: proc.exe.clone(),
             app_name: proc.app_name.clone(),
+            pid: proc.pid,
             expires_at: now_secs + PROC_ATTR_TTL_SECS,
+            poisoned: false,
         };
         if self.proc_attr.len() >= PROC_ATTR_MAX {
             self.proc_attr.retain(|_, v| v.expires_at > now_secs);
@@ -119,6 +164,8 @@ impl AttrCache {
                     process_name: proc.name.clone(),
                     process_exe: proc.exe.clone(),
                     app_name: proc.app_name.clone(),
+                    pid: proc.pid,
+                    poisoned: false,
                 },
                 now_secs,
             );
@@ -126,68 +173,105 @@ impl AttrCache {
     }
 
     /// Insert `entry` under `key` unless the key is live and held by a
-    /// different process — in that case remove it entirely: the key can
-    /// never prove which process a future unresolved packet belongs to.
+    /// different process — in that case poison the key for the rest of its
+    /// TTL: the key can never prove which process a future unresolved packet
+    /// belongs to, and letting the next successful resolve refill it would
+    /// reintroduce the same oscillation.
     fn insert_unless_ambiguous(
         map: &mut HashMap<(String, u16), CachedProcessAttr>,
         key: (String, u16),
         entry: CachedProcessAttr,
         now_secs: u64,
     ) {
-        if let Some(existing) = map.get(&key) {
-            if existing.expires_at > now_secs && existing.process_name != entry.process_name {
+        let existing = map.get(&key).filter(|e| e.expires_at > now_secs).cloned();
+        if let Some(existing) = existing {
+            if existing.poisoned {
+                // Already ambiguous for this TTL window — never refill.
+                return;
+            }
+            if !existing.same_identity(&entry) {
                 diag!(
-                    "layer0 key {key:?} AMBIGUOUS ({} vs {}) — entry dropped; \
+                    "layer0 key {key:?} AMBIGUOUS ({} pid={:?} vs {} pid={:?}) — \
+                     key poisoned for the rest of its TTL; \
                      future resolver misses on this destination stay unknown",
                     existing.process_name,
-                    entry.process_name
+                    existing.pid,
+                    entry.process_name,
+                    entry.pid
                 );
-                map.remove(&key);
+                let mut tombstone = entry;
+                tombstone.expires_at = tombstone.expires_at.max(existing.expires_at);
+                tombstone.poisoned = true;
+                map.insert(key, tombstone);
                 return;
             }
         }
         map.insert(key, entry);
     }
 
-    /// Restore attribution for an unresolved packet. IP cache first, then
-    /// domain cache. Returns `None` when both miss or the key was poisoned
-    /// as ambiguous.
+    /// Restore attribution for an unresolved packet.
+    ///
+    /// With an in-band domain the `(domain, port)` key is the stronger
+    /// identity on shared/anycast addresses, so it is consulted first; the IP
+    /// key is the fallback. Without one, the IP key keeps its old priority.
+    /// Returns `None` when every candidate misses, has expired, or is a
+    /// poisoned ambiguity tombstone.
     fn restore(
         &mut self,
+        process_origin: core_types::ProcessOrigin,
         dst_ip: &str,
         dst_port: u16,
         domain: Option<&str>,
+        in_band_domain: bool,
         now_secs: u64,
     ) -> Option<CachedProcessAttr> {
-        let ip_key = (dst_ip.to_string(), dst_port);
-        let cached_ip = self
-            .proc_attr
-            .get(&ip_key)
-            .filter(|c| c.expires_at > now_secs)
-            .cloned();
-        if cached_ip.is_none() {
-            self.proc_attr.remove(&ip_key);
+        // Only a flow with no proven owner may borrow a cached identity.
+        // `Kernel` flows have an owner that is deliberately nameless, and a
+        // `Proved` flow whose name is missing already carries more evidence
+        // than this cache does.
+        if process_origin != core_types::ProcessOrigin::Unresolved {
+            return None;
         }
-        if cached_ip.is_some() {
-            return cached_ip;
+        let ip_key = (dst_ip.to_string(), dst_port);
+        let domain_key = domain.map(|d| (d.to_string(), dst_port));
+
+        if in_band_domain {
+            // The packet itself carried a name. The binding for that name is
+            // the only one that can describe this connection; the IP key is a
+            // guess across everything that shares the address. Falling back to
+            // it here was RC-4 narrowed but not closed: a flow with an SNI
+            // could still borrow another app's identity on the same anycast IP.
+            return match &domain_key {
+                Some(dk) => live_entry(&mut self.domain_proc_attr, dk, now_secs),
+                None => live_entry(&mut self.proc_attr, &ip_key, now_secs),
+            };
         }
 
-        domain.and_then(|d| {
-            let dk = (d.to_string(), dst_port);
-            let cached_dom = self
-                .domain_proc_attr
-                .get(&dk)
-                .filter(|c| c.expires_at > now_secs)
-                .cloned();
-            if cached_dom.is_none() {
-                self.domain_proc_attr.remove(&dk);
-            }
-            cached_dom
-        })
+        if let Some(hit) = live_entry(&mut self.proc_attr, &ip_key, now_secs) {
+            return Some(hit);
+        }
+        domain_key.and_then(|dk| live_entry(&mut self.domain_proc_attr, &dk, now_secs))
     }
 
     fn len(&self) -> (usize, usize) {
         (self.proc_attr.len(), self.domain_proc_attr.len())
+    }
+}
+
+/// Look up a live, non-poisoned entry, pruning the key when it is dead.
+fn live_entry(
+    map: &mut HashMap<(String, u16), CachedProcessAttr>,
+    key: &(String, u16),
+    now_secs: u64,
+) -> Option<CachedProcessAttr> {
+    let entry = map.get(key).filter(|c| c.expires_at > now_secs).cloned();
+    match entry {
+        None => {
+            map.remove(key);
+            None
+        }
+        Some(c) if c.poisoned => None,
+        Some(c) => Some(c),
     }
 }
 
@@ -220,6 +304,10 @@ pub struct NfqueueProcessor<C, FR> {
 // Cached decisions expire after 10 minutes. TCP FINs evict the entry early
 // (handled below), so this TTL is mostly a backstop for UDP and long-lived flows.
 const CACHE_TTL_SECS: u64 = 600;
+/// How long the reply direction of a deferred (SNI-less) handshake stays
+/// accepted. Long enough for the SYN-ACK and the first data segment, short
+/// enough that an unanswered deferral does not turn into a standing permit.
+const DEFER_MIRROR_TTL_SECS: u64 = 15;
 // Maximum cache entries before a sweep evicts expired entries.
 const CACHE_MAX: usize = 8192;
 
@@ -319,6 +407,8 @@ where
                     let (verdict, fwmark) = match parse_raw_packet(msg.get_payload()) {
                         None => {
                             counter!("netkeep.packets.parse_failed").increment(1);
+                            counter!("netkeep.packets.dropped", "reason" => "parse_failed")
+                                .increment(1);
                             (Verdict::Drop, None)
                         }
                         Some(mut raw) => {
@@ -453,7 +543,11 @@ where
         // FIN/RST — connection is closing/resetting. Evict the cached verdict so
         // that a future connection reusing the same 5-tuple gets a fresh decision.
         if raw.tcp_fin || raw.tcp_rst {
-            if self.decided.remove(&key).is_some() {
+            let mut removed = self.decided.remove(&key).is_some();
+            if raw.forwarded && self.decided.remove(&key.mirror()).is_some() {
+                removed = true;
+            }
+            if removed {
                 counter!("netkeep.verdict.cache.evictions", "reason" => "fin_rst").increment(1);
             }
             return (Verdict::Accept, None);
@@ -523,10 +617,22 @@ where
             raw.tcp_fin,
             raw.tcp_rst
         );
-        if let Some(sni) = &raw.sni_hint {
-            self.dns_cache.insert(&raw.dst_ip, sni);
-        }
         let mut flow = self.classifier.classify(raw);
+
+        // Record the in-band hint with the live process identity. Inserting
+        // after classification keeps the binding scoped to the process that
+        // actually owns this socket, and the port keeps an HTTPS name from
+        // describing an unrelated non-TLS connection to the same IP.
+        if let Some(sni) = &raw.sni_hint {
+            self.dns_cache.insert_in_band(
+                raw.dst_ip.clone(),
+                raw.dst_port,
+                sni.clone(),
+                raw.domain_hint_source,
+                flow.process_name.as_deref(),
+                flow.process_exe.as_deref(),
+            );
+        }
 
         if flow.process_name.is_none() {
             // Live resolution failed for this packet. Layer-0 can only
@@ -534,11 +640,18 @@ where
             // packets (no local socket: containers without an eBPF entry,
             // LAN clients behind this host) any restored local process name
             // would be flatly wrong. Never restore for forwarded traffic.
+            //
+            // The same holds for a flow the resolver proved belongs to the
+            // kernel: it has no user-space owner, so lending it a cached app
+            // identity would let kernel traffic (NFS :2049, cifs :445) match
+            // that app's Allow/Route/Deny rule.
             if !raw.forwarded {
                 if let Some(c) = self.attr_cache.restore(
+                    flow.process_origin,
                     &raw.dst_ip,
                     raw.dst_port,
                     flow.destination_domain.as_deref(),
+                    flow.domain_source.is_in_band(),
                     now_secs,
                 ) {
                     let cache_kind = "ip|domain";
@@ -571,6 +684,7 @@ where
                     name: flow.process_name.clone().unwrap_or_default(),
                     exe: flow.process_exe.clone(),
                     app_name: flow.app_name.clone(),
+                    pid: None,
                 },
                 now_secs,
             );
@@ -639,16 +753,58 @@ where
                         .increment(evicted as u64);
                 }
             }
+            let cached = CachedVerdict {
+                accept: matches!(verdict, Verdict::Accept),
+                fwmark,
+                expires_at: now_secs + CACHE_TTL_SECS,
+                routing_revision: routing_revision
+                    .unwrap_or_else(|| self.registrar.routing_revision()),
+            };
+            self.decided.insert(key.clone(), cached);
+
+            // Forwarded traffic (containers, VMs, LAN clients) reaches us in
+            // both directions. The reply's destination is the container, so it
+            // matches none of the rules written for the app, and every new
+            // ephemeral port used to raise its own dialog. Cache the reply
+            // direction with the same verdict so the connection is decided once.
+            //
+            // The mirror never carries a fwmark: the mark steers the outbound
+            // socket into an egress, and stamping it on the returning packet
+            // would reroute traffic that is already arriving.
+            if raw.forwarded {
+                self.decided.insert(
+                    key.mirror(),
+                    CachedVerdict {
+                        fwmark: None,
+                        ..cached
+                    },
+                );
+                counter!("netkeep.verdict.cache.mirror").increment(1);
+            }
+        }
+
+        // DeferSni accepts the handshake without a verdict: the ClientHello
+        // that can decide the connection has not arrived yet. The server's
+        // SYN-ACK comes *before* it, in the reply direction, where no local
+        // socket exists (the app lives in the container's network namespace).
+        // Without this entry that packet looked like a brand-new unattributed
+        // flow, and the daemon raised a dialog for a connection it had already
+        // let through.
+        //
+        // The window is short on purpose: it covers the handshake, not the
+        // transfer, and it only opens for traffic whose SYN we accepted.
+        if !should_cache && matches!(&decision, FlowDecision::DeferSni) && raw.forwarded {
             self.decided.insert(
-                key,
+                key.mirror(),
                 CachedVerdict {
-                    accept: matches!(verdict, Verdict::Accept),
-                    fwmark,
-                    expires_at: now_secs + CACHE_TTL_SECS,
+                    accept: true,
+                    fwmark: None,
+                    expires_at: now_secs + DEFER_MIRROR_TTL_SECS,
                     routing_revision: routing_revision
                         .unwrap_or_else(|| self.registrar.routing_revision()),
                 },
             );
+            counter!("netkeep.verdict.cache.deferred_mirror").increment(1);
         }
 
         gauge!("netkeep.verdict.cache.entries").set(self.decided.len() as f64);
@@ -738,76 +894,107 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         }
     };
 
-    let (src_port, dst_port, protocol, sni_hint, tcp_payload_empty, tcp_fin, tcp_rst, tcp_syn) =
-        match sliced.transport.as_ref() {
-            Some(TransportSlice::Tcp(t)) => {
-                let payload = t.payload();
-                let domain_hint = if payload.is_empty() {
-                    None
-                } else if is_tls_clienthello_packet(payload) {
-                    let extract_start = Instant::now();
-                    counter!("netkeep.sni.extraction.attempts", "kind" => "tls").increment(1);
-                    let hint = if let Some(sni) = extract_tls_sni(payload) {
-                        counter!("netkeep.sni.extraction.success", "source" => "tls").increment(1);
-                        Some(sni)
-                    } else {
-                        counter!("netkeep.sni.extraction.missed", "kind" => "tls").increment(1);
-                        None
-                    };
-                    histogram!("netkeep.sni.extraction.duration")
-                        .record(extract_start.elapsed().as_secs_f64());
-                    hint
-                } else if starts_with_http_method(payload) {
-                    let extract_start = Instant::now();
-                    counter!("netkeep.sni.extraction.attempts", "kind" => "http").increment(1);
-                    let hint = if let Some(host) = extract_http_host(payload) {
-                        counter!("netkeep.sni.extraction.success", "source" => "http_host")
-                            .increment(1);
-                        Some(host)
-                    } else {
-                        counter!("netkeep.sni.extraction.missed", "kind" => "http").increment(1);
-                        None
-                    };
-                    histogram!("netkeep.sni.extraction.duration")
-                        .record(extract_start.elapsed().as_secs_f64());
-                    hint
+    let (
+        src_port,
+        dst_port,
+        protocol,
+        sni_hint,
+        domain_hint_source,
+        tcp_payload_empty,
+        tcp_fin,
+        tcp_rst,
+        tcp_syn,
+    ) = match sliced.transport.as_ref() {
+        Some(TransportSlice::Tcp(t)) => {
+            let payload = t.payload();
+            let (domain_hint, hint_source) = if payload.is_empty() {
+                (None, DomainSource::None)
+            } else if is_tls_clienthello_packet(payload) {
+                let extract_start = Instant::now();
+                counter!("netkeep.sni.extraction.attempts", "kind" => "tls").increment(1);
+                let hint = if let Some(sni) = extract_tls_sni(payload) {
+                    counter!("netkeep.sni.extraction.success", "source" => "tls").increment(1);
+                    Some(sni)
                 } else {
-                    // Encrypted TLS app data, ServerHello, SSH, etc. — not extractable.
-                    counter!("netkeep.sni.extraction.skipped").increment(1);
+                    counter!("netkeep.sni.extraction.missed", "kind" => "tls").increment(1);
                     None
                 };
-                (
-                    t.source_port(),
-                    t.destination_port(),
-                    TransportProtocol::Tcp,
-                    domain_hint,
-                    payload.is_empty(),
-                    t.fin(),
-                    t.rst(),
-                    t.syn(),
-                )
-            }
-            Some(TransportSlice::Udp(u)) => {
-                let (sp, dp) = (u.source_port(), u.destination_port());
-                // Best-effort QUIC detection: UDP to/from port 443.
-                let proto = if dp == 443 || sp == 443 {
-                    TransportProtocol::Quic
+                histogram!("netkeep.sni.extraction.duration")
+                    .record(extract_start.elapsed().as_secs_f64());
+                let source = if hint.is_some() {
+                    DomainSource::Sni
                 } else {
-                    TransportProtocol::Udp
+                    DomainSource::None
                 };
-                (sp, dp, proto, None, false, false, false, false)
-            }
-            _ => (
-                0,
-                0,
-                TransportProtocol::Other,
+                (hint, source)
+            } else if starts_with_http_method(payload) {
+                let extract_start = Instant::now();
+                counter!("netkeep.sni.extraction.attempts", "kind" => "http").increment(1);
+                let hint = if let Some(host) = extract_http_host(payload) {
+                    counter!("netkeep.sni.extraction.success", "source" => "http_host")
+                        .increment(1);
+                    Some(host)
+                } else {
+                    counter!("netkeep.sni.extraction.missed", "kind" => "http").increment(1);
+                    None
+                };
+                histogram!("netkeep.sni.extraction.duration")
+                    .record(extract_start.elapsed().as_secs_f64());
+                let source = if hint.is_some() {
+                    DomainSource::Host
+                } else {
+                    DomainSource::None
+                };
+                (hint, source)
+            } else {
+                // Encrypted TLS app data, ServerHello, SSH, etc. — not extractable.
+                counter!("netkeep.sni.extraction.skipped").increment(1);
+                (None, DomainSource::None)
+            };
+            (
+                t.source_port(),
+                t.destination_port(),
+                TransportProtocol::Tcp,
+                domain_hint,
+                hint_source,
+                payload.is_empty(),
+                t.fin(),
+                t.rst(),
+                t.syn(),
+            )
+        }
+        Some(TransportSlice::Udp(u)) => {
+            let (sp, dp) = (u.source_port(), u.destination_port());
+            // Best-effort QUIC detection: UDP to/from port 443.
+            let proto = if dp == 443 || sp == 443 {
+                TransportProtocol::Quic
+            } else {
+                TransportProtocol::Udp
+            };
+            (
+                sp,
+                dp,
+                proto,
                 None,
+                DomainSource::None,
                 false,
                 false,
                 false,
                 false,
-            ),
-        };
+            )
+        }
+        _ => (
+            0,
+            0,
+            TransportProtocol::Other,
+            None,
+            DomainSource::None,
+            false,
+            false,
+            false,
+            false,
+        ),
+    };
 
     Some(RawPacket {
         src_ip,
@@ -816,6 +1003,7 @@ pub fn parse_raw_packet(payload: &[u8]) -> Option<RawPacket> {
         dst_port,
         protocol,
         sni_hint,
+        domain_hint_source,
         ingress_interface: None,
         tcp_payload_empty,
         tcp_fin,
@@ -861,6 +1049,329 @@ mod tests {
         }
     }
 
+    /// Registrar that always allows, counting how often it was asked to decide.
+    struct AllowRegistrar {
+        attempts: usize,
+    }
+
+    impl FlowRegistrar for AllowRegistrar {
+        fn register(&mut self, _flow: FlowContext, _now_secs: u64) -> FlowDecision {
+            self.attempts += 1;
+            FlowDecision::Immediate(RuleAction::Allow, None)
+        }
+
+        fn route_mark(&mut self, _target: &RouteTarget) -> Option<u32> {
+            None
+        }
+
+        fn routing_revision(&mut self) -> u64 {
+            0
+        }
+    }
+
+    /// Registrar that always defers, counting how often it was asked.
+    struct DeferRegistrar {
+        attempts: usize,
+    }
+
+    impl FlowRegistrar for DeferRegistrar {
+        fn register(&mut self, _flow: FlowContext, _now_secs: u64) -> FlowDecision {
+            self.attempts += 1;
+            FlowDecision::DeferSni
+        }
+
+        fn route_mark(&mut self, _target: &RouteTarget) -> Option<u32> {
+            None
+        }
+
+        fn routing_revision(&mut self) -> u64 {
+            0
+        }
+    }
+
+    /// Registrar that records the flow it was asked to decide.
+    struct CapturingRegistrar {
+        flow: Option<FlowContext>,
+    }
+
+    impl FlowRegistrar for CapturingRegistrar {
+        fn register(&mut self, flow: FlowContext, _now_secs: u64) -> FlowDecision {
+            self.flow = Some(flow);
+            FlowDecision::Immediate(RuleAction::Allow, None)
+        }
+
+        fn route_mark(&mut self, _target: &RouteTarget) -> Option<u32> {
+            None
+        }
+
+        fn routing_revision(&mut self) -> u64 {
+            0
+        }
+    }
+
+    /// A container's TLS SYN is accepted while the daemon waits for the SNI.
+    /// The server's SYN-ACK arrives first, in the reply direction, where no
+    /// local socket exists — it used to look like a brand-new unattributed
+    /// flow and raised a dialog for a connection the daemon had just accepted.
+    #[test]
+    fn deferred_handshake_reply_is_accepted_without_a_new_question() {
+        let flow = FlowContext {
+            reverse_dns: None,
+            process_origin: core_types::ProcessOrigin::Unresolved,
+            process_name: Some("app_process64".into()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "192.168.240.112".into(),
+            source_port: 55988,
+            destination_ip: "172.217.118.4".into(),
+            destination_port: 443,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: DeferRegistrar { attempts: 0 },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+
+        let syn = tcp_packet("192.168.240.112", 55988, "172.217.118.4", 443);
+        assert_eq!(processor.decide(&syn, 1000), (Verdict::Accept, None));
+        assert_eq!(processor.registrar.attempts, 1);
+
+        let syn_ack = tcp_packet("172.217.118.4", 443, "192.168.240.112", 55988);
+        assert_eq!(
+            processor.decide(&syn_ack, 1001),
+            (Verdict::Accept, None),
+            "the reply to a handshake we accepted must not prompt"
+        );
+        assert_eq!(
+            processor.registrar.attempts, 1,
+            "the reply must not be classified again"
+        );
+    }
+
+    /// The deferral window is bounded: once it lapses the reply is classified
+    /// again, so an unanswered SYN cannot become a standing permit.
+    #[test]
+    fn deferred_reply_grace_expires() {
+        let flow = FlowContext {
+            reverse_dns: None,
+            process_origin: core_types::ProcessOrigin::Unresolved,
+            process_name: Some("app_process64".into()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "192.168.240.112".into(),
+            source_port: 55988,
+            destination_ip: "172.217.118.4".into(),
+            destination_port: 443,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: DeferRegistrar { attempts: 0 },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+
+        let syn = tcp_packet("192.168.240.112", 55988, "172.217.118.4", 443);
+        assert_eq!(processor.decide(&syn, 1000), (Verdict::Accept, None));
+
+        let syn_ack = tcp_packet("172.217.118.4", 443, "192.168.240.112", 55988);
+        assert_eq!(
+            processor.decide(&syn_ack, 1000 + DEFER_MIRROR_TTL_SECS + 1),
+            (Verdict::Accept, None)
+        );
+        assert_eq!(
+            processor.registrar.attempts, 2,
+            "after the grace period the reply must be classified again"
+        );
+    }
+
+    fn tcp_packet(src: &str, src_port: u16, dst: &str, dst_port: u16) -> RawPacket {
+        RawPacket {
+            src_ip: src.into(),
+            src_port,
+            dst_ip: dst.into(),
+            dst_port,
+            protocol: TransportProtocol::Tcp,
+            sni_hint: None,
+            domain_hint_source: DomainSource::None,
+            ingress_interface: None,
+            tcp_payload_empty: false,
+            tcp_fin: false,
+            tcp_rst: false,
+            tcp_syn: true,
+            sk_uid: None,
+            forwarded: true,
+        }
+    }
+
+    /// Container and VM traffic arrives in both directions. The reply packet's
+    /// destination is the container, so it matches none of the rules written
+    /// for the app; before this fix every reply with a new ephemeral port was
+    /// classified as a fresh unknown flow and raised its own dialog. One
+    /// container connecting to a CDN produced 20 queued dialogs in the same
+    /// second (journal 21:27:22, pending-303 … pending-320).
+    #[test]
+    fn forwarded_reply_reuses_the_decided_connection() {
+        let flow = FlowContext {
+            reverse_dns: None,
+            process_origin: core_types::ProcessOrigin::Unresolved,
+            process_name: Some("node".into()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "172.23.0.2".into(),
+            source_port: 42372,
+            destination_ip: "143.64.80.214".into(),
+            destination_port: 443,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: AllowRegistrar { attempts: 0 },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+
+        let outbound = tcp_packet("172.23.0.2", 42372, "143.64.80.214", 443);
+        assert_eq!(processor.decide(&outbound, 1000), (Verdict::Accept, None));
+        assert_eq!(processor.registrar.attempts, 1);
+
+        let reply = tcp_packet("143.64.80.214", 443, "172.23.0.2", 42372);
+        assert_eq!(
+            processor.decide(&reply, 1001),
+            (Verdict::Accept, None),
+            "the reply direction of an allowed connection must be accepted"
+        );
+        assert_eq!(
+            processor.registrar.attempts, 1,
+            "the reply must not be classified again, so it cannot prompt"
+        );
+
+        // The mirror is a cache entry, not a permanent permit: once it
+        // expires the reply is classified again and a real decision is needed.
+        let later_reply = tcp_packet("143.64.80.214", 443, "172.23.0.2", 42372);
+        assert_eq!(
+            processor.decide(&later_reply, 1000 + CACHE_TTL_SECS + 1),
+            (Verdict::Accept, None)
+        );
+        assert_eq!(
+            processor.registrar.attempts, 2,
+            "the mirrored reply must expire with the verdict that created it"
+        );
+    }
+
+    /// A `Route` decision marks the outbound socket so nftables sends it into
+    /// the egress. The reply arrives *from* that egress; stamping the mark on
+    /// it would reroute traffic that is already arriving.
+    #[test]
+    fn forwarded_reply_does_not_inherit_the_route_mark() {
+        let flow = FlowContext {
+            reverse_dns: None,
+            process_origin: core_types::ProcessOrigin::Unresolved,
+            process_name: Some("node".into()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "172.23.0.2".into(),
+            source_port: 42372,
+            destination_ip: "143.64.80.214".into(),
+            destination_port: 443,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: RouteRegistrar {
+                target: RouteTarget::Tun("test-tun".into()),
+                mark: Some(20000),
+                attempts: 0,
+                revision: 0,
+            },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+
+        let outbound = tcp_packet("172.23.0.2", 42372, "143.64.80.214", 443);
+        assert_eq!(
+            processor.decide(&outbound, 1000),
+            (Verdict::Accept, Some(20000))
+        );
+
+        let reply = tcp_packet("143.64.80.214", 443, "172.23.0.2", 42372);
+        assert_eq!(
+            processor.decide(&reply, 1001),
+            (Verdict::Accept, None),
+            "the reply must not carry the egress mark"
+        );
+    }
+
+    /// Locally generated traffic never needs a mirror entry: its replies are
+    /// delivered through INPUT, which is not queued.
+    #[test]
+    fn local_connections_do_not_cache_a_mirror() {
+        let flow = FlowContext {
+            reverse_dns: None,
+            process_origin: core_types::ProcessOrigin::Unresolved,
+            process_name: Some("curl".into()),
+            process_exe: None,
+            app_name: None,
+            source_ip: "192.0.2.1".into(),
+            source_port: 12345,
+            destination_ip: "198.51.100.1".into(),
+            destination_port: 443,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: AllowRegistrar { attempts: 0 },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+
+        let mut local = tcp_packet("192.0.2.1", 12345, "198.51.100.1", 443);
+        local.forwarded = false;
+        assert_eq!(processor.decide(&local, 1000), (Verdict::Accept, None));
+        assert_eq!(
+            processor.decided.len(),
+            1,
+            "only the connection's own key is cached for local traffic"
+        );
+    }
+
     #[test]
     fn route_setup_retries_and_output_edits_refresh_new_connections() {
         for target in [
@@ -875,6 +1386,7 @@ mod tests {
                 dst_port: 443,
                 protocol: TransportProtocol::Tcp,
                 sni_hint: None,
+                domain_hint_source: DomainSource::None,
                 ingress_interface: None,
                 tcp_payload_empty: true,
                 tcp_syn: true,
@@ -884,6 +1396,8 @@ mod tests {
                 forwarded: false,
             };
             let flow = FlowContext {
+                reverse_dns: None,
+                process_origin: core_types::ProcessOrigin::Unresolved,
                 process_name: Some("curl".into()),
                 process_exe: None,
                 app_name: None,
@@ -892,6 +1406,7 @@ mod tests {
                 destination_ip: raw.dst_ip.clone(),
                 destination_port: raw.dst_port,
                 destination_domain: Some("example.com".into()),
+                domain_source: DomainSource::Sni,
                 protocol: raw.protocol,
                 direction: FlowDirection::Outbound,
                 device_label: None,
@@ -958,6 +1473,17 @@ mod tests {
         flow_classifier::ProcessInfo {
             name: name.to_string(),
             exe: None,
+            pid: None,
+            app_name: None,
+        }
+    }
+
+    /// ProcessInfo with a pid and exe — the identity keys the cache compares.
+    fn proc_info_full(name: &str, exe: &str, pid: u32) -> flow_classifier::ProcessInfo {
+        flow_classifier::ProcessInfo {
+            name: name.to_string(),
+            exe: Some(exe.to_string()),
+            pid: Some(pid),
             app_name: None,
         }
     }
@@ -976,7 +1502,14 @@ mod tests {
             1000,
         );
 
-        let restored = cache.restore("1.2.3.4", 443, None, 1100);
+        let restored = cache.restore(
+            core_types::ProcessOrigin::Unresolved,
+            "1.2.3.4",
+            443,
+            None,
+            false,
+            1100,
+        );
         assert_eq!(
             restored.map(|c| c.process_name),
             Some("firefox".to_string()),
@@ -984,7 +1517,14 @@ mod tests {
         );
 
         // Domain fallback for a rotated CDN IP.
-        let restored = cache.restore("5.6.7.8", 443, Some("cdn.example.com"), 1200);
+        let restored = cache.restore(
+            core_types::ProcessOrigin::Unresolved,
+            "5.6.7.8",
+            443,
+            Some("cdn.example.com"),
+            false,
+            1200,
+        );
         assert_eq!(
             restored.map(|c| c.process_name),
             Some("firefox".to_string()),
@@ -1005,7 +1545,14 @@ mod tests {
         cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1000);
         cache.record_success("8.8.8.8", 53, None, &proc_info("chrome"), 1100);
 
-        let restored = cache.restore("8.8.8.8", 53, None, 1200);
+        let restored = cache.restore(
+            core_types::ProcessOrigin::Unresolved,
+            "8.8.8.8",
+            53,
+            None,
+            false,
+            1200,
+        );
         assert_eq!(
             restored, None,
             "destination shared by two processes is ambiguous — must restore nothing"
@@ -1034,16 +1581,234 @@ mod tests {
         // IP keys are distinct, so IP restore works — but the shared DOMAIN
         // key must not restore for a fresh unknown IP.
         assert_eq!(
-            cache.restore("3.3.3.3", 443, Some("shared.example.com"), 1200),
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "3.3.3.3",
+                443,
+                Some("shared.example.com"),
+                false,
+                1200
+            ),
             None,
             "domain shared by two processes is ambiguous — must restore nothing"
         );
         // The single-process IP keys still restore.
         assert_eq!(
             cache
-                .restore("1.1.1.1", 443, None, 1200)
+                .restore(
+                    core_types::ProcessOrigin::Unresolved,
+                    "1.1.1.1",
+                    443,
+                    None,
+                    false,
+                    1200
+                )
                 .map(|c| c.process_name),
             Some("firefox".to_string())
+        );
+    }
+
+    /// A different pid under the same program name is still a different
+    /// owner (recycled ephemeral port). The key must poison, not accept the
+    /// second process's name.
+    #[test]
+    fn layer0_poisons_on_different_pid_even_with_the_same_name() {
+        let mut cache = AttrCache::new();
+        cache.record_success(
+            "1.2.3.4",
+            443,
+            Some("cdn.example.com"),
+            &proc_info_full("worker", "/usr/bin/worker", 100),
+            1000,
+        );
+        cache.record_success(
+            "1.2.3.4",
+            443,
+            Some("cdn.example.com"),
+            &proc_info_full("worker", "/usr/bin/worker", 200),
+            1100,
+        );
+
+        assert_eq!(
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "1.2.3.4",
+                443,
+                None,
+                false,
+                1200
+            ),
+            None,
+            "two pids on one destination must not restore either identity"
+        );
+    }
+
+    /// The same name from a different executable is also ambiguous.
+    #[test]
+    fn layer0_poisons_on_different_exe() {
+        let mut cache = AttrCache::new();
+        cache.record_success(
+            "1.2.3.4",
+            443,
+            None,
+            &proc_info_full("python", "/usr/bin/python3.12", 100),
+            1000,
+        );
+        cache.record_success(
+            "1.2.3.4",
+            443,
+            None,
+            &proc_info_full("python", "/opt/venv/bin/python", 200),
+            1100,
+        );
+
+        assert_eq!(
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "1.2.3.4",
+                443,
+                None,
+                false,
+                1200
+            ),
+            None
+        );
+    }
+
+    /// A poisoned key must stay poisoned for the rest of the TTL instead of
+    /// being removed and refilled by the next successful resolution.
+    #[test]
+    fn layer0_poisoned_key_stays_poisoned_for_ttl() {
+        let mut cache = AttrCache::new();
+        cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1000);
+        cache.record_success("8.8.8.8", 53, None, &proc_info("chrome"), 1100);
+        // A later success for either process must not re-arm the key.
+        cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1200);
+        assert_eq!(
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "8.8.8.8",
+                53,
+                None,
+                false,
+                1300
+            ),
+            None,
+            "poisoned key must survive the TTL window"
+        );
+
+        // The poison lasts until the last conflicting observation would have
+        // expired — that one was recorded at 1100.
+        let poison_ends = 1100 + PROC_ATTR_TTL_SECS;
+        assert_eq!(
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "8.8.8.8",
+                53,
+                None,
+                false,
+                poison_ends - 1
+            ),
+            None,
+            "still ambiguous one second before the window closes"
+        );
+
+        // After the TTL window the key re-arms normally.
+        let rearm = poison_ends + 20;
+        cache.record_success("8.8.8.8", 53, None, &proc_info("dig"), rearm);
+        assert_eq!(
+            cache
+                .restore(
+                    core_types::ProcessOrigin::Unresolved,
+                    "8.8.8.8",
+                    53,
+                    None,
+                    false,
+                    rearm + 10
+                )
+                .map(|c| c.process_name),
+            Some("dig".to_string())
+        );
+    }
+
+    /// On an anycast address the in-band `(domain, port)` key is the stronger
+    /// identity: prefer it over the IP key.
+    #[test]
+    fn layer0_restore_prefers_domain_key_when_in_band() {
+        let mut cache = AttrCache::new();
+        // Same IP served two names by two apps.
+        cache.record_success(
+            "203.0.113.7",
+            443,
+            Some("a.example"),
+            &proc_info("app-a"),
+            1000,
+        );
+        cache.record_success(
+            "203.0.113.7",
+            443,
+            Some("b.example"),
+            &proc_info("app-b"),
+            1000,
+        );
+
+        let restored = cache.restore(
+            core_types::ProcessOrigin::Unresolved,
+            "203.0.113.7",
+            443,
+            Some("a.example"),
+            true,
+            1100,
+        );
+        assert_eq!(
+            restored.map(|c| c.process_name),
+            Some("app-a".to_string()),
+            "in-band domain must select the binding that observed it"
+        );
+    }
+
+    /// REGRESSION (misattribution): when the packet carries a name, only the
+    /// binding observed for that `(domain, port)` may name its process. The
+    /// IP key covers every app that ever reached the address, so falling back
+    /// to it hands the flow another app's identity on a shared CDN IP.
+    #[test]
+    fn layer0_in_band_domain_never_falls_back_to_the_ip_key() {
+        let mut cache = AttrCache::new();
+        cache.record_success("203.0.113.7", 443, None, &proc_info("app-a"), 1000);
+        cache.record_success(
+            "203.0.113.7",
+            443,
+            Some("a.example"),
+            &proc_info("app-a"),
+            1000,
+        );
+
+        assert_eq!(
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "203.0.113.7",
+                443,
+                Some("other.example"),
+                true,
+                1100
+            ),
+            None,
+            "an in-band name with no binding must not borrow the IP owner"
+        );
+
+        // Without a name there is nothing better than the IP key.
+        assert_eq!(
+            cache
+                .restore(
+                    core_types::ProcessOrigin::Unresolved,
+                    "203.0.113.7",
+                    443,
+                    None,
+                    true,
+                    1100
+                )
+                .map(|c| c.process_name),
+            Some("app-a".to_string())
         );
     }
 
@@ -1054,9 +1819,17 @@ mod tests {
         let mut cache = AttrCache::new();
         cache.record_success("8.8.8.8", 53, None, &proc_info("curl"), 1000);
         cache.record_success("8.8.8.8", 53, None, &proc_info("chrome"), 1100);
-        // Both entries expire (> 15 min later).
+        // Both entries — and the poison covering them — expire 15 min after
+        // the newest observation.
         assert_eq!(
-            cache.restore("8.8.8.8", 53, None, 1000 + PROC_ATTR_TTL_SECS + 10),
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "8.8.8.8",
+                53,
+                None,
+                false,
+                1100 + PROC_ATTR_TTL_SECS + 10
+            ),
             None
         );
         // A fresh single-process success re-arms the key.
@@ -1065,14 +1838,114 @@ mod tests {
             53,
             None,
             &proc_info("dig"),
-            1000 + PROC_ATTR_TTL_SECS + 20,
+            1100 + PROC_ATTR_TTL_SECS + 20,
         );
         assert_eq!(
             cache
-                .restore("8.8.8.8", 53, None, 1000 + PROC_ATTR_TTL_SECS + 30)
+                .restore(
+                    core_types::ProcessOrigin::Unresolved,
+                    "8.8.8.8",
+                    53,
+                    None,
+                    false,
+                    1100 + PROC_ATTR_TTL_SECS + 30
+                )
                 .map(|c| c.process_name),
             Some("dig".to_string())
         );
+    }
+
+    /// REGRESSION (misattribution): a kernel-owned flow has no user-space
+    /// owner. Lending it an app identity from the destination cache would let
+    /// kernel traffic (NFS on :2049, cifs on :445) match that app's
+    /// Allow/Route/Deny rule before the kernel allowance runs.
+    #[test]
+    fn layer0_does_not_restore_onto_a_kernel_owned_flow() {
+        let mut cache = AttrCache::new();
+        cache.record_success("192.168.7.18", 2049, None, &proc_info("mount.nfs"), 1000);
+
+        assert_eq!(
+            cache.restore(
+                core_types::ProcessOrigin::Kernel,
+                "192.168.7.18",
+                2049,
+                None,
+                false,
+                1100
+            ),
+            None,
+            "kernel-owned traffic must not borrow a user-space identity"
+        );
+
+        // The baseline is unchanged: an unresolved flow may still reuse the
+        // last proven owner of the destination.
+        assert_eq!(
+            cache
+                .restore(
+                    core_types::ProcessOrigin::Unresolved,
+                    "192.168.7.18",
+                    2049,
+                    None,
+                    false,
+                    1100
+                )
+                .map(|c| c.process_name),
+            Some("mount.nfs".to_string())
+        );
+    }
+
+    /// The guard must hold at the call site too, not only inside `AttrCache`:
+    /// the classifier's origin is what reaches `decide`, and a seeded cache
+    /// would otherwise rename the flow before the registrar sees it.
+    #[test]
+    fn kernel_owned_packet_does_not_borrow_a_cached_app_identity() {
+        let flow = FlowContext {
+            reverse_dns: None,
+            process_origin: core_types::ProcessOrigin::Kernel,
+            process_name: None,
+            process_exe: None,
+            app_name: None,
+            source_ip: "192.168.240.112".into(),
+            source_port: 55988,
+            destination_ip: "192.168.7.18".into(),
+            destination_port: 2049,
+            destination_domain: None,
+            domain_source: DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: true,
+        };
+        let mut processor = NfqueueProcessor {
+            queue: Queue::open().expect("open netlink socket"),
+            classifier: FakeClassifier { result: flow },
+            registrar: CapturingRegistrar { flow: None },
+            dns_cache: SniDnsCache::new(),
+            decided: HashMap::new(),
+            attr_cache: AttrCache::new(),
+        };
+        processor.attr_cache.record_success(
+            "192.168.7.18",
+            2049,
+            None,
+            &proc_info("mount.nfs"),
+            900,
+        );
+
+        let mut pkt = tcp_packet("192.168.240.112", 55988, "192.168.7.18", 2049);
+        pkt.forwarded = false;
+        let _ = processor.decide(&pkt, 1000);
+
+        let seen = processor
+            .registrar
+            .flow
+            .as_ref()
+            .expect("the flow must reach the registrar");
+        assert_eq!(
+            seen.process_name, None,
+            "cached app identity must not be attached to kernel-owned traffic"
+        );
+        assert_eq!(seen.process_origin, core_types::ProcessOrigin::Kernel);
     }
 
     fn build_ipv4_tcp(src: [u8; 4], dst: [u8; 4], src_port: u16, dst_port: u16) -> Vec<u8> {

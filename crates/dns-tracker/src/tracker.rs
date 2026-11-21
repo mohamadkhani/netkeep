@@ -1,7 +1,8 @@
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result};
-use aya::{maps::HashMap, programs::KProbe, Ebpf};
+use aya::programs::KProbe;
+use aya::{maps::HashMap, Btf, Ebpf, EbpfLoader, VerifierLogLevel};
 
 use crate::{DnsEvent, DnsKey};
 
@@ -45,7 +46,27 @@ impl DnsTracker {
             "/../dns-tracker-ebpf/target/bpfel-unknown-none/release/dns-tracker-ebpf"
         ));
 
-        let mut ebpf = Ebpf::load(ebpf_bytes).context("failed to load BPF object")?;
+        // aya defaults to `DEBUG | STATS` verifier logging, and the kernel
+        // refuses the load with E2BIG ("Argument list too long") when that log
+        // does not fit the buffer passed to BPF_PROG_LOAD. On this kernel that
+        // is what rejected the program on every start, so the DNS map path was
+        // never available. Load with logging disabled; if the program is
+        // rejected for a real reason, retry with the log enabled to report it.
+        let btf = Btf::from_sys_fs().ok();
+        let mut ebpf = match EbpfLoader::new()
+            .btf(btf.as_ref())
+            .verifier_log_level(VerifierLogLevel::DISABLE)
+            .load(ebpf_bytes)
+        {
+            Ok(ebpf) => ebpf,
+            Err(quiet) => EbpfLoader::new()
+                .btf(btf.as_ref())
+                .verifier_log_level(VerifierLogLevel::VERBOSE)
+                .load(ebpf_bytes)
+                .map_err(|loud| {
+                    anyhow::anyhow!("failed to load BPF object: {loud} (quiet attempt: {quiet})")
+                })?,
+        };
 
         // Attach the kprobe to udp_sendmsg.
         let prog: &mut KProbe = ebpf

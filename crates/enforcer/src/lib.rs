@@ -938,7 +938,7 @@ impl FlowRegistrar for FakeFlowRegistrar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{FlowDirection, TransportProtocol};
+    use core_types::{DomainSource, FlowDirection, TransportProtocol};
     use flow_classifier::{FakeClassifier, RawPacket};
 
     fn raw_packet() -> RawPacket {
@@ -949,6 +949,7 @@ mod tests {
             dst_port: 443,
             protocol: TransportProtocol::Tcp,
             sni_hint: None,
+            domain_hint_source: DomainSource::None,
             ingress_interface: None,
             tcp_payload_empty: false,
             tcp_fin: false,
@@ -961,6 +962,8 @@ mod tests {
 
     fn classified_flow() -> FlowContext {
         FlowContext {
+            reverse_dns: None,
+            process_origin: core_types::ProcessOrigin::Unresolved,
             process_name: Some("curl".to_string()),
             process_exe: None,
             app_name: None,
@@ -969,6 +972,7 @@ mod tests {
             destination_ip: "1.1.1.1".to_string(),
             destination_port: 443,
             destination_domain: Some("example.com".to_string()),
+            domain_source: DomainSource::Sni,
             protocol: TransportProtocol::Tcp,
             direction: FlowDirection::Outbound,
             device_label: None,

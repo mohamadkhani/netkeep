@@ -21,7 +21,7 @@ Network flow authorization system for Linux: intercept unknown flows, prompt use
 │  └────────────────────────────────────────────────────────┘  │
 │             ▲                                                 │
 │             │ Unix socket JSON RPC                           │
-│             │ /tmp/netkeep.sock                            │
+│             │ /run/netkeep/netkeep.sock                            │
 │             ▼                                                 │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │ netkeep-cli (terminal CLI)                           │  │
@@ -158,11 +158,9 @@ Deliberate orderings: **wildcard > CIDR** on both axes (a domain wildcard constr
 **Traits:**
 - `RuleRepository` — mock-friendly interface for rule lookups
 
-**Tests:** Exact match, CIDR, domain, wildcard, precedence, deny vs allow, overlapping Route tie-break, disabled rules, ladder base per combo, seed-fraction containment, priority-descending resolution, and unknown-process fallback against specific destinations (with safety negatives for `Any` / `Cidr` / `Wildcard`).
+**Tests:** Exact match, CIDR, domain, wildcard, precedence, deny vs allow, overlapping Route tie-break, disabled rules, ladder base per combo, seed-fraction containment, priority-descending resolution, and the strict process rule below.
 
-**Unknown-process fallback in `process_matches`:** when the rule pins `process_name=Some(P)` but the live flow has `process_name=None` (proc attribution lost the `/proc` race), the rule still matches **only if** the rule's destination is `IpExact` or `DomainExact`. Broad destinations (`Any`, `Cidr`, `DomainWildcard`) still require a strict process match so a wildcard "allow X" rule cannot be silently piggy-backed on by an unattributed packet. Rationale and tests in [`docs/process-attribution-races.md`](process-attribution-races.md).
-
-**Unknown-process fallback in `process_matches`:** when the rule pins `process_name=Some(P)` but the live flow has `process_name=None` (proc attribution lost the `/proc` race), the rule still matches **only if** the rule's destination is `IpExact` or `DomainExact`. Broad destinations (`Any`, `Cidr`, `DomainWildcard`) still require a strict process match so a wildcard "allow X" rule cannot be silently piggy-backed on by an unattributed packet. Rationale and tests in [`docs/process-attribution-races.md`](process-attribution-races.md).
+**Process matching is strict:** a rule matches only when every field it pins matches the flow. When the rule pins `process_name=Some(P)` and the live flow has `process_name=None` (proc attribution lost the `/proc` race), the rule does **not** match, whatever the destination is — not even `IpExact` or `DomainExact`. The old forgiving fallback for exact destinations was removed because a destination does not prove a process (two apps can share one anycast address); the flow prompts instead, and the dialog says the resulting rule applies to every app. Rationale and tests in [`docs/process-attribution-races.md`](process-attribution-races.md).
 
 ### `decision-engine`
 
@@ -274,6 +272,7 @@ ListRules
 DeleteRule { id }
 MoveRule { id, before_id, after_id }                   ← reorder via midpoint insertion
 ListPending
+EgressAlertStatus                                      ← recent data-path failures per (kind, target)
 ListFlows { limit }
 RegisterUnknownFlow { flow, now_secs }
 AwaitPendingDecision { pending_id }
@@ -281,6 +280,7 @@ ResolvePending { pending_id, action }
 ResolvePendingWithRule { pending_id, action, rule }   ← atomic: installs rule before resolving
 Health
 Unlock
+SubscribeToPending                                     ← start the push-notification stream
 OpenRoutedTcp { host, port, target }
 UpsertEgress(Egress)
 DeleteEgress { id }
@@ -299,17 +299,32 @@ Ok
 RuleList(Vec<Rule>)
 PendingList(Vec<PendingDecision>)
 FlowList(Vec<FlowEvent>)
+EgressAlertList(Vec<EgressAlertRecord>)
 PendingCreated { pending_id, created_at, deadline_at, protocol }
 ImmediateVerdict { action, route_target: Option<RouteTarget> }
 PendingStillWaiting { pending_id }
 PendingResolved { action, route_target: Option<RouteTarget> }
 Health { ready, fail_close_active, timeout_secs, ... }
 Unlocked
+SubscriptionAck
 RoutedTcpReady { listen_addr }
 EgressList(Vec<Egress>)
 ProxyList(Vec<ProxyConfig>)
 ProxyTestResult { success, latency_ms, error }
+NfqueueStatus { enabled, queue_num: Option<u16> }
 Error(String)
+```
+
+**Push notifications** (after `SubscribeToPending`):
+```
+PendingCreated { decision }
+PendingResolved { pending_id, action, egress_id, egress_name }
+PendingExpired { pending_id }
+PolicyMatch { process_name, destination_ip, destination_port,
+              destination_domain, rule_id, action, egress_id, egress_name }
+KernelAllowed { source_port, destination_ip, destination_port,
+                destination_domain, protocol }
+EgressAlert { kind, target_id, detail, count, at_secs }
 ```
 
 **Transport:** JSON lines (newline-delimited JSON) over Unix socket.
@@ -483,7 +498,7 @@ Installs as `/usr/lib/systemd/system/netkeepd.service` with `ExecStart=/usr/bin/
 
 ## Environment Variables
 
-- `NETKEEP_SOCKET_PATH` — Unix control socket (daemon default: `/tmp/netkeep.sock`)
+- `NETKEEP_SOCKET_PATH` — Unix control socket (daemon default: `/run/netkeep/netkeep.sock`)
 - `NETKEEP_ROUTE_MARK_BASE` — Base value for routing fwmark allocation (default: 20000). Used to avoid conflicts with other tools (sing-box, xray, throne).
 - `NETKEEP_DB_PATH` — SQLite database file (daemon default: `~/.config/netkeep/netkeep.db`; directory is created automatically)
 - `NETKEEP_DEVICE_ROUTE_FALLBACK` — if `1`/`true`/`yes`, routed **device** connect may fall back to unmarked `connect` after failures (escape hatch; not fail-close strict)

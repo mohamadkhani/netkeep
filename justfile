@@ -49,6 +49,8 @@ run-emulator:
 #
 # This overwrites the pacman-owned binaries in place, so `pacman -Qkk netkeep`
 # reports them as modified until the next real `makepkg -i`.
+#
+# Build and install the daemon, CLI and tray, then restart the daemon and tray.
 dev-install:
   cargo xtask build-ebpf-release
   cargo build --workspace --release
@@ -56,17 +58,47 @@ dev-install:
   sudo install -Dm755 target/release/netkeep-cli    /usr/bin/netkeep-cli
   sudo install -Dm755 target/release/netkeep-gpui   /usr/bin/netkeep-gpui
   sudo systemctl restart netkeepd
-  @echo "==> daemon restarted. The tray still runs the old binary — 'just dev-restart-tray' to pick up UI changes."
+  @just dev-restart-tray
 
-# Relaunch the GPUI tray so it picks up a freshly installed binary.
-# No-op if the tray isn't already running.
+# `dev-install` overwrites /usr/bin/netkeep-gpui while the tray keeps running
+# the old image, so UI changes would only appear after the next login.
+# No-op when the tray is not running, or when the shell has no graphical
+# session to relaunch into (ssh, cron).
+#
+# Restart the GPUI tray so it loads the installed binary.
 dev-restart-tray:
-  if pgrep -x netkeep-gpui >/dev/null; then \
-    pkill -x netkeep-gpui; \
-    sleep 0.5; \
-    setsid /usr/bin/netkeep-gpui >/dev/null 2>&1 </dev/null & \
-    echo "==> tray relaunched"; \
-  else \
-    echo "==> tray not running; nothing to restart"; \
+  #!/usr/bin/env bash
+  set -uo pipefail
+
+  if ! pgrep -x netkeep-gpui >/dev/null; then
+    echo "==> tray not running; nothing to restart"
+    exit 0
   fi
+  if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+    echo "==> no graphical session in this shell; restart the tray from the desktop"
+    exit 0
+  fi
+
+  # Stop the old process and wait for it to exit so the SNI name is released
+  # before the new instance claims it.
+  pkill -x netkeep-gpui || true
+  for _ in $(seq 1 50); do
+    pgrep -x netkeep-gpui >/dev/null || break
+    sleep 0.1
+  done
+  if pgrep -x netkeep-gpui >/dev/null; then
+    echo "==> tray did not stop after 5 s; quit it from the tray menu and rerun" >&2
+    exit 1
+  fi
+
+  # Prefer the desktop entry: the process then lands in a proper application
+  # scope, so the icon and window focus behave as after a login.
+  if command -v gtk-launch >/dev/null 2>&1 &&
+     gtk-launch io.logicamp.Netkeep >/dev/null 2>&1; then
+    echo "==> tray relaunched via the desktop entry"
+    exit 0
+  fi
+
+  setsid /usr/bin/netkeep-gpui >/dev/null 2>&1 </dev/null &
+  echo "==> tray relaunched"
 

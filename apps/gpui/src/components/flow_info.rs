@@ -5,7 +5,12 @@ use gpui_component::{h_flex, v_flex};
 use crate::colors;
 
 pub fn flow_info_section(flow: &FlowContext, mono_font_family: SharedString) -> gpui::AnyElement {
-    let process_name = flow.process_name.as_deref().unwrap_or("unknown");
+    // Not a name: this flow has no proven owner. Say what the dialog can
+    // stand behind instead of inventing "unknown" as if it were an app.
+    let process_name = flow
+        .process_name
+        .as_deref()
+        .unwrap_or("Unidentified process");
     let app_name = &flow.app_name;
     let protocol = format!("{:?}", flow.protocol).to_uppercase();
     let port = flow.destination_port;
@@ -14,7 +19,14 @@ pub fn flow_info_section(flow: &FlowContext, mono_font_family: SharedString) -> 
     let direction = flow.direction;
     let device_label = &flow.device_label;
 
-    let destination = domain.as_deref().unwrap_or("(unknown)");
+    // The name in the packet (SNI/Host) and the DNS cache are observations
+    // about this connection. A reverse-DNS name is a hint about the address,
+    // marked as such and never used to build a rule.
+    let destination = match (domain.as_deref(), flow.reverse_dns.as_deref()) {
+        (Some(domain), _) => domain.to_string(),
+        (None, Some(ptr)) => format!("{ptr} (reverse DNS)"),
+        (None, None) => "(unknown)".to_string(),
+    };
 
     let direction_str = match direction {
         FlowDirection::Outbound => "OUTBOUND",
@@ -39,7 +51,7 @@ pub fn flow_info_section(flow: &FlowContext, mono_font_family: SharedString) -> 
         // Destination row
         .child(grid_row(
             label_element("DESTINATION", ui_font.clone()),
-            destination_value(destination, mono_font_family.clone()),
+            destination_value(&destination, mono_font_family.clone()),
         ))
         // IP Address row
         .child(grid_row(

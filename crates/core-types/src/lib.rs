@@ -82,9 +82,101 @@ pub enum ProcessPriority {
     Low,
 }
 
+/// Provenance of `FlowContext::destination_domain`.
+///
+/// Only `Sni` and `Host` are *in-band* observations for this connection: the
+/// name was read from the packet being classified. Everything else is a prior
+/// or a hint, so it must never decide a TLS connection before the ClientHello
+/// arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum DomainSource {
+    /// No domain is known.
+    #[default]
+    None,
+    /// TLS `server_name` extension in this packet's ClientHello.
+    Sni,
+    /// `Host:` header in this packet's plaintext HTTP request.
+    Host,
+    /// Learned from DNS or from a shared cache hit — a prior for the IP, not
+    /// an observation for this connection.
+    Dns,
+    /// User-declared intent, e.g. `ssh user@host` from `/proc/<pid>/cmdline`.
+    Cmdline,
+}
+
+impl DomainSource {
+    /// Whether the name came from the packet being classified. In-band names
+    /// may resolve a flow immediately; every other source is deferred until
+    /// the ClientHello supplies the authoritative SNI.
+    pub fn is_in_band(self) -> bool {
+        matches!(self, DomainSource::Sni | DomainSource::Host)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ProcessOrigin {
+    /// No process could be proven for this socket. The flow may be anyone's.
+    #[default]
+    Unresolved,
+    /// The resolver read the owning process from `/proc`.
+    Proved,
+    /// The socket has no user-space owner, and the scan that established this
+    /// was complete (no permission errors): a kernel service owns it, such as
+    /// the `nfsd` threads behind an NFS mount.
+    Kernel,
+}
+
+/// A failure in the data path that the user has to see.
+///
+/// These used to exist only as `eprintln!` lines in the journal: a proxy that
+/// could not be reached, an egress whose DNS servers failed, or a rule that
+/// routed a lookup to an egress with no resolvers. The connection simply broke
+/// and nothing said why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressAlert {
+    pub kind: EgressAlertKind,
+    /// Proxy or egress id the failure belongs to, when known.
+    pub target_id: Option<String>,
+    /// Human-readable detail: the error text, the domain, or the destination.
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EgressAlertKind {
+    /// The proxy could not be reached, or refused the connection.
+    Unreachable,
+    /// The proxy answered, but its DNS servers failed.
+    DnsFailed,
+    /// A rule sent this lookup to an egress with no DNS servers configured.
+    NoResolver,
+}
+
+impl EgressAlertKind {
+    /// Short label for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            EgressAlertKind::Unreachable => "proxy unreachable",
+            EgressAlertKind::DnsFailed => "egress DNS failed",
+            EgressAlertKind::NoResolver => "egress has no resolver",
+        }
+    }
+}
+
+/// Callback handed to the subsystems that can fail (transparent proxy, DNS
+/// forwarder). Kept as a plain closure so those crates stay independent of the
+/// control service.
+pub type EgressAlertSink = std::sync::Arc<dyn Fn(EgressAlert) + Send + Sync>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowContext {
     pub process_name: Option<String>,
+    /// What the process lookup actually established. `process_name: None`
+    /// alone cannot tell "the kernel owns this socket" from "the lookup
+    /// failed", and those two need different handling: a kernel service has
+    /// no app to ask about, while a failed lookup must never be allowed on a
+    /// guess.
+    #[serde(default)]
+    pub process_origin: ProcessOrigin,
     /// Full executable path from `/proc/<pid>/exe` — the unique identity of
     /// the process binary, used for rule matching and stored in the DB.
     #[serde(default)]
@@ -98,6 +190,15 @@ pub struct FlowContext {
     pub destination_ip: String,
     pub destination_port: u16,
     pub destination_domain: Option<String>,
+    /// Reverse-DNS name for `destination_ip`, when the packet gave no name of
+    /// its own. A display hint only: it never takes part in rule matching,
+    /// because the owner of the reverse zone can claim any name.
+    #[serde(default)]
+    pub reverse_dns: Option<String>,
+    /// Where `destination_domain` came from. Defaults to `None` for rows and
+    /// pending decisions written before provenance existed.
+    #[serde(default)]
+    pub domain_source: DomainSource,
     pub protocol: TransportProtocol,
     pub direction: FlowDirection,
     pub device_label: Option<String>,
