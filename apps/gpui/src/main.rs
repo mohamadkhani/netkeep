@@ -381,13 +381,17 @@ fn spawn_drain(
     cx: &mut gpui::App,
 ) {
     let weak = view.downgrade();
-    let (tx, rx_async) = async_channel::unbounded::<control_api::PushNotification>();
+    // Bounded on purpose: the rows are capped but a stalled UI would let the
+    // unbounded queue grow with every policy event. Blocking the dedicated
+    // drain thread is the safe failure — it applies backpressure to the
+    // socket reader instead of spending memory.
+    let (tx, rx_async) = async_channel::bounded::<control_api::PushNotification>(1024);
     // Forwarder: blocks only on this dedicated OS thread, never on an executor.
     std::thread::Builder::new()
         .name("log-viewer-drain".into())
         .spawn(move || {
             while let Ok(notif) = rx.recv() {
-                if tx.try_send(notif).is_err() {
+                if tx.send_blocking(notif).is_err() {
                     break; // receiver gone: window closed
                 }
             }
