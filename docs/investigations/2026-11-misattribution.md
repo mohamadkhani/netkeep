@@ -633,7 +633,7 @@ The control service aggregates per `(kind, target)`: it counts every occurrence,
 | Surface | Behaviour |
 |---|---|
 | Activity log | `egress-failure` row: target, kind, occurrence count, last detail |
-| Tray | amber icon while any failure is newer than 5 minutes; tooltip lists the three newest |
+| Tray | amber icon while a target failed at least 3 times in the last 5 minutes; tooltip lists the three newest |
 | `netkeep-cli config alerts` | the same rows as text |
 
 **Why the "no resolvers" case also changed.** An egress without DNS servers used to answer SERVFAIL for every domain its rules cover — the anti-leak choice. Once exe-pinned Route rules started matching DNS queries, that answered a machine-wide resolution failure. The query now leaves the egress path and resolves through system DNS, with a line saying so; keeping it on the path needs DNS servers configured on that egress.

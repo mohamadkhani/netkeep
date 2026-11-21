@@ -199,7 +199,8 @@ pub enum PushNotification {
     /// A data-path failure the user must be able to see: a proxy that cannot
     /// be reached, an egress whose DNS failed, or a rule that sent a lookup to
     /// an egress with no resolvers. Aggregated by the daemon, so `count` is
-    /// the number of occurrences since the previous alert for the same target.
+    /// the total number of occurrences for the same target since the daemon
+    /// started (not just since the previous alert).
     EgressAlert {
         kind: EgressAlertKind,
         target_id: Option<String>,
