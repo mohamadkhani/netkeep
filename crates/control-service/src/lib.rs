@@ -33,20 +33,6 @@ impl PolicyLogKey {
     }
 }
 
-/// Two flows belong to the same app when their exe paths match, or — when
-/// either side lacks an exe path — their display names match. An unknown
-/// identity on either side never proves a match, so an unattributed flow is
-/// never treated as "the same process" as anything.
-fn same_process_identity(a: &FlowContext, b: &FlowContext) -> bool {
-    match (a.process_exe.as_deref(), b.process_exe.as_deref()) {
-        (Some(left), Some(right)) => left == right,
-        _ => match (a.process_name.as_deref(), b.process_name.as_deref()) {
-            (Some(left), Some(right)) => left == right,
-            _ => false,
-        },
-    }
-}
-
 /// Callback returning the fwmark to use for a `RouteTarget`, if any.
 type RouteMarkFn = Box<dyn Fn(&RouteTarget) -> Option<u32> + Send>;
 
@@ -789,10 +775,11 @@ impl<R: Repository> ControlService<R> {
     ///
     /// A sweep may only resolve a pending that satisfies all three:
     ///
-    /// 1. the installed rule matches it ([`policy_engine::rule_matches`]);
+    /// 1. the installed rule matches it ([`policy_engine::rule_matches`]),
+    ///    including the process fields the rule pins;
     /// 2. it resolves to *that* rule under current precedence — a different,
     ///    higher-priority rule's verdict is not what the user just chose;
-    /// 3. it belongs to the same proven process as the answered flow.
+    /// 3. there is an answered flow (a settings or CLI rule never sweeps).
     ///
     /// Anything else needs its own dialog. A rule for `brave → example.com`
     /// must never answer a pending for `ssh → 1.2.3.4`, which is how rules
@@ -825,14 +812,12 @@ impl<R: Repository> ControlService<R> {
             if skip_pending == Some(p.id.as_str()) {
                 continue;
             }
-            // Only the app whose dialog was answered may inherit the answer.
-            // Without an answered flow, `rule_matches` already proved the
-            // process, because the rule pins one (checked above).
-            if let Some(answered) = answered {
-                if !same_process_identity(answered, &p.flow) {
-                    continue;
-                }
-            }
+            // The installed rule's own scope decides who inherits it.
+            // `rule_matches` rejects a pending that names a different process
+            // when the rule pins one, and a process-agnostic rule covers every
+            // app — including an unattributed pending. Filtering by the
+            // answered flow here made the dialog ("any app") and the sweep
+            // disagree about who the rule covers.
             if !policy_engine::rule_matches(installed, &p.flow) {
                 continue;
             }
@@ -2102,6 +2087,38 @@ mod tests {
         rule.process_name = process.map(str::to_string);
         rule.destination = DestinationMatcher::Any;
         rule
+    }
+
+    /// A dialog answered for an unattributed flow installs a rule the dialog
+    /// describes as "any app". Another unattributed pending that the same rule
+    /// covers must inherit that answer; the previous sweep compared the two
+    /// flows with a strict identity rule and left the second dialog open.
+    #[test]
+    fn answered_unattributed_dialog_sweeps_other_unattributed_pendings() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let mut first_flow = flow_for("curl", "example.com", 41051);
+        first_flow.process_name = None;
+        first_flow.process_exe = None;
+        first_flow.app_name = None;
+        let mut second_flow = flow_for("curl", "other.example", 41052);
+        second_flow.process_name = None;
+        second_flow.process_exe = None;
+        second_flow.app_name = None;
+
+        let first = create_pending(&mut service, first_flow);
+        let second = create_pending(&mut service, second_flow);
+
+        let rule = any_destination_rule("ui-any", None, RuleAction::Allow);
+        service.handle(ControlRequest::ResolvePendingWithRule {
+            pending_id: first,
+            action: RuleAction::Allow,
+            rule,
+        });
+
+        assert!(
+            !service.decision_engine.is_pending(&second),
+            "an any-app rule must answer every pending it covers"
+        );
     }
 
     #[test]
