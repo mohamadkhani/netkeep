@@ -282,6 +282,29 @@ impl<R: Repository> ControlService<R> {
         format!("evt-{}", self.event_counter)
     }
 
+    /// Record the Pending event for `pending` unless a live pending with the
+    /// same id is already stored.
+    ///
+    /// A retransmitted SYN re-enters both the control-API handler and the live
+    /// registrar with the same pending id. Recording it again added no
+    /// information and multiplied the flow list: five NFS connections showed
+    /// up as thirty unnamed rows, one per retransmit.
+    fn record_pending_event_once(
+        &mut self,
+        flow: &FlowContext,
+        pending: &core_types::PendingDecision,
+        now_secs: u64,
+    ) {
+        let already_stored = self
+            .repo
+            .list_live_pending(now_secs)
+            .iter()
+            .any(|existing| existing.id == pending.id);
+        if !already_stored {
+            self.record_event(flow, FlowState::Pending, now_secs);
+        }
+    }
+
     fn record_event(&mut self, flow: &FlowContext, state: FlowState, timestamp_secs: u64) {
         let id = self.next_event_id();
         self.repo.append_event(FlowEvent {
@@ -484,19 +507,9 @@ impl<R: Repository> ControlService<R> {
                         }
                     }
                     DecisionOutcome::Pending(p) => {
-                        // A retransmission of a flow that is already pending
-                        // reuses the same pending. Recording another Pending
-                        // event for it added no information and multiplied the
-                        // flow list: five NFS connections showed up as thirty
-                        // unnamed rows, each SYN retransmit adding one.
-                        let reused = self
-                            .repo
-                            .list_live_pending(now_secs)
-                            .iter()
-                            .any(|existing| existing.id == p.id);
-                        if !reused {
-                            self.record_event(&flow, FlowState::Pending, now_secs);
-                        }
+                        // A retransmission reuses the same pending id; see
+                        // `record_pending_event_once`.
+                        self.record_pending_event_once(&flow, &p, now_secs);
                         self.repo.upsert_pending(&p);
                         // NEW: Send push notification to subscribers
                         let decision = p.clone();
@@ -1174,7 +1187,7 @@ impl<R: Repository> FlowRegistrar for ControlService<R> {
             }
             DecisionOutcome::Pending(p) => {
                 counter!("netkeep.control.pending_created").increment(1);
-                self.record_event(&flow, FlowState::Pending, now_secs);
+                self.record_pending_event_once(&flow, &p, now_secs);
                 self.repo.upsert_pending(&p);
                 FlowDecision::Pending {
                     id: p.id,
@@ -1708,16 +1721,18 @@ mod tests {
     /// A retransmission of a flow whose dialog is already open must not append
     /// another Pending event. Five NFS connections produced thirty unnamed rows
     /// in the flow list because every SYN retransmit was recorded again.
+    ///
+    /// Intercepted packets reach the service through `FlowRegistrar::register`,
+    /// not through `RegisterUnknownFlow`, so this test must drive the registrar
+    /// entry point; the control-API path had its own guard while live traffic
+    /// kept multiplying rows.
     #[test]
     fn retransmission_of_a_pending_flow_records_one_event() {
         let mut service = ControlService::new(InMemoryRuleRepository::default());
         for now in [10, 11, 12, 13] {
-            let out = service.handle(ControlRequest::RegisterUnknownFlow {
-                flow: mk_flow(),
-                now_secs: now,
-            });
+            let decision = service.register(mk_flow(), now);
             assert!(
-                matches!(out, ControlResponse::PendingCreated { .. }),
+                matches!(decision, FlowDecision::Pending { .. }),
                 "every retransmit answers with the same pending"
             );
         }
