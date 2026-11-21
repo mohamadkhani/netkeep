@@ -13,6 +13,8 @@ use gpui_component::{Root, Theme, ThemeMode};
 use crate::app::DecisionApp;
 use crate::daemon;
 use crate::fonts;
+use crate::preferences::Preferences;
+use crate::rdap;
 use crate::state::{AppState, DestScope, ProcessScope};
 
 use core_types::{Egress, PendingDecision};
@@ -42,6 +44,22 @@ pub fn show_decision_dialog(item: PendingDecision, mut egresses: Vec<Egress>) {
         DestScope::IpCidr(4) // default: exact IP (/32)
     };
 
+    // The lookup is opt-in and only useful for an IP-only IPv4 destination.
+    // Resolve this before the window opens so the dialog renders immediately;
+    // the fetch itself starts on the background executor afterwards.
+    let lookup_ip = if Preferences::load().network_lookup
+        && item.flow.destination_domain.is_none()
+        && item
+            .flow
+            .destination_ip
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok()
+    {
+        Some(item.flow.destination_ip.clone())
+    } else {
+        None
+    };
+
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
@@ -58,8 +76,29 @@ pub fn show_decision_dialog(item: PendingDecision, mut egresses: Vec<Egress>) {
                 selected_egress_index: 0,
                 process_scope,
                 dest_scope,
+                network_owner: None,
                 closing: false,
             });
+
+            // Never hold the first frame for the registry. The dialog is
+            // already interactive; when the lookup lands the owner line and
+            // the "whole network" chip appear.
+            if let Some(ip) = lookup_ip {
+                let weak = state.downgrade();
+                cx.spawn(async move |cx| {
+                    let owner = cx
+                        .background_executor()
+                        .spawn(async move { rdap::lookup_owner(&ip) })
+                        .await;
+                    if let Some(owner) = owner {
+                        let _ = weak.update(cx, |s, cx| {
+                            s.network_owner = Some(owner);
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
 
             // Mutter maps the window from its restore geometry before applying
             // the maximized state; a small restore rect at the origin flashes

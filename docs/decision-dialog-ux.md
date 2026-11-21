@@ -145,6 +145,37 @@ Default: all four octets active (/32 exact IP). The user can always re-click a m
 
 The `any` option (no destination constraint) is available as a separate toggle for Case B — it is not reachable through the octet picker since at least one octet is always active.
 
+#### RDAP network owner (opt-in)
+
+When the **Network lookup** preference is on (`General` tab in Settings), the
+dialog asks RDAP which registry network owns an IPv4 destination. The answer
+appears twice:
+
+1. Under `IP ADDRESS` in the read-only details:
+   `GitHub, Inc. · 140.82.112.0/20 · AS36459`
+2. As one more destination choice next to the octet picker:
+   `all of GitHub, Inc. — 140.82.112.0/20`
+
+Selecting that choice stores a single `Cidr("140.82.112.0/20")` rule for the
+process scope. It is not a domain rule and does not make the resolver
+authoritative: the range is registry data about address ownership.
+
+Behaviour and limits:
+
+- **Off by default.** With the preference off, no request leaves the machine
+  and the dialog is unchanged.
+- **The dialog never waits.** The lookup starts after the window opens, on a
+  background executor, with a 3-second timeout. A failure just leaves the
+  dialog as it was; it never blocks Allow/Deny.
+- **Cache.** Answers are cached per prefix in
+  `$XDG_CACHE_HOME/netkeep/rdap.json` (override `NETKEEP_RDAP_CACHE`). A fresh
+  entry (under 24 hours) is served without a request; a stale entry is still
+  shown when a refresh fails.
+- **IPv4 only for now.** The octet picker cannot express an IPv6 prefix, so the
+  lookup is skipped for IPv6 destinations.
+- **ASN is optional.** Some registries do not return an origin AS in the
+  network object; the line then omits `AS…` instead of guessing.
+
 #### Case C — Both process and destination unknown
 
 - Process toggle is locked to `unknown` (cannot select `all processes`)
@@ -241,8 +272,10 @@ The following table maps every UI state combination to the resulting `Rule` stru
 | `firefox` | 3 octets active (/24) | `Some("firefox")` | `Cidr("142.250.80.0/24")` |
 | `firefox` | 2 octets active (/16) | `Some("firefox")` | `Cidr("142.250.0.0/16")` |
 | `firefox` | 1 octet active (/8) | `Some("firefox")` | `Cidr("142.0.0.0/8")` |
+| `firefox` | whole registry network (/20) | `Some("firefox")` | `Cidr("140.82.112.0/20")` |
 | `unknown` | all 4 octets active | `None` | `IpExact("142.250.80.100")` |
 | `unknown` | 3 octets active (/24) | `None` | `Cidr("142.250.80.0/24")` |
+| `unknown` | whole registry network (/20) | `None` | `Cidr("140.82.112.0/20")` |
 
 The `duration` field comes from the duration toggle (`UntilRestart` or `Permanent`).  
 The `route_target` comes from the egress chip selection (optional).

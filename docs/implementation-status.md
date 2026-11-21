@@ -161,6 +161,13 @@ Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 - `NETKEEP_TCP_TIMEOUT_SECS`, `NETKEEP_UDP_TIMEOUT_SECS`, `NETKEEP_QUIC_TIMEOUT_SECS`, `NETKEEP_OTHER_TIMEOUT_SECS` — protocol overrides (fall back to default timeout when unset)
 - `NETKEEP_DEVICE_ROUTE_FALLBACK` — set to `1`/`true`/`yes` to allow routed device path to fall back to plain connect after failure (diagnostics only; weakens strict routing)
 
+GUI preferences (`netkeep-gpui`) live in `~/.config/netkeep/gui.json` and are
+edited from the Settings → General tab. Two GUI-only overrides exist:
+
+- `NETKEEP_GUI_CONFIG` — exact path of the GUI preferences file
+- `NETKEEP_RDAP_CACHE` — exact path of the RDAP prefix cache (default
+  `~/.cache/netkeep/rdap.json`)
+
 ## Build and Run
 
 ```bash

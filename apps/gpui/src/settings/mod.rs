@@ -26,6 +26,7 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::label::Label;
 use gpui_component::select::{SelectEvent, SelectState};
+use gpui_component::switch::Switch;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::table::{TableEvent, TableState};
 use gpui_component::TitleBar;
@@ -34,6 +35,7 @@ use gpui_component::{h_flex, v_flex};
 
 use crate::colors;
 use crate::components::{action_btn, field_label, modal_header, proto_btn, table_badge};
+use crate::preferences::Preferences;
 
 use egress_tab::EgressDelegate;
 use proxies_tab::ProxiesDelegate;
@@ -79,6 +81,7 @@ pub enum SettingsTab {
     Rules,
     Egress,
     Proxies,
+    General,
 }
 
 // ── State ──────────────────────────────────────────────────────────────
@@ -105,6 +108,8 @@ pub struct SettingsState {
     pub proxy_test_request: Option<ProxyConfig>,
     /// Set by Test button in egress table rows; drained by SettingsApp observer.
     pub egress_test_request: Option<Egress>,
+    /// GUI-only preferences (not daemon policy), loaded once at window open.
+    pub preferences: Preferences,
 }
 
 impl SettingsState {
@@ -123,6 +128,7 @@ impl SettingsState {
             rule_edit_request: None,
             proxy_test_request: None,
             egress_test_request: None,
+            preferences: Preferences::load(),
         }
     }
 }
@@ -2346,12 +2352,13 @@ impl Render for SettingsApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_tables(cx);
 
-        let (status, socket_path, active_tab) = {
+        let (status, socket_path, active_tab, preferences) = {
             let state = self.state.read(cx);
             (
                 state.status.clone(),
                 state.socket_path.clone(),
                 state.active_tab,
+                state.preferences.clone(),
             )
         };
 
@@ -2363,6 +2370,7 @@ impl Render for SettingsApp {
             SettingsTab::Rules => 0,
             SettingsTab::Egress => 1,
             SettingsTab::Proxies => 2,
+            SettingsTab::General => 3,
         };
 
         let tab_bar = TabBar::new("settings-tabs")
@@ -2371,7 +2379,8 @@ impl Render for SettingsApp {
                 let tab = match index {
                     0 => SettingsTab::Rules,
                     1 => SettingsTab::Egress,
-                    _ => SettingsTab::Proxies,
+                    2 => SettingsTab::Proxies,
+                    _ => SettingsTab::General,
                 };
                 cx.update_entity(&this.state, |s, cx| {
                     s.active_tab = tab;
@@ -2380,7 +2389,8 @@ impl Render for SettingsApp {
             }))
             .child(Tab::new().label("Rules"))
             .child(Tab::new().label("Egress"))
-            .child(Tab::new().label("Proxies"));
+            .child(Tab::new().label("Proxies"))
+            .child(Tab::new().label("General"));
 
         // Table content for the active tab
         let table_content = match active_tab {
@@ -2516,6 +2526,55 @@ impl Render for SettingsApp {
                 .stripe(true)
                 .bordered(true)
                 .into_any_element(),
+            SettingsTab::General => {
+                let lookup_toggle = Switch::new("network-lookup-toggle")
+                    .checked(preferences.network_lookup)
+                    .label("Look up the network that owns an IP address")
+                    .on_click(cx.listener(|this, checked, _, cx| {
+                        let enabled = *checked;
+                        cx.update_entity(&this.state, |s, cx| {
+                            s.preferences.network_lookup = enabled;
+                            match s.preferences.save() {
+                                Ok(()) => s.status = None,
+                                Err(e) => {
+                                    s.status = Some(format!("Could not save preferences: {e}"))
+                                }
+                            }
+                            cx.notify();
+                        });
+                    }));
+
+                v_flex()
+                    .id("settings-general")
+                    .flex_1()
+                    .gap(px(12.))
+                    .p(px(12.))
+                    .child(
+                        Label::new("Network lookup")
+                            .text_size(px(13.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        Label::new(
+                            "For an IP-only destination, Netkeep can ask the registry (RDAP) \
+                             which network block owns that address. The dialog then offers \
+                             the whole block as one rule instead of a single IP.",
+                        )
+                        .text_size(px(11.))
+                        .text_color(colors::muted()),
+                    )
+                    .child(lookup_toggle)
+                    .child(
+                        Label::new(
+                            "The lookup sends the destination IP address to rdap.org. It is \
+                             off by default, and a failed or slow lookup never delays the \
+                             decision dialog.",
+                        )
+                        .text_size(px(11.))
+                        .text_color(colors::muted()),
+                    )
+                    .into_any_element()
+            }
         };
 
         // Add button for all tabs
@@ -2580,6 +2639,7 @@ impl Render for SettingsApp {
                     .child("+ ADD PROXY")
                     .into_any_element(),
             ),
+            SettingsTab::General => None,
         };
 
         let status_el: Option<gpui::AnyElement> = status.map(|msg| {

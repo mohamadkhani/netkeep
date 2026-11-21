@@ -20,6 +20,9 @@ pub enum DestScope {
     /// CIDR prefix — active_octets (1..=4) determines the prefix length.
     /// 4 = /32 exact IP, 3 = /24, 2 = /16, 1 = /8.
     IpCidr(u8),
+    /// A whole registry network block, e.g. `140.82.112.0/20`, offered by the
+    /// opt-in RDAP lookup. Stored as one CIDR rule.
+    NetworkPrefix(String),
 }
 
 pub struct AppState {
@@ -31,6 +34,9 @@ pub struct AppState {
     pub selected_egress_index: usize,
     pub process_scope: ProcessScope,
     pub dest_scope: DestScope,
+    /// Registry owner for an IP-only destination, filled asynchronously when
+    /// the network-lookup preference is on. `None` until a lookup succeeds.
+    pub network_owner: Option<crate::rdap::NetworkOwner>,
     /// Set when a decision was submitted (or the deadline expired): the UI
     /// plays its close animation and the process exits once it finishes.
     pub closing: bool,

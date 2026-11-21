@@ -38,6 +38,10 @@ mod daemon;
 mod decision_dialog;
 #[path = "../src/fonts.rs"]
 mod fonts;
+#[path = "../src/preferences.rs"]
+mod preferences;
+#[path = "../src/rdap.rs"]
+mod rdap;
 #[path = "../src/state.rs"]
 mod state;
 
