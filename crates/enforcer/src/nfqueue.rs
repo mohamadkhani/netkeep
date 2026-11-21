@@ -236,12 +236,15 @@ impl AttrCache {
         let domain_key = domain.map(|d| (d.to_string(), dst_port));
 
         if in_band_domain {
-            if let Some(dk) = &domain_key {
-                if let Some(hit) = live_entry(&mut self.domain_proc_attr, dk, now_secs) {
-                    return Some(hit);
-                }
-            }
-            return live_entry(&mut self.proc_attr, &ip_key, now_secs);
+            // The packet itself carried a name. The binding for that name is
+            // the only one that can describe this connection; the IP key is a
+            // guess across everything that shares the address. Falling back to
+            // it here was RC-4 narrowed but not closed: a flow with an SNI
+            // could still borrow another app's identity on the same anycast IP.
+            return match &domain_key {
+                Some(dk) => live_entry(&mut self.domain_proc_attr, dk, now_secs),
+                None => live_entry(&mut self.proc_attr, &ip_key, now_secs),
+            };
         }
 
         if let Some(hit) = live_entry(&mut self.proc_attr, &ip_key, now_secs) {
@@ -1749,6 +1752,51 @@ mod tests {
             restored.map(|c| c.process_name),
             Some("app-a".to_string()),
             "in-band domain must select the binding that observed it"
+        );
+    }
+
+    /// REGRESSION (misattribution): when the packet carries a name, only the
+    /// binding observed for that `(domain, port)` may name its process. The
+    /// IP key covers every app that ever reached the address, so falling back
+    /// to it hands the flow another app's identity on a shared CDN IP.
+    #[test]
+    fn layer0_in_band_domain_never_falls_back_to_the_ip_key() {
+        let mut cache = AttrCache::new();
+        cache.record_success("203.0.113.7", 443, None, &proc_info("app-a"), 1000);
+        cache.record_success(
+            "203.0.113.7",
+            443,
+            Some("a.example"),
+            &proc_info("app-a"),
+            1000,
+        );
+
+        assert_eq!(
+            cache.restore(
+                core_types::ProcessOrigin::Unresolved,
+                "203.0.113.7",
+                443,
+                Some("other.example"),
+                true,
+                1100
+            ),
+            None,
+            "an in-band name with no binding must not borrow the IP owner"
+        );
+
+        // Without a name there is nothing better than the IP key.
+        assert_eq!(
+            cache
+                .restore(
+                    core_types::ProcessOrigin::Unresolved,
+                    "203.0.113.7",
+                    443,
+                    None,
+                    true,
+                    1100
+                )
+                .map(|c| c.process_name),
+            Some("app-a".to_string())
         );
     }
 
