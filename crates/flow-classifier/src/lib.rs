@@ -248,56 +248,50 @@ impl SniDnsCache {
             return None;
         }
 
-        let candidates: Vec<&DomainEntry> = list.iter().filter(|e| e.port_matches(port)).collect();
-        if candidates.is_empty() {
+        let has_candidate = list.iter().any(|e| e.port_matches(port));
+        if !has_candidate {
             counter!("netkeep.domain.cache_lookup", "result" => "miss").increment(1);
             return None;
         }
 
         let caller_known = process_name.is_some() || process_exe.is_some();
         if caller_known {
-            let observed: Vec<&DomainEntry> = candidates
-                .iter()
-                .copied()
-                .filter(|e| {
+            let observed =
+                domain_choice(list.iter().filter(|e| e.port_matches(port)).filter(|e| {
                     same_process(
                         e.process_name.as_deref(),
                         e.process_exe.as_deref(),
                         process_name,
                         process_exe,
                     )
-                })
-                .collect();
-            if !observed.is_empty() {
-                // The caller itself observed these bindings — the strongest
-                // evidence a cache hit can carry. It may still have observed
-                // more than one name on this IP (a shared CDN), and then the
-                // cache cannot say which name this connection is for.
-                return match unique_domain(&observed) {
-                    Some(domain) => {
-                        counter!("netkeep.domain.cache_lookup", "result" => "observed")
-                            .increment(1);
-                        Some(domain.to_string())
-                    }
-                    None => {
-                        counter!("netkeep.domain.cache_lookup", "result" => "ambiguous")
-                            .increment(1);
-                        None
-                    }
-                };
+                }));
+            // The caller itself observed these bindings — the strongest
+            // evidence a cache hit can carry. It may still have observed more
+            // than one name on this IP (a shared CDN), and then the cache
+            // cannot say which name this connection is for.
+            match observed {
+                DomainChoice::None => {}
+                DomainChoice::One(domain) => {
+                    counter!("netkeep.domain.cache_lookup", "result" => "observed").increment(1);
+                    return Some(domain.to_string());
+                }
+                DomainChoice::Many => {
+                    counter!("netkeep.domain.cache_lookup", "result" => "ambiguous").increment(1);
+                    return None;
+                }
             }
         }
         // Every remaining binding belongs to a different process, or the
         // caller has no identity at all — neither can claim an owned name.
-        let candidates: Vec<&DomainEntry> =
-            candidates.into_iter().filter(|e| !e.has_owner()).collect();
-        if candidates.is_empty() {
-            counter!("netkeep.domain.cache_lookup", "result" => "miss").increment(1);
-            return None;
-        }
-
-        match unique_domain(&candidates) {
-            Some(only) => {
+        match domain_choice(
+            list.iter()
+                .filter(|e| e.port_matches(port) && !e.has_owner()),
+        ) {
+            DomainChoice::None => {
+                counter!("netkeep.domain.cache_lookup", "result" => "miss").increment(1);
+                None
+            }
+            DomainChoice::One(only) => {
                 // A single unowned name is the only cache prior allowed to
                 // label a flow for a process that never resolved it. Counting
                 // it makes the "process/domain pair was never observed"
@@ -305,7 +299,7 @@ impl SniDnsCache {
                 counter!("netkeep.domain.cache_lookup", "result" => "unobserved_pair").increment(1);
                 Some(only.to_string())
             }
-            None => {
+            DomainChoice::Many => {
                 counter!("netkeep.domain.cache_lookup", "result" => "ambiguous").increment(1);
                 None
             }
@@ -313,14 +307,31 @@ impl SniDnsCache {
     }
 }
 
-/// The one domain every entry agrees on, or `None` when they disagree.
-fn unique_domain<'a>(entries: &[&'a DomainEntry]) -> Option<&'a str> {
-    let mut domains: Vec<&str> = entries.iter().map(|e| e.domain.as_str()).collect();
-    domains.sort_unstable();
-    domains.dedup();
-    match domains.as_slice() {
-        [only] => Some(*only),
-        _ => None,
+/// What the live bindings for one `(ip, port)` say about the domain.
+///
+/// Scans lazily: the packet path may not allocate two vectors and sort them
+/// just to learn that the names disagree.
+enum DomainChoice<'a> {
+    /// No binding survived the filter.
+    None,
+    /// Every binding agrees on this name.
+    One(&'a str),
+    /// Bindings disagree; the cache cannot choose.
+    Many,
+}
+
+fn domain_choice<'a>(entries: impl IntoIterator<Item = &'a DomainEntry>) -> DomainChoice<'a> {
+    let mut found: Option<&'a str> = None;
+    for entry in entries {
+        match found {
+            None => found = Some(entry.domain.as_str()),
+            Some(name) if name == entry.domain.as_str() => {}
+            Some(_) => return DomainChoice::Many,
+        }
+    }
+    match found {
+        None => DomainChoice::None,
+        Some(name) => DomainChoice::One(name),
     }
 }
 
