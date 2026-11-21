@@ -1058,8 +1058,12 @@ impl<R: Repository> ControlService<R> {
         }
         counter!("netkeep.policy.kernel_allowed").increment(1);
         eprintln!(
-            "policy: kernel-owned socket dst={}:{} src=:{} — allowed without a dialog",
-            flow.destination_ip, flow.destination_port, flow.source_port
+            "policy: rule=kernel-owned action={:?} process=None domain={:?} dst={}:{} src=:{}",
+            RuleAction::Allow,
+            flow.destination_domain,
+            flow.destination_ip,
+            flow.destination_port,
+            flow.source_port
         );
         self.record_event(flow, FlowState::Allowed, now_secs);
         let _ = self.notification_tx.send(PushNotification::KernelAllowed {
