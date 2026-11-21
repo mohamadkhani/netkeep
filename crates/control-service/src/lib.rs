@@ -1057,14 +1057,7 @@ impl<R: Repository> ControlService<R> {
             return None;
         }
         counter!("netkeep.policy.kernel_allowed").increment(1);
-        eprintln!(
-            "policy: rule=kernel-owned action={:?} process=None domain={:?} dst={}:{} src=:{}",
-            RuleAction::Allow,
-            flow.destination_domain,
-            flow.destination_ip,
-            flow.destination_port,
-            flow.source_port
-        );
+        eprintln!("{}", kernel_policy_line(flow));
         self.record_event(flow, FlowState::Allowed, now_secs);
         let _ = self.notification_tx.send(PushNotification::KernelAllowed {
             source_port: flow.source_port,
@@ -1075,6 +1068,18 @@ impl<R: Repository> ControlService<R> {
         });
         Some((RuleAction::Allow, None))
     }
+}
+
+/// The `policy:` line for a kernel-owned socket.
+///
+/// Same grammar as a rule decision — `id=`, `action=`, the matched fields — so
+/// a reader or parser keyed on `id=` does not lose these verdicts. There is no
+/// rule row behind them, so the id is the fixed word `kernel-owned`.
+fn kernel_policy_line(flow: &FlowContext) -> String {
+    format!(
+        "policy: id=kernel-owned action=Allow process=None domain={:?} dst={}:{} src=:{}",
+        flow.destination_domain, flow.destination_ip, flow.destination_port, flow.source_port
+    )
 }
 
 /// Walk an egress's target list and return the first one that is currently
@@ -1231,7 +1236,10 @@ mod tests {
     };
     use state_store::InMemoryRuleRepository;
 
-    use super::{ControlService, HealthConfig, ALERT_RECENT_WINDOW_SECS, POLICY_LOG_DEDUP_SECS};
+    use super::{
+        kernel_policy_line, ControlService, HealthConfig, ALERT_RECENT_WINDOW_SECS,
+        POLICY_LOG_DEDUP_SECS,
+    };
     use decision_engine::{DecisionEngine, OverflowPolicy};
     use enforcer::{FlowDecision, FlowRegistrar as _};
 
@@ -1741,6 +1749,26 @@ mod tests {
             "failures older than the window must stop counting as sustained"
         );
         assert_eq!(row.count, 3, "the lifetime occurrence count is kept");
+    }
+
+    /// The kernel verdict must use the same `policy:` grammar as every other
+    /// verdict: a reader keyed on `id=` and `action=` must not lose it. The
+    /// investigation quotes this line as evidence, so the format is pinned
+    /// here rather than only in prose.
+    #[test]
+    fn kernel_policy_line_names_rule_action_and_fields() {
+        let mut flow = mk_flow();
+        flow.process_name = None;
+        flow.process_exe = None;
+        flow.app_name = None;
+        flow.process_origin = core_types::ProcessOrigin::Kernel;
+        flow.destination_domain = None;
+
+        assert_eq!(
+            kernel_policy_line(&flow),
+            "policy: id=kernel-owned action=Allow process=None domain=None \
+             dst=1.1.1.1:443 src=:54321"
+        );
     }
 
     #[test]
