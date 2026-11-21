@@ -2,7 +2,12 @@
 
 **Investigation date:** 2026-11-12 → 2026-11-13
 **Base commit:** `83d0499` (`main`)
-**Status:** read-only investigation of the live system. No code, rule, or database change was made; this document and its evidence companion are the only artifacts added.
+**Status:** started as a read-only investigation of the live system; the fixes it
+describes are implemented. Stage 0 and Stage 1, the runtime fixes and the
+follow-ups listed below landed on `fix/misattribution-stage0` and
+`verify/misattribution-log-viewer`. Every measured claim carries the command or
+journal excerpt that produced it, and §9.4–9.7 record what was re-verified on
+the installed build.
 **Companion file:** [Evidence tables](2026-11-misattribution-evidence.md)
 
 This document records what was established from the live daemon, how it was established, which mechanisms can produce it, and the fix order that follows. Claims are marked **proven** (directly visible in logs and reproducible), **inferred** (the mechanism fits all observed data but the exact step was not logged), or **not established** (cannot be decided from the available evidence).
@@ -486,7 +491,7 @@ The live count is 602 at 2026-11-13 00:25 (599 `Permanent`, 3 `UntilRestart`). R
 
 Checks 1–4 above need raw packets. The daemon logs verdicts, not packets, so they are replayed through the control socket and the log viewer instead of a packet file.
 
-**Unit and static checks.** `just test` 296 passed, 0 failed; `just lint` and `just fmt-check` clean.
+**Unit and static checks.** `just test` 317 passed, 0 failed, 12 ignored; `just lint` and `just fmt-check` clean.
 
 **Control-socket replay, before and after.** One probe script drives `RegisterUnknownFlow` against a sandbox daemon, then reads `ListPending`. The flows are four sockets from `synara` to `188.114.98.98:443` with no domain, one `brave` flow to the same address carrying `api.zed.dev`, and one `synara` flow to `188.114.98.98:22`.
 
@@ -499,7 +504,7 @@ Both builds keep the named `brave` flow in its own pending, keep `:22` in its ow
 
 **Log viewer.** `netkeep-gpui --log-viewer <socket>` renders the daemon's push-notification stream. Recording that stream while the probe ran shows one `PendingCreated` per connection and one pending id for all four sockets (`pending-1` four times, then `pending-2` for `brave`, `pending-3` for `:22`). Any consumer of the stream must key on the pending id; the tray monitor already does, because it polls `ListPending` and tracks shown ids.
 
-**Live measurement after the restart (01:35–01:40).** 432 flow events in the first five minutes.
+**Live measurement after the restart (01:35–01:40).** 432 flow events in the first seven minutes: 144 in the first 60 s and 288 over the following six minutes.
 
 | Window | Events | Pending events | Distinct destinations |
 |---|---|---|---|
@@ -521,7 +526,10 @@ The steady-state pending rate did not rise. The startup spike has three causes:
 
 ### 9.5 Not yet verified
 
-- Checks 1–4 against real intercepted packets. The installed daemon is still the `01:35` build; the new one is built but not installed. `just dev-install` installs and restarts it.
+- Checks 1–4 against real intercepted packets. The fixed binaries were installed
+  on 2026-11-21 16:56 (`just dev-install`), so the daemon side is current; the
+  packet-level checks still need a raw-packet replay or a controlled connection
+  per case.
 - The DNS egress fix under live traffic: it needs a `Route` rule that pins an exe and a query from that app.
 - Rule-store cleanup (§8) waits for a clean replay on the installed build.
 
@@ -529,7 +537,7 @@ The steady-state pending rate did not rise. The startup spike has three causes:
 
 **Report.** Process names look undetected for the first seconds after a daemon restart, then everything appears correct at once.
 
-**Measurement.** Unattributed decisions (`process=None`) in the first 120 s after each restart, compared with the following 30 minutes, over 10 restarts:
+**Measurement.** Unattributed decisions (`process=None`) in the first 120 s after each restart, compared with the following 30 minutes, over six restarts:
 
 | restart | first 120 s | next 30 min |
 |---|---|---|
@@ -575,7 +583,39 @@ At the decision layer the same window shows 80 rule decisions and only 4 unnamed
 
 This is not a regression: the `src=:2049` NFS flows carried `process=None` on 2026-11-12 as well (53 `policy` lines, all unnamed). What changed is that Stage 0 stopped lending them another app's name, so flows that used to look named now look unknown.
 
-**Fixed.** `RegisterUnknownFlow` records a flow event only when the pending is new (`d4e9958`), so retransmissions no longer multiply rows.
+**Fixed.** Pending retransmissions no longer multiply rows. The guard first
+lived only in the `RegisterUnknownFlow` handler; `FlowRegistrar::register`, the
+path intercepted packets actually use, now shares it, and the regression test
+drives the registrar.
+
+**Verified on the installed build (2026-11-21).**
+
+Restart gap, `journalctl -u netkeepd` around the 16:56 install of the fixed
+binaries:
+
+```
+Nov 21 16:56:54 systemd[1]: Started Netkeep network authorization daemon.
+Nov 21 16:56:54 netkeepd[26042]: nftables rules applied (route_mark_base=20000, nfqueue=Some(0))
+Nov 21 16:56:54 netkeepd[26042]: sock-tracker: eBPF programs attached (kprobe:tcp_connect, …)
+Nov 21 16:56:55 netkeepd[26042]: dns-tracker: eBPF load failed: … Invalid argument (os error 22)
+```
+
+The nftables table exists in the same second as the unit start; the rejected
+DNS program no longer blocks the startup path. The earlier journal showed
+`Started` at 08:25:34 and `nftables rules applied` at 08:25:43.
+
+Kernel-owned sockets, journal at 18:50 (interception on, NFS replies from the
+kernel):
+
+```
+Nov 21 18:50:00 netkeepd[26042]: policy: kernel-owned socket dst=192.168.7.18:980 src=:2049 — allowed without a dialog
+Nov 21 18:50:00 netkeepd[26042]: policy: kernel-owned socket dst=192.168.7.17:774 src=:2049 — allowed without a dialog
+```
+
+Pending rows, `netkeep-cli flow list --limit 500 --format json` for
+22:53:59–23:03:13 returned 500 events containing **1** `Pending` row (one
+container connection). The 56-rows-for-13-connections sample above predates the
+guard; repeating that burst measurement needs a fresh restart.
 
 **Fixed.** The DNS tracker loaded with `DEBUG|STATS` verifier logging, and the kernel rejected `BPF_PROG_LOAD` with `E2BIG` ("Argument list too long") because the log did not fit the buffer. It now loads with logging disabled and retries with `VERBOSE` only if the quiet attempt fails (`1519506`). Unverified until the next install: whether the program is then accepted, and how much of the 9 s startup cost the log was responsible for.
 
