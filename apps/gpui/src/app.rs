@@ -102,6 +102,7 @@ impl Render for DecisionApp {
         let dest_scope = state.dest_scope.clone();
         let state_weak = self.state.downgrade();
         let item = state.item.clone();
+        let network_owner = state.network_owner.clone();
         let mono_font = Theme::global(cx).mono_font_family.clone();
 
         let remaining = item.deadline_at_secs.saturating_sub(now);
@@ -157,7 +158,11 @@ impl Render for DecisionApp {
             )
             .blur_radius(px(40.))])
             .child(components::decision_header(remaining))
-            .child(components::flow_info_section(&item.flow, mono_font))
+            .child(components::flow_info_section(
+                &item.flow,
+                mono_font,
+                network_owner.as_ref(),
+            ))
             .child(components::action_footer(components::ActionFooterProps {
                 pending_id: item.id.clone(),
                 flow: item.flow.clone(),
@@ -166,6 +171,7 @@ impl Render for DecisionApp {
                 selected_egress_index: state.selected_egress_index,
                 process_scope,
                 dest_scope,
+                network_owner,
                 state: state_weak,
             }))
             .child(components::status_bar(pending_count));

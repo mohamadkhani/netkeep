@@ -42,7 +42,7 @@ netkeep-gpui (single process)
 Root
 └── SettingsApp (Render)
     ├── TitleBar (drag, close, settings icon)
-    ├── TabBar (Rules / Egress / Proxies)
+    ├── TabBar (Rules / Egress / Proxies / General)
     └── Table content area
         ├── Table<RulesDelegate>     (when Rules tab active)
         ├── Table<EgressDelegate>    (when Egress tab active)
@@ -117,9 +117,24 @@ pub struct SettingsApp {
 }
 ```
 
-## TableDelegate Implementations
+## General Tab (GUI preferences)
 
-### RulesDelegate
+The fourth tab holds settings that belong to the GUI process, not to daemon
+policy. It currently has one switch: **Network lookup**, the opt-in RDAP lookup
+described in [`decision-dialog-ux.md`](decision-dialog-ux.md#rdap-network-owner-opt-in).
+
+- State lives in `SettingsState.preferences` (`apps/gpui/src/preferences.rs`).
+- The switch saves immediately to `$XDG_CONFIG_HOME/netkeep/gui.json`
+  (`NETKEEP_GUI_CONFIG` overrides the path). A save failure is shown in the
+  existing status strip; the in-memory value stays changed so the user can
+  retry.
+- The decision dialog runs as a separate process, so it reads this file at
+  startup. A toggle therefore applies to the next dialog that opens, not to
+  one already on screen.
+- Unknown keys and a missing file are tolerated; a missing file means every
+  preference keeps its safe default (`network_lookup: false`).
+
+## TableDelegate Implementations### RulesDelegate
 
 **Columns:** ID (90px) | Process (110px) | Destination (180px) | Action (80px) | Duration (80px) | Route (90px) | Priority (56px, not resizable) | Controls (190px, not resizable)
 

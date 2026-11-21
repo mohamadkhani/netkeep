@@ -126,7 +126,9 @@ pub fn cidr_picker(ip: &str, active_octets: u8, state_weak: WeakEntity<AppState>
         .map(|i| parts.get(i).copied().unwrap_or("0").to_string())
         .collect();
     let prefix = active_octets * 8;
-    let cidr_label = format!("/{prefix}");
+    let cidr_label = (1..=4)
+        .contains(&active_octets)
+        .then(|| format!("/{prefix}"));
 
     h_flex()
         .items_center()
@@ -138,14 +140,16 @@ pub fn cidr_picker(ip: &str, active_octets: u8, state_weak: WeakEntity<AppState>
         .child(octet_chip(3, &o[2], active_octets, state_weak.clone()))
         .child(octet_sep())
         .child(octet_chip(4, &o[3], active_octets, state_weak))
-        .child(
-            div()
-                .w(px(32.))
-                .text_size(px(11.))
-                .text_color(colors::muted())
-                .ml(px(3.))
-                .child(cidr_label),
-        )
+        .when_some(cidr_label, |el, label| {
+            el.child(
+                div()
+                    .w(px(32.))
+                    .text_size(px(11.))
+                    .text_color(colors::muted())
+                    .ml(px(3.))
+                    .child(label),
+            )
+        })
         .into_any_element()
 }
 
@@ -196,10 +200,10 @@ fn octet_chip(
         .on_click(move |_, _, cx| {
             if let Some(s) = state_weak.upgrade() {
                 s.update(cx, |st, cx| {
-                    let current = if let DestScope::IpCidr(n) = st.dest_scope {
-                        n
-                    } else {
-                        4
+                    let current = match st.dest_scope {
+                        DestScope::IpCidr(n) => n,
+                        DestScope::NetworkPrefix(_) => 0,
+                        _ => 4,
                     };
                     let new_active = if index <= current {
                         (index - 1).max(1)

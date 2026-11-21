@@ -6,6 +6,8 @@ mod decision_dialog;
 mod fonts;
 mod log_viewer;
 mod monitor;
+mod preferences;
+mod rdap;
 mod settings;
 mod state;
 #[cfg(target_os = "linux")]

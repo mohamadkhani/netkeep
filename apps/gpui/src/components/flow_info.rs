@@ -3,8 +3,13 @@ use gpui::{div, px, FontWeight, IntoElement, ParentElement, SharedString, Styled
 use gpui_component::{h_flex, v_flex};
 
 use crate::colors;
+use crate::rdap::NetworkOwner;
 
-pub fn flow_info_section(flow: &FlowContext, mono_font_family: SharedString) -> gpui::AnyElement {
+pub fn flow_info_section(
+    flow: &FlowContext,
+    mono_font_family: SharedString,
+    owner: Option<&NetworkOwner>,
+) -> gpui::AnyElement {
     // Not a name: this flow has no proven owner. Say what the dialog can
     // stand behind instead of inventing "unknown" as if it were an app.
     let process_name = flow
@@ -56,7 +61,7 @@ pub fn flow_info_section(flow: &FlowContext, mono_font_family: SharedString) -> 
         // IP Address row
         .child(grid_row(
             label_element("IP ADDRESS", ui_font.clone()),
-            ip_value(ip, mono_font_family.clone()),
+            ip_value(ip, owner, mono_font_family.clone(), ui_font.clone()),
         ))
         // Protocol row
         .child(grid_row(
@@ -149,8 +154,13 @@ fn destination_value(destination: &str, mono_font_family: SharedString) -> gpui:
         .into_any_element()
 }
 
-fn ip_value(ip: &str, mono_font_family: SharedString) -> gpui::AnyElement {
-    div()
+fn ip_value(
+    ip: &str,
+    owner: Option<&NetworkOwner>,
+    mono_font_family: SharedString,
+    ui_font: SharedString,
+) -> gpui::AnyElement {
+    let chip = div()
         .font_family(mono_font_family)
         .bg(colors::surface_container_highest())
         .px(px(8.))
@@ -160,8 +170,22 @@ fn ip_value(ip: &str, mono_font_family: SharedString) -> gpui::AnyElement {
         .border_color(colors::border())
         .text_color(colors::text())
         .text_size(px(12.))
-        .child(SharedString::from(ip.to_string()))
-        .into_any_element()
+        .child(SharedString::from(ip.to_string()));
+
+    match owner {
+        None => chip.into_any_element(),
+        Some(owner) => v_flex()
+            .gap(px(3.))
+            .child(chip)
+            .child(
+                div()
+                    .font_family(ui_font)
+                    .text_color(colors::muted())
+                    .text_size(px(10.))
+                    .child(SharedString::from(owner.display())),
+            )
+            .into_any_element(),
+    }
 }
 
 fn protocol_value(protocol: &str, port: u16, mono_font_family: SharedString) -> gpui::AnyElement {

@@ -10,6 +10,7 @@ use core_types::{DestinationMatcher, Egress, FlowContext, Rule, RuleAction, Rule
 use crate::colors;
 use crate::components::ds;
 use crate::daemon::{self, SOCKET_PATH};
+use crate::rdap::NetworkOwner;
 use crate::state::{AppState, DestScope, ProcessScope};
 
 pub struct ActionFooterProps {
@@ -20,6 +21,7 @@ pub struct ActionFooterProps {
     pub selected_egress_index: usize,
     pub process_scope: ProcessScope,
     pub dest_scope: DestScope,
+    pub network_owner: Option<NetworkOwner>,
     pub state: WeakEntity<AppState>,
 }
 
@@ -32,6 +34,7 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
         selected_egress_index,
         process_scope,
         dest_scope,
+        network_owner,
         state: state_weak,
     } = props;
 
@@ -89,6 +92,7 @@ pub fn action_footer(props: ActionFooterProps) -> gpui::AnyElement {
             &flow,
             &process_scope,
             &dest_scope,
+            network_owner.as_ref(),
             state_weak.clone(),
         ))
         // Divider
@@ -190,6 +194,7 @@ fn rule_scope_section(
     flow: &FlowContext,
     process_scope: &ProcessScope,
     dest_scope: &DestScope,
+    network_owner: Option<&NetworkOwner>,
     state_weak: WeakEntity<AppState>,
 ) -> gpui::AnyElement {
     let process_name = flow.process_name.clone();
@@ -247,6 +252,7 @@ fn rule_scope_section(
         dest_scope,
         has_domain,
         show_warning,
+        network_owner,
         state_weak.clone(),
     ));
 
@@ -315,11 +321,13 @@ fn dest_scope_row(
     dest_scope: &DestScope,
     has_domain: bool,
     hide_any: bool,
+    network_owner: Option<&NetworkOwner>,
     state_weak: WeakEntity<AppState>,
 ) -> gpui::AnyElement {
     let sw_exact = state_weak.clone();
     let sw_wild = state_weak.clone();
     let sw_any = state_weak.clone();
+    let sw_network = state_weak.clone();
 
     let content: gpui::AnyElement = if has_domain {
         let domain = flow.destination_domain.clone().unwrap_or_default();
@@ -369,18 +377,42 @@ fn dest_scope_row(
             })
             .into_any_element()
     } else {
-        let active_octets = if let DestScope::IpCidr(n) = dest_scope {
-            *n
-        } else {
-            4
+        let active_octets = match dest_scope {
+            DestScope::IpCidr(n) => *n,
+            // No octet is part of the rule when the whole registry block is
+            // selected; the octet chips are an alternative, not a summary.
+            DestScope::NetworkPrefix(_) => 0,
+            _ => 4,
         };
         h_flex()
             .gap(px(6.))
+            .flex_wrap()
             .child(ds::cidr_picker(
                 &flow.destination_ip,
                 active_octets,
                 state_weak.clone(),
             ))
+            .when_some(network_owner, |el, owner| {
+                let prefix = owner.prefix.clone();
+                let is_network = matches!(
+                    dest_scope,
+                    DestScope::NetworkPrefix(selected) if selected == &owner.prefix
+                );
+                let label = format!("all of {} — {}", owner.org, owner.prefix);
+                el.child(ds::chip(
+                    "dest-network",
+                    label,
+                    is_network,
+                    move |_, _, cx| {
+                        if let Some(s) = sw_network.upgrade() {
+                            s.update(cx, |st, cx| {
+                                st.dest_scope = DestScope::NetworkPrefix(prefix.clone());
+                                cx.notify();
+                            });
+                        }
+                    },
+                ))
+            })
             .when(!hide_any, |el| {
                 el.child(ds::chip("dest-ip-any", "any", false, move |_, _, cx| {
                     if let Some(s) = sw_any.upgrade() {
@@ -421,6 +453,7 @@ fn rule_summary_line(
             format!("*.{}", domain_apex(&domain))
         }
         DestScope::Any => "any destination".to_string(),
+        DestScope::NetworkPrefix(prefix) => prefix.clone(),
         DestScope::IpCidr(n) => {
             let parts: Vec<&str> = flow.destination_ip.splitn(4, '.').collect();
             let mut octets: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
@@ -652,6 +685,7 @@ fn build_dest_matcher(flow: &FlowContext, dest_scope: &DestScope) -> Destination
             DestinationMatcher::DomainWildcard(domain_apex(&domain))
         }
         DestScope::Any => DestinationMatcher::Any,
+        DestScope::NetworkPrefix(prefix) => DestinationMatcher::Cidr(prefix.clone()),
         DestScope::IpCidr(n) => {
             let parts: Vec<&str> = flow.destination_ip.splitn(4, '.').collect();
             let mut octets: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
@@ -926,4 +960,51 @@ fn deny_button(button: ActionButton) -> gpui::AnyElement {
                 .child("DENY"),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_types::{FlowDirection, TransportProtocol};
+
+    fn flow() -> FlowContext {
+        FlowContext {
+            process_name: Some("ssh".into()),
+            process_origin: core_types::ProcessOrigin::Proved,
+            process_exe: Some("/usr/bin/ssh".into()),
+            app_name: None,
+            source_ip: "192.168.1.10".into(),
+            source_port: 51000,
+            destination_ip: "140.82.121.4".into(),
+            destination_port: 22,
+            destination_domain: None,
+            reverse_dns: None,
+            domain_source: core_types::DomainSource::None,
+            protocol: TransportProtocol::Tcp,
+            direction: FlowDirection::Outbound,
+            device_label: None,
+            tcp_syn: false,
+        }
+    }
+
+    #[test]
+    fn whole_registry_network_becomes_one_cidr_rule() {
+        let scope = DestScope::NetworkPrefix("140.82.112.0/20".into());
+        assert_eq!(
+            build_dest_matcher(&flow(), &scope),
+            DestinationMatcher::Cidr("140.82.112.0/20".into())
+        );
+    }
+
+    #[test]
+    fn octet_scope_still_masks_inside_the_address() {
+        assert_eq!(
+            build_dest_matcher(&flow(), &DestScope::IpCidr(3)),
+            DestinationMatcher::Cidr("140.82.121.0/24".into())
+        );
+        assert_eq!(
+            build_dest_matcher(&flow(), &DestScope::IpCidr(4)),
+            DestinationMatcher::IpExact("140.82.121.4".into())
+        );
+    }
 }
