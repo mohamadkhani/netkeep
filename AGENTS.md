@@ -80,7 +80,11 @@ recorded decision, not a workaround.
 
 ## Workflow
 
-- Work is tracked in GitHub issues. Branch as `fix/<n>-slug` or `feat/<n>-slug`,
-  and end the PR body with `Fixes #<n>`.
+- **Every change lands through a pull request.** `main` is protected: no direct
+  pushes, no force-push, no rewriting published history. Branch from `main` as
+  `fix/<n>-slug` or `feat/<n>-slug`, and end the PR body with `Fixes #<n>` so the
+  issue closes on the squash merge.
+- Work is tracked in GitHub issues; a change with no issue either has an obvious
+  one or needs one filed first.
 - Update the area doc in the same change that taught you something. A fix whose
   lesson stays only in the diff will be rediscovered.
