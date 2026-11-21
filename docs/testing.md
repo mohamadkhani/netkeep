@@ -36,8 +36,8 @@ Every unit is testable in isolation. All OS/system effects behind traits. No rul
 - [x] tie-break: equal specificity + equal action rank → greater `rule.id` wins
 - [x] disabled rule ignored
 - [x] invalid rule rejected by validator
-- [x] **unknown-process + specific destination** (`IpExact`/`DomainExact`) → rule matches (proc-attribution race tolerance)
-- [x] **unknown-process safety negatives:** wildcard / `Any` / CIDR rules do **not** apply when the flow's process is unknown
+- [x] **unknown-process + any destination** → no process-pinned rule matches (`unknown_process_never_matches_a_process_rule`)
+- [x] **unknown-process safety negatives:** wildcard / `Any` / CIDR / exact rules do **not** apply when the flow's process is unknown
 - [x] known-process *mismatch* (different name) still does not match a specific rule
 
 ### `decision-engine`
