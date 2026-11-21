@@ -83,6 +83,12 @@ impl PtrCache {
             return None;
         }
 
+        // This `std::sync::Mutex` guard is held for one map lookup and, on a
+        // miss, one insert; it never spans a resolver call. PTR answers arrive
+        // from the worker thread and are stored here, so the packet path only
+        // waits for another packet's short critical section. The cache is
+        // display-only — rule matching never reads it — so contention or a
+        // poisoned lock costs the hint, not the verdict.
         let mut entries = self.entries.lock().ok()?;
         let now = Instant::now();
         match entries.get(&addr) {
