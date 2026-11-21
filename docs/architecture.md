@@ -272,6 +272,7 @@ ListRules
 DeleteRule { id }
 MoveRule { id, before_id, after_id }                   ← reorder via midpoint insertion
 ListPending
+EgressAlertStatus                                      ← recent data-path failures per (kind, target)
 ListFlows { limit }
 RegisterUnknownFlow { flow, now_secs }
 AwaitPendingDecision { pending_id }
@@ -279,6 +280,7 @@ ResolvePending { pending_id, action }
 ResolvePendingWithRule { pending_id, action, rule }   ← atomic: installs rule before resolving
 Health
 Unlock
+SubscribeToPending                                     ← start the push-notification stream
 OpenRoutedTcp { host, port, target }
 UpsertEgress(Egress)
 DeleteEgress { id }
@@ -297,17 +299,32 @@ Ok
 RuleList(Vec<Rule>)
 PendingList(Vec<PendingDecision>)
 FlowList(Vec<FlowEvent>)
+EgressAlertList(Vec<EgressAlertRecord>)
 PendingCreated { pending_id, created_at, deadline_at, protocol }
 ImmediateVerdict { action, route_target: Option<RouteTarget> }
 PendingStillWaiting { pending_id }
 PendingResolved { action, route_target: Option<RouteTarget> }
 Health { ready, fail_close_active, timeout_secs, ... }
 Unlocked
+SubscriptionAck
 RoutedTcpReady { listen_addr }
 EgressList(Vec<Egress>)
 ProxyList(Vec<ProxyConfig>)
 ProxyTestResult { success, latency_ms, error }
+NfqueueStatus { enabled, queue_num: Option<u16> }
 Error(String)
+```
+
+**Push notifications** (after `SubscribeToPending`):
+```
+PendingCreated { decision }
+PendingResolved { pending_id, action, egress_id, egress_name }
+PendingExpired { pending_id }
+PolicyMatch { process_name, destination_ip, destination_port,
+              destination_domain, rule_id, action, egress_id, egress_name }
+KernelAllowed { source_port, destination_ip, destination_port,
+                destination_domain, protocol }
+EgressAlert { kind, target_id, detail, count, at_secs }
 ```
 
 **Transport:** JSON lines (newline-delimited JSON) over Unix socket.

@@ -474,9 +474,9 @@ The live count is 602 at 2026-11-13 00:25 (599 `Permanent`, 3 `UntilRestart`). R
 - `SniDnsCache::lookup_for` returns `None` for a different process and for an ambiguous IP; returns the entry for the owning process.
 - Deferral triggers when the only domain is `Dns`; does not trigger for `Sni` / `Host`.
 - Pending upgrade refuses a different source port and a contradicting domain.
-- `AttrCache` poisons on a different pid/exe and stays poisoned for the TTL; `restore` prefers the domain key when the domain is in-band.
+- `AttrCache` poisons on a different pid/exe and stays poisoned for the TTL; `restore` uses the domain key when the domain is in-band and never falls back to the IP key in that case.
 - `sweep_pending` touches only the same process and the just-added rule; the log contains the rule id.
-- `(Some(_), None)` applies `Allow`/`Route` but not `Deny`.
+- The `(Some(_), None)` process fallback is removed for every action: an unattributed flow matches no process-pinned rule, whatever its destination.
 - `PORT_PIDS` is not consulted for TCP.
 
 **Metric:** policy verdicts whose `(process, domain)` pair has no observation for that process. Target 0. Emit it next to `netkeep.domain.resolved{source}`.
@@ -610,6 +610,14 @@ kernel):
 ```
 Nov 21 18:50:00 netkeepd[26042]: policy: kernel-owned socket dst=192.168.7.18:980 src=:2049 — allowed without a dialog
 Nov 21 18:50:00 netkeepd[26042]: policy: kernel-owned socket dst=192.168.7.17:774 src=:2049 — allowed without a dialog
+```
+
+That excerpt predates `ff95c84`, which moved the line onto the shared `id=`
+grammar. The current shape is pinned by the unit test
+`control-service::tests::kernel_policy_line_names_rule_action_and_fields`:
+
+```
+policy: id=kernel-owned action=Allow process=None domain=None dst=1.1.1.1:443 src=:54321
 ```
 
 Pending rows, `netkeep-cli flow list --limit 500 --format json` for

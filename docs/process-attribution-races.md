@@ -1,10 +1,10 @@
-# Process Attribution Races and the Three Layers of Defense
+# Process Attribution Races and the Layers of Defense
 
 > **Read this before touching any of `proc_resolver.rs`, `decision-engine`, or `process_matches` in `policy-engine`.**
 >
 > **Related:** the November 2026 field investigation found that process attribution can also borrow a *destination* (and vice versa) through the shared IP→domain cache, the pending fallback key, and `AttrCache`. See [`docs/investigations/2026-11-misattribution.md`](investigations/2026-11-misattribution.md).
 
-This document is the post-mortem of the duplicate-dialog bug fixed in session 19 (2026-05-13). The same underlying problem can resurface in many shapes; the three layers below exist so that any *single* layer's miss does not translate into a user-visible duplicate prompt.
+This document is the post-mortem of the duplicate-dialog bug fixed in session 19 (2026-05-13). The same underlying problem can resurface in many shapes; the layers below exist so that any *single* layer's miss does not translate into a user-visible duplicate prompt.
 
 ---
 
@@ -33,7 +33,7 @@ After the user clicked Allow on the first dialog, the second one appeared *anywa
 
 ---
 
-## The three layers, top down
+## The layers, top down
 
 Each layer protects against a different time-slice of the problem.
 
@@ -286,7 +286,7 @@ This is deterministic (not a race): whenever a port is reused quickly and a TIME
 
 ### Root cause
 
-The three layers described above only help *after* the first packet of a connection races `/proc`. For long-running sessions (e.g. a YouTube video playing for several minutes), a different failure mode appears: the CDN rotates IP addresses. Chromium opens a new connection to a fresh IP that the Layer 1 per-socket cache has no entry for. The new connection races `/proc` — if it loses, `process_name = None` for that packet.
+The layers described above only help *after* the first packet of a connection races `/proc`. For long-running sessions (e.g. a YouTube video playing for several minutes), a different failure mode appears: the CDN rotates IP addresses. Chromium opens a new connection to a fresh IP that the Layer 1 per-socket cache has no entry for. The new connection races `/proc` — if it loses, `process_name = None` for that packet.
 
 At the time, Layer 3 helped if the rule used `DomainExact` or `IpExact`, but not if it used `DomainWildcard` or if the new CDN IP was not in the user's approved IP list. The result: one rogue `(unknown)` dialog appearing 4+ minutes into a session, after dozens of successful attributions to the same process. Layer 3 has since been removed, so an unattributed flow now prompts regardless of its destination.
 
