@@ -7,8 +7,10 @@
 //! next to the flow so the dialog can show `lb-140-82-121-4-fra.github.com`
 //! instead of a bare address, and nothing else.
 //!
-//! Lookups run on a worker thread with a cache: the packet path only reads the
-//! cache, so a slow or unresponsive resolver cannot delay a decision.
+//! Lookups run on a worker thread with a cache. The packet path never calls
+//! the resolver: it reads the cache, and on a miss records a pending lookup
+//! and returns `None`, so a slow or unresponsive resolver cannot delay a
+//! decision. Filling the cache happens off the packet path.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

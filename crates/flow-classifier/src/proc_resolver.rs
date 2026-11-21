@@ -967,10 +967,12 @@ fn is_service_state(state: Option<u8>) -> bool {
     matches!(state, Some(STATE_ESTABLISHED) | Some(STATE_LISTEN))
 }
 
-/// A failed `/proc/<pid>/fd` read only makes the scan inconclusive when we
-/// were *denied* access. A process that exited between listing `/proc` and
-/// opening its fd directory cannot own a live socket, so its `ENOENT` says
-/// nothing about the socket being searched for.
+/// A failed `/proc/<pid>/fd` read only makes the scan inconclusive when the
+/// read could have hidden an owner: access was denied, or the error is one the
+/// kernel did not classify (`Other` — an unexpected I/O or resource failure).
+/// A process that exited between listing `/proc` and opening its fd directory
+/// cannot own a live socket, so its `ENOENT` says nothing about the socket
+/// being searched for.
 fn fd_error_is_inconclusive(err: &std::io::Error) -> bool {
     matches!(
         err.kind(),
