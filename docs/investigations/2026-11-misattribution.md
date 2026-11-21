@@ -599,6 +599,7 @@ This is not a regression: the `src=:2049` NFS flows carried `process=None` on 20
 4. **When to clean the store?** Recommendation: after Stage 0 is deployed and replayed clean, then delete the impossible rules and collapse clusters in one reviewed pass.
 5. **Is the `(Some(_), None)` fallback still wanted for `Route`?** Settled: no, it is removed for every action. An unattributed flow prompts instead of borrowing another app's rule, and the dialog now says that the resulting rule applies to every app.
 6. **How should CNAME aliases be represented?** Settled for now: exact name matching only. The proxy dials the requested name while DNS may observe the canonical name; a rule matches the name the flow carries and nothing else.
+7. **Should an egress with no DNS servers answer SERVFAIL or fall back?** Settled: fall back to system DNS, visibly. The anti-leak rule still holds for a broken egress path (unreachable proxy, failed DoT, timed-out tun/device resolver): those answer SERVFAIL. But "this egress has no resolvers configured" is a permanent configuration gap, and failing closed there took every covered domain offline once exe-pinned rules started matching DNS queries (1 205 SERVFAIL lines on 2026-11-15, 9 972 on 2026-11-16). The query now leaves the egress path with a log line and a `NoResolver` alert, so the leak is deliberate and visible. Documented in `docs/dns-forwarder.md`; configuring `dns_servers` restores the strict path.
 
 ---
 

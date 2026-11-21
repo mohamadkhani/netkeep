@@ -66,11 +66,38 @@ fn lookup(&self, src_ip: Ipv4Addr, src_port: u16) -> Option<DnsQueryInfo>
 7. Populate SniDnsCache: ip → domain (helps transparent proxy use hostnames for SOCKS CONNECT)
 ```
 
-### Fail-closed behavior (never leak routed domains)
+### Fail-closed behavior (no silent leak through a broken egress)
 
-If an egress-matched query cannot be resolved through its egress — proxy unreachable, DNS-over-SOCKS failed, tun/device DNS timed out, or the egress has **no** `dns_servers` configured — the forwarder answers **SERVFAIL** (RCODE 2, via `build_dns_error_response`) and logs the failure. It **never** falls back to system DNS.
+If an egress-matched query cannot be resolved **through its egress** — proxy
+unreachable, DNS-over-SOCKS failed, tun/device DNS timed out — the forwarder
+answers **SERVFAIL** (RCODE 2, via `build_dns_error_response`) and logs the
+failure. A transport failure never falls back to system DNS.
 
-Rationale: a rule that routes a domain through a private egress means the caller does not want the local network's resolver to see that domain. Falling back to system DNS on failure would hand every routed domain to exactly the path the rule steers traffic away from — a DNS leak. Failing closed matches netkeep's overall fail-close philosophy: a broken egress must degrade to "no resolution", not "resolution via the wrong network".
+Rationale: a rule that routes a domain through a private egress means the caller
+does not want the local network's resolver to see that domain. Falling back to
+system DNS on failure would hand every routed domain to exactly the path the rule
+steers traffic away from — a DNS leak. A broken egress degrades to "no
+resolution", not "resolution via the wrong network".
+
+**One case is not a transport failure: an egress with no `dns_servers`
+configured.** Answering SERVFAIL there is permanent, not transient, and it used
+to take every domain that egress covers offline once exe-pinned `Route` rules
+started matching DNS queries (1 205 SERVFAIL lines on 2026-11-15, 9 972 on
+2026-11-16). For that case only, the forwarder resolves through system DNS,
+logs
+
+```
+egress <target> matched for '<domain>' but has no DNS servers configured;
+resolving through system DNS instead (configure DNS servers on this egress to
+keep the query on its path)
+```
+
+and emits an `EgressAlertKind::NoResolver` alert, so the tray and the activity
+log show it. The leak is deliberate and visible, not silent; configure
+`dns_servers` on the egress to keep its domains on its path. The decision is
+recorded in
+[`docs/investigations/2026-11-misattribution.md`](investigations/2026-11-misattribution.md)
+§10.
 
 ### 3. Daemon Integration
 
