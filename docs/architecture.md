@@ -21,7 +21,7 @@ Network flow authorization system for Linux: intercept unknown flows, prompt use
 │  └────────────────────────────────────────────────────────┘  │
 │             ▲                                                 │
 │             │ Unix socket JSON RPC                           │
-│             │ /tmp/netkeep.sock                            │
+│             │ /run/netkeep/netkeep.sock                            │
 │             ▼                                                 │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │ netkeep-cli (terminal CLI)                           │  │
@@ -481,7 +481,7 @@ Installs as `/usr/lib/systemd/system/netkeepd.service` with `ExecStart=/usr/bin/
 
 ## Environment Variables
 
-- `NETKEEP_SOCKET_PATH` — Unix control socket (daemon default: `/tmp/netkeep.sock`)
+- `NETKEEP_SOCKET_PATH` — Unix control socket (daemon default: `/run/netkeep/netkeep.sock`)
 - `NETKEEP_ROUTE_MARK_BASE` — Base value for routing fwmark allocation (default: 20000). Used to avoid conflicts with other tools (sing-box, xray, throne).
 - `NETKEEP_DB_PATH` — SQLite database file (daemon default: `~/.config/netkeep/netkeep.db`; directory is created automatically)
 - `NETKEEP_DEVICE_ROUTE_FALLBACK` — if `1`/`true`/`yes`, routed **device** connect may fall back to unmarked `connect` after failures (escape hatch; not fail-close strict)

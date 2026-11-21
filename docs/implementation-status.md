@@ -153,7 +153,7 @@ netkeep unlock               # Console-only recovery
 
 Currently used by the daemon (see also `apps/daemon/src/main.rs`):
 
-- `NETKEEP_SOCKET_PATH` — Unix socket path (default `/tmp/netkeep.sock`)
+- `NETKEEP_SOCKET_PATH` — Unix socket path (default `/run/netkeep/netkeep.sock`)
 - `NETKEEP_DB_PATH` — SQLite DB location (default `~/.config/netkeep/netkeep.db`; directory created automatically)
 - `NETKEEP_NFQUEUE` — NFQUEUE number when packet interception enabled (optional)
 - `NETKEEP_DNS_FORWARDER` — set to `1` to enable the egress-aware DNS forwarder (`docs/dns-forwarder.md`)

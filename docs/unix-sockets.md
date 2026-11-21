@@ -43,7 +43,7 @@ fn send_request(path: &str, req: &ControlRequest) -> Result<ControlResponse, Str
 ```
 
 Key steps:
-1. `UnixStream::connect(path)` — connect to socket at path (e.g., `/tmp/netkeep.sock`)
+1. `UnixStream::connect(path)` — connect to socket at path (e.g., `/run/netkeep/netkeep.sock`)
 2. Serialize request to JSON string
 3. `write_all()` — send full message (include newline for line-based protocol)
 4. `BufReader::new(stream)` — wrap stream for line-based reading
@@ -322,17 +322,17 @@ rustix = { version = "0.37", features = ["net", "fs"] }
 
 ```bash
 # Terminal 1: Start daemon listening on socket
-# (daemon binds to /tmp/netkeep.sock)
+# (daemon binds to /run/netkeep/netkeep.sock)
 
 # Terminal 2: Send request
-echo '{"variant":"Health"}' | nc -U /tmp/netkeep.sock
+echo '{"variant":"Health"}' | nc -U /run/netkeep/netkeep.sock
 ```
 
 ### Inspect Socket
 
 ```bash
-ls -la /tmp/netkeep.sock
-stat /tmp/netkeep.sock  # See permissions, inode
+ls -la /run/netkeep/netkeep.sock
+stat /run/netkeep/netkeep.sock  # See permissions, inode
 ```
 
 ### Monitor with strace

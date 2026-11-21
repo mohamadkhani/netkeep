@@ -34,7 +34,7 @@ use state_store::{
 };
 use tokio::sync::broadcast;
 
-const DEFAULT_SOCKET_PATH: &str = "/tmp/netkeep.sock";
+const DEFAULT_SOCKET_PATH: &str = "/run/netkeep/netkeep.sock";
 const DEFAULT_DB_RELATIVE: &str = ".config/netkeep/netkeep.db";
 const DEFAULT_TIMEOUT_SECS: u64 = 100;
 const DEFAULT_PENDING_LIMIT: usize = 100;
@@ -902,6 +902,18 @@ fn main() {
         10000 + route_mark_base
     );
 
+    // The tray and the CLI default to the packaged runtime directory; a
+    // manually started daemon must land on the same socket or the two never
+    // meet. Create it first, because `/run/netkeep` does not exist without
+    // the systemd unit (`RuntimeDirectory=netkeep`).
+    if let Some(parent) = std::path::Path::new(&socket_path).parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!(
+                "warning: could not create socket directory {}: {e}",
+                parent.display()
+            );
+        }
+    }
     let _ = fs::remove_file(&socket_path);
     let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
@@ -911,7 +923,7 @@ fn main() {
         }
     };
     // Ensure non-root clients (GPUI/CLI) can connect even when daemon runs as root.
-    // This avoids recurring "Permission denied (os error 13)" on /tmp/netkeep.sock.
+    // This avoids recurring "Permission denied (os error 13)" for non-root clients.
     if let Err(err) = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666)) {
         eprintln!("failed to set socket permissions on {socket_path}: {err}");
         std::process::exit(1);
