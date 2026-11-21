@@ -256,18 +256,35 @@ impl SniDnsCache {
 
         let caller_known = process_name.is_some() || process_exe.is_some();
         if caller_known {
-            if let Some(hit) = candidates.iter().find(|e| {
-                same_process(
-                    e.process_name.as_deref(),
-                    e.process_exe.as_deref(),
-                    process_name,
-                    process_exe,
-                )
-            }) {
-                // The caller itself observed this binding — the strongest
-                // evidence a cache hit can carry.
-                counter!("netkeep.domain.cache_lookup", "result" => "observed").increment(1);
-                return Some(hit.domain.clone());
+            let observed: Vec<&DomainEntry> = candidates
+                .iter()
+                .copied()
+                .filter(|e| {
+                    same_process(
+                        e.process_name.as_deref(),
+                        e.process_exe.as_deref(),
+                        process_name,
+                        process_exe,
+                    )
+                })
+                .collect();
+            if !observed.is_empty() {
+                // The caller itself observed these bindings — the strongest
+                // evidence a cache hit can carry. It may still have observed
+                // more than one name on this IP (a shared CDN), and then the
+                // cache cannot say which name this connection is for.
+                return match unique_domain(&observed) {
+                    Some(domain) => {
+                        counter!("netkeep.domain.cache_lookup", "result" => "observed")
+                            .increment(1);
+                        Some(domain.to_string())
+                    }
+                    None => {
+                        counter!("netkeep.domain.cache_lookup", "result" => "ambiguous")
+                            .increment(1);
+                        None
+                    }
+                };
             }
         }
         // Every remaining binding belongs to a different process, or the
@@ -279,23 +296,31 @@ impl SniDnsCache {
             return None;
         }
 
-        let mut domains: Vec<&str> = candidates.iter().map(|e| e.domain.as_str()).collect();
-        domains.sort_unstable();
-        domains.dedup();
-        match domains.as_slice() {
-            [only] => {
+        match unique_domain(&candidates) {
+            Some(only) => {
                 // A single unowned name is the only cache prior allowed to
                 // label a flow for a process that never resolved it. Counting
                 // it makes the "process/domain pair was never observed"
                 // volume visible during replay acceptance.
                 counter!("netkeep.domain.cache_lookup", "result" => "unobserved_pair").increment(1);
-                Some((*only).to_string())
+                Some(only.to_string())
             }
-            _ => {
+            None => {
                 counter!("netkeep.domain.cache_lookup", "result" => "ambiguous").increment(1);
                 None
             }
         }
+    }
+}
+
+/// The one domain every entry agrees on, or `None` when they disagree.
+fn unique_domain<'a>(entries: &[&'a DomainEntry]) -> Option<&'a str> {
+    let mut domains: Vec<&str> = entries.iter().map(|e| e.domain.as_str()).collect();
+    domains.sort_unstable();
+    domains.dedup();
+    match domains.as_slice() {
+        [only] => Some(*only),
+        _ => None,
     }
 }
 
@@ -863,6 +888,29 @@ mod tests {
                 .lookup_for("203.0.113.9", 443, None, None)
                 .as_deref(),
             Some("relay.example")
+        );
+    }
+
+    #[test]
+    fn lookup_for_returns_none_when_the_caller_has_two_names_on_one_ip() {
+        let c = SniDnsCache::new();
+        in_band(&c, "188.114.98.0", 443, "a.example", Some("chrome"));
+        in_band(&c, "188.114.98.0", 443, "b.example", Some("chrome"));
+
+        assert_eq!(
+            c.lookup_for("188.114.98.0", 443, Some("chrome"), None),
+            None,
+            "one process with two live names on one IP is still ambiguous"
+        );
+
+        // Deduplicating the same name observed twice is not ambiguity.
+        let same = SniDnsCache::new();
+        in_band(&same, "188.114.98.0", 443, "a.example", Some("chrome"));
+        in_band(&same, "188.114.98.0", 443, "a.example", Some("chrome"));
+        assert_eq!(
+            same.lookup_for("188.114.98.0", 443, Some("chrome"), None)
+                .as_deref(),
+            Some("a.example")
         );
     }
 
