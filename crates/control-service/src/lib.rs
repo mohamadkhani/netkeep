@@ -1772,6 +1772,38 @@ mod tests {
         );
     }
 
+    /// Destination-scoped sharing must hold on the path live traffic uses.
+    /// A new source port to the same destination from the same app reuses the
+    /// open dialog instead of asking the same question again; only the
+    /// decision-engine unit tests covered this before.
+    #[test]
+    fn register_shares_one_pending_across_source_ports() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let mut first = mk_flow();
+        first.source_port = 40001;
+        let mut second = mk_flow();
+        second.source_port = 40002;
+
+        let first_id = match service.register(first, 10) {
+            FlowDecision::Pending { id, .. } => id,
+            other => panic!("expected a pending, got {other:?}"),
+        };
+        let second_id = match service.register(second, 11) {
+            FlowDecision::Pending { id, .. } => id,
+            other => panic!("expected a pending, got {other:?}"),
+        };
+        assert_eq!(
+            first_id, second_id,
+            "same app and destination share one dialog, whatever the source port"
+        );
+        assert_eq!(service.decision_engine.list_pending().len(), 1);
+        let events = match service.handle(ControlRequest::ListFlows { limit: 100 }) {
+            ControlResponse::FlowList(events) => events,
+            _ => panic!("expected flow list"),
+        };
+        assert_eq!(events.len(), 1, "the shared pending is one flow event");
+    }
+
     #[test]
     fn register_and_resolve_pending_decision() {
         let mut service = ControlService::new(InMemoryRuleRepository::default());

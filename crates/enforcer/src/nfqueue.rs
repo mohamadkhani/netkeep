@@ -1268,6 +1268,18 @@ mod tests {
             processor.registrar.attempts, 1,
             "the reply must not be classified again, so it cannot prompt"
         );
+
+        // The mirror is a cache entry, not a permanent permit: once it
+        // expires the reply is classified again and a real decision is needed.
+        let later_reply = tcp_packet("143.64.80.214", 443, "172.23.0.2", 42372);
+        assert_eq!(
+            processor.decide(&later_reply, 1000 + CACHE_TTL_SECS + 1),
+            (Verdict::Accept, None)
+        );
+        assert_eq!(
+            processor.registrar.attempts, 2,
+            "the mirrored reply must expire with the verdict that created it"
+        );
     }
 
     /// A `Route` decision marks the outbound socket so nftables sends it into
