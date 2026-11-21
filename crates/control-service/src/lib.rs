@@ -10,7 +10,7 @@ use enforcer::{FlowDecision, FlowRegistrar};
 use metrics::{counter, histogram};
 use policy_engine::{resolve_action, seed_priority, ResolvedRule};
 use state_store::Repository;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -71,6 +71,11 @@ pub struct ControlService<R: Repository> {
     policy_log_dedup: HashMap<PolicyLogKey, u64>,
     /// Recent data-path failures, one entry per (kind, target).
     egress_alerts: Vec<EgressAlertEntry>,
+    /// Pending ids whose `Pending` flow event is already recorded. A
+    /// retransmission carries the same id, and the row may already be past its
+    /// deadline while `tick` has not swept it yet, so neither "is it live" nor
+    /// "is it still in the table" answers whether the event exists.
+    pending_events_recorded: HashSet<String>,
 }
 
 /// Stored alert plus when it was last published to subscribers.
@@ -152,6 +157,7 @@ impl<R: Repository> ControlService<R> {
             routing_revision: 0,
             policy_log_dedup: HashMap::new(),
             egress_alerts: Vec::new(),
+            pending_events_recorded: HashSet::new(),
         }
     }
 
@@ -224,6 +230,7 @@ impl<R: Repository> ControlService<R> {
             routing_revision: 0,
             policy_log_dedup: HashMap::new(),
             egress_alerts: Vec::new(),
+            pending_events_recorded: HashSet::new(),
         }
     }
 
@@ -243,7 +250,7 @@ impl<R: Repository> ControlService<R> {
         }
         let expired_ids = self.decision_engine.expire_timeouts(now_secs);
         for id in expired_ids {
-            self.repo.delete_pending(&id);
+            self.drop_pending(&id);
             // NEW: Send push notification for expired pending
             let _ = self
                 .notification_tx
@@ -254,6 +261,11 @@ impl<R: Repository> ControlService<R> {
 
     /// Load pending decisions from the persistent store back into the decision engine.
     pub fn restore_pending(&mut self, decisions: Vec<core_types::PendingDecision>) {
+        // These already have their Pending event from the run that created
+        // them; a retransmit after the restart must not add a second row.
+        for decision in &decisions {
+            self.pending_events_recorded.insert(decision.id.clone());
+        }
         self.decision_engine.restore_pending(decisions);
     }
 
@@ -292,8 +304,7 @@ impl<R: Repository> ControlService<R> {
         format!("evt-{}", self.event_counter)
     }
 
-    /// Record the Pending event for `pending` unless a live pending with the
-    /// same id is already stored.
+    /// Record the Pending event for `pending` unless it is already recorded.
     ///
     /// A retransmitted SYN re-enters both the control-API handler and the live
     /// registrar with the same pending id. Recording it again added no
@@ -305,14 +316,19 @@ impl<R: Repository> ControlService<R> {
         pending: &core_types::PendingDecision,
         now_secs: u64,
     ) {
-        let already_stored = self
-            .repo
-            .list_live_pending(now_secs)
-            .iter()
-            .any(|existing| existing.id == pending.id);
-        if !already_stored {
+        // Ids are forgotten when the pending is deleted, so this stays bounded
+        // by the pending limit. It answers "was an event written", which the
+        // repository cannot: a row past its deadline is still present until
+        // `tick` sweeps it, and a live filter would report it as new.
+        if self.pending_events_recorded.insert(pending.id.clone()) {
             self.record_event(flow, FlowState::Pending, now_secs);
         }
+    }
+
+    /// Remove a pending from the store and forget that its event exists.
+    fn drop_pending(&mut self, id: &str) {
+        self.repo.delete_pending(id);
+        self.pending_events_recorded.remove(id);
     }
 
     fn record_event(&mut self, flow: &FlowContext, state: FlowState, timestamp_secs: u64) {
@@ -554,7 +570,7 @@ impl<R: Repository> ControlService<R> {
                     self.decision_engine
                         .resolve_pending(&pending_id, action, None)
                 {
-                    self.repo.delete_pending(&pending_id);
+                    self.drop_pending(&pending_id);
                     let route_target = if chosen == RuleAction::Route {
                         // No rule context here — best-effort: no target
                         None
@@ -598,7 +614,7 @@ impl<R: Repository> ControlService<R> {
                     self.decision_engine
                         .resolve_pending(&pending_id, action, egress_id.clone())
                 {
-                    self.repo.delete_pending(&pending_id);
+                    self.drop_pending(&pending_id);
                     let route_target = if chosen == RuleAction::Route {
                         self.resolve_route_target(&egress_id)
                     } else {
@@ -841,7 +857,7 @@ impl<R: Repository> ControlService<R> {
                 resolved.action.clone(),
                 resolved.egress_id.clone(),
             );
-            self.repo.delete_pending(&p.id);
+            self.drop_pending(&p.id);
             let egress_name = self.egress_name(&resolved.egress_id);
             let _ = self
                 .notification_tx
@@ -1824,6 +1840,26 @@ mod tests {
             1,
             "four retransmissions of one connection are one flow, not four"
         );
+    }
+
+    /// A retransmit can arrive after the pending's deadline but before `tick`
+    /// sweeps the row. The event already exists; asking the repository whether
+    /// the pending is live answered "no" and wrote a duplicate row.
+    #[test]
+    fn late_retransmission_before_the_sweep_adds_no_event() {
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        let first = service.register(mk_flow(), 10);
+        assert!(matches!(first, FlowDecision::Pending { .. }));
+
+        // Past the 100 s deadline; `tick` has not run, so the same id answers.
+        let late = service.register(mk_flow(), 500);
+        assert!(matches!(late, FlowDecision::Pending { .. }));
+
+        let events = match service.handle(ControlRequest::ListFlows { limit: 100 }) {
+            ControlResponse::FlowList(events) => events,
+            _ => panic!("expected flow list"),
+        };
+        assert_eq!(events.len(), 1, "one pending, one flow event");
     }
 
     #[test]
