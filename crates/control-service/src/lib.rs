@@ -231,6 +231,16 @@ impl<R: Repository> ControlService<R> {
     /// Expires timed-out pending decisions and updates the internal clock.
     pub fn tick(&mut self, now_secs: u64) {
         self.now_secs = now_secs;
+        // Age the alert window here rather than only when a new failure
+        // arrives. Otherwise the last computed `recent_count` never falls, and
+        // the tray stays amber forever after three failures even once the path
+        // recovers.
+        for entry in &mut self.egress_alerts {
+            entry
+                .recent
+                .retain(|t| now_secs.saturating_sub(*t) <= ALERT_RECENT_WINDOW_SECS);
+            entry.record.recent_count = entry.recent.len() as u32;
+        }
         let expired_ids = self.decision_engine.expire_timeouts(now_secs);
         for id in expired_ids {
             self.repo.delete_pending(&id);
@@ -1211,7 +1221,7 @@ mod tests {
     };
     use state_store::InMemoryRuleRepository;
 
-    use super::{ControlService, HealthConfig, POLICY_LOG_DEDUP_SECS};
+    use super::{ControlService, HealthConfig, ALERT_RECENT_WINDOW_SECS, POLICY_LOG_DEDUP_SECS};
     use decision_engine::{DecisionEngine, OverflowPolicy};
     use enforcer::{FlowDecision, FlowRegistrar as _};
 
@@ -1691,6 +1701,36 @@ mod tests {
             EgressAlertKind::DnsFailed,
             "newest failure first"
         );
+    }
+
+    /// The tray turns amber once a target failed `ALERT_SUSTAINED_THRESHOLD`
+    /// times inside the recent window. That window must age out on its own:
+    /// otherwise three failures leave the icon amber forever, even after the
+    /// path recovers, because `recent_count` was only recomputed when a new
+    /// failure of the same key arrived.
+    #[test]
+    fn egress_alert_recent_count_falls_out_of_the_window() {
+        use core_types::{EgressAlert, EgressAlertKind};
+        let mut service = ControlService::new(InMemoryRuleRepository::default());
+        for now in [10, 11, 12] {
+            service.record_egress_alert(
+                EgressAlert {
+                    kind: EgressAlertKind::Unreachable,
+                    target_id: Some("px-1".into()),
+                    detail: "connect timed out".into(),
+                },
+                now,
+            );
+        }
+        assert_eq!(service.egress_alert_records()[0].recent_count, 3);
+
+        service.tick(12 + ALERT_RECENT_WINDOW_SECS + 1);
+        let row = &service.egress_alert_records()[0];
+        assert_eq!(
+            row.recent_count, 0,
+            "failures older than the window must stop counting as sustained"
+        );
+        assert_eq!(row.count, 3, "the lifetime occurrence count is kept");
     }
 
     #[test]
