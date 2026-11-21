@@ -144,11 +144,11 @@ impl ProcProcessResolver {
             // listener owns the port already, so it names both the service
             // (a userland daemon) and the kernel-service case: if the listener
             // has no owner, everything it accepts is kernel-owned too.
-            let listeners = listening_sockets(ip, port, protocol);
-            match listeners.as_slice() {
-                [] => {}
-                [(listener, listener_uid)] => {
-                    let (listener, listener_uid) = (*listener, *listener_uid);
+            match listener_verdict(ip, port, protocol) {
+                ListenerVerdict::None => {
+                    diag!("{proto_str} {ip}:{port} no listener on this address");
+                }
+                ListenerVerdict::Unique(listener, listener_uid) => {
                     let (pid, complete) = find_pid_for_inode(listener, Some(listener_uid));
                     if let Some(pid) = pid {
                         diag!("{proto_str} {ip}:{port} fdpid={pid} via listener");
@@ -164,19 +164,21 @@ impl ProcProcessResolver {
                         return PidLookup::Kernel;
                     }
                 }
-                many => {
+                ListenerVerdict::Ambiguous(count) => {
                     // Two possible owners mean "not proven". Naming either one
-                    // would write a durable rule for the wrong program.
-                    counter!("netkeep.proc.resolver.kernel_socket", "result" => "ambiguous")
+                    // would write a durable rule for the wrong program, and the
+                    // `ss` fallback below would be the same guess by another
+                    // source. Stop here instead of letting the chain continue.
+                    counter!("netkeep.proc.resolver.listener", "result" => "ambiguous")
                         .increment(1);
                     diag!(
-                        "{proto_str} {ip}:{port} {} listeners serve this address — \
-                         ambiguous, not attributing",
-                        many.len()
+                        "{proto_str} {ip}:{port} {count} listeners serve this address — \
+                         ambiguous, not attributing"
                     );
+                    return PidLookup::Missing;
                 }
             }
-            diag!("{proto_str} {ip}:{port} no inode via sock-diag — trying ss fallback");
+            diag!("{proto_str} {ip}:{port} no owner via listener — trying ss fallback");
         }
         let ss_pid = try_ss_fallback(ip, port, protocol);
         match ss_pid {
@@ -840,17 +842,21 @@ fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> (Option<u32>, boo
     (None, complete)
 }
 
-/// Every listening socket bound to `port` that could serve `ip`.
-///
-/// Wildcard binds (`0.0.0.0`, `::`) match any local address. The kernel
-/// prefers an address-specific bind over a wildcard, so candidates are
-/// narrowed to the specific ones when any exist. More than one remaining
-/// candidate (SO_REUSEPORT, or two programs on the same address:port, or
-/// systemd socket activation alongside the service) is ambiguity: with two
-/// possible owners the process is not proven, and the caller must not guess.
-fn listening_sockets(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Vec<(u64, u32)> {
+/// The listener stage's answer. Exhaustive on purpose: `find_pid` must handle
+/// ambiguity by stopping, not by falling through to a source that guesses.
+enum ListenerVerdict {
+    /// No listener serves this address and port.
+    None,
+    /// Exactly one listener owns the traffic.
+    Unique(u64, u32),
+    /// More than one listener could own it; the owner is not proven.
+    Ambiguous(usize),
+}
+
+/// Read the listener tables and decide whether any listener can be named.
+fn listener_verdict(ip: IpAddr, port: u16, protocol: TransportProtocol) -> ListenerVerdict {
     if protocol != TransportProtocol::Tcp {
-        return Vec::new();
+        return ListenerVerdict::None;
     }
     let mut candidates = Vec::new();
     for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
@@ -859,7 +865,20 @@ fn listening_sockets(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Vec<
         };
         candidates.extend(parse_listening_sockets(&content, port));
     }
-    select_listeners(candidates, ip)
+    listener_verdict_from(candidates, ip)
+}
+
+/// Pure decision behind [`listener_verdict`]: select the listeners that serve
+/// `ip`, then report zero, one, or ambiguity.
+fn listener_verdict_from(
+    candidates: impl IntoIterator<Item = (IpAddr, u64, u32)>,
+    ip: IpAddr,
+) -> ListenerVerdict {
+    match select_listeners(candidates, ip).as_slice() {
+        [] => ListenerVerdict::None,
+        [(inode, uid)] => ListenerVerdict::Unique(*inode, *uid),
+        many => ListenerVerdict::Ambiguous(many.len()),
+    }
 }
 
 /// Choose the listeners that can serve `ip`: an exact bind wins over a
@@ -887,17 +906,25 @@ fn select_listeners(
 
 /// Whether two addresses name the same host, including an IPv4 address seen
 /// through an IPv4-mapped IPv6 socket.
+///
+/// Two native IPv6 addresses are equal only when they are equal: they have no
+/// IPv4 mapping, and treating "both unmapped" as a match would make one
+/// listener serve every IPv6 destination.
 fn same_host(a: IpAddr, b: IpAddr) -> bool {
     match (a, b) {
         (IpAddr::V4(a), IpAddr::V4(b)) => a == b,
-        (IpAddr::V6(a), IpAddr::V6(b)) => a == b || a.to_ipv4_mapped() == b.to_ipv4_mapped(),
+        (IpAddr::V6(a), IpAddr::V6(b)) => match (a.to_ipv4_mapped(), b.to_ipv4_mapped()) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => a == b,
+            _ => false,
+        },
         (IpAddr::V4(a), IpAddr::V6(b)) | (IpAddr::V6(b), IpAddr::V4(a)) => {
             b.to_ipv4_mapped() == Some(a)
         }
     }
 }
 
-/// Pure parser behind [`listening_sockets`]: every LISTEN entry on `port`,
+/// Pure parser behind [`listener_verdict`]: every LISTEN entry on `port`,
 /// with the address it is bound to.
 fn parse_listening_sockets(content: &str, port: u16) -> Vec<(IpAddr, u64, u32)> {
     let port_hex = format!("{port:04X}");
@@ -1366,6 +1393,50 @@ mod tests {
             "10.0.0.5".parse().unwrap(),
         );
         assert_eq!(selected.len(), 2, "ambiguity must remain visible");
+    }
+
+    /// Two listeners on the same address and port (SO_REUSEPORT, or a
+    /// supervisor alongside the service) leave the owner unproven. The
+    /// verdict must say so; the caller must not fall through to `ss` and name
+    /// one of them.
+    #[test]
+    fn listener_verdict_reports_ambiguity_instead_of_a_choice() {
+        let candidates = vec![
+            ("0.0.0.0".parse().unwrap(), 333u64, 0u32),
+            ("0.0.0.0".parse().unwrap(), 444u64, 0u32),
+        ];
+        assert!(matches!(
+            listener_verdict_from(candidates, "10.0.0.5".parse().unwrap()),
+            ListenerVerdict::Ambiguous(2)
+        ));
+    }
+
+    #[test]
+    fn listener_verdict_names_a_single_owner_and_no_listener() {
+        let one = vec![("10.0.0.5".parse().unwrap(), 555u64, 7u32)];
+        assert!(matches!(
+            listener_verdict_from(one, "10.0.0.5".parse().unwrap()),
+            ListenerVerdict::Unique(555, 7)
+        ));
+        assert!(matches!(
+            listener_verdict_from(Vec::new(), "10.0.0.5".parse().unwrap()),
+            ListenerVerdict::None
+        ));
+    }
+
+    /// Two native IPv6 addresses are not the same host just because neither
+    /// maps to IPv4. Comparing the mappings alone made `None == None` true,
+    /// so a listener on `::1` served every IPv6 destination.
+    #[test]
+    fn same_host_does_not_equate_unrelated_ipv6_hosts() {
+        let loopback: IpAddr = "::1".parse().unwrap();
+        let other: IpAddr = "2001:db8::5".parse().unwrap();
+        assert!(!same_host(loopback, other));
+        assert!(same_host(loopback, loopback));
+        assert!(same_host(
+            "::ffff:10.0.0.5".parse().unwrap(),
+            "10.0.0.5".parse().unwrap()
+        ));
     }
 
     /// An IPv4-mapped IPv6 bind (`::ffff:a.b.c.d`) is the same host as the
