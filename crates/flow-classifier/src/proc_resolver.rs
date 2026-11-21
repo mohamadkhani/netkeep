@@ -144,20 +144,36 @@ impl ProcProcessResolver {
             // listener owns the port already, so it names both the service
             // (a userland daemon) and the kernel-service case: if the listener
             // has no owner, everything it accepts is kernel-owned too.
-            if let Some((listener, listener_uid)) = listening_socket(port, protocol) {
-                let (pid, complete) = find_pid_for_inode(listener, Some(listener_uid));
-                if let Some(pid) = pid {
-                    diag!("{proto_str} {ip}:{port} fdpid={pid} via listener");
-                    return PidLookup::Found(pid);
+            let listeners = listening_sockets(ip, port, protocol);
+            match listeners.as_slice() {
+                [] => {}
+                [(listener, listener_uid)] => {
+                    let (listener, listener_uid) = (*listener, *listener_uid);
+                    let (pid, complete) = find_pid_for_inode(listener, Some(listener_uid));
+                    if let Some(pid) = pid {
+                        diag!("{proto_str} {ip}:{port} fdpid={pid} via listener");
+                        return PidLookup::Found(pid);
+                    }
+                    if complete && is_service_state(socket_state(listener)) {
+                        counter!("netkeep.proc.resolver.kernel_socket", "result" => "claimed")
+                            .increment(1);
+                        diag!(
+                            "{proto_str} {ip}:{port} listener inode={listener} has no owner — \
+                             kernel-owned service"
+                        );
+                        return PidLookup::Kernel;
+                    }
                 }
-                if complete && is_service_state(socket_state(listener)) {
-                    counter!("netkeep.proc.resolver.kernel_socket", "result" => "claimed")
+                many => {
+                    // Two possible owners mean "not proven". Naming either one
+                    // would write a durable rule for the wrong program.
+                    counter!("netkeep.proc.resolver.kernel_socket", "result" => "ambiguous")
                         .increment(1);
                     diag!(
-                        "{proto_str} {ip}:{port} listener inode={listener} has no owner — \
-                         kernel-owned service"
+                        "{proto_str} {ip}:{port} {} listeners serve this address — \
+                         ambiguous, not attributing",
+                        many.len()
                     );
-                    return PidLookup::Kernel;
                 }
             }
             diag!("{proto_str} {ip}:{port} no inode via sock-diag — trying ss fallback");
@@ -824,31 +840,68 @@ fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> (Option<u32>, boo
     (None, complete)
 }
 
-/// The listening socket bound to `port`, as `(inode, uid)`.
+/// Every listening socket bound to `port` that could serve `ip`.
 ///
-/// Wildcard binds (`0.0.0.0`, `::`) match any local address, which is what a
-/// service listening on all interfaces looks like. TCP uses state `0A`
-/// (LISTEN) and UDP `07` (unconnected), but only TCP needs this: a TCP
-/// connection's first packets exist before the kernel publishes the accepted
-/// socket.
-fn listening_socket(port: u16, protocol: TransportProtocol) -> Option<(u64, u32)> {
+/// Wildcard binds (`0.0.0.0`, `::`) match any local address. The kernel
+/// prefers an address-specific bind over a wildcard, so candidates are
+/// narrowed to the specific ones when any exist. More than one remaining
+/// candidate (SO_REUSEPORT, or two programs on the same address:port, or
+/// systemd socket activation alongside the service) is ambiguity: with two
+/// possible owners the process is not proven, and the caller must not guess.
+fn listening_sockets(ip: IpAddr, port: u16, protocol: TransportProtocol) -> Vec<(u64, u32)> {
     if protocol != TransportProtocol::Tcp {
-        return None;
+        return Vec::new();
     }
+    let mut candidates = Vec::new();
     for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
         let Ok(content) = fs::read_to_string(path) else {
             continue;
         };
-        if let Some(found) = parse_listening_socket(&content, port) {
-            return Some(found);
-        }
+        candidates.extend(parse_listening_sockets(&content, port));
     }
-    None
+    select_listeners(candidates, ip)
 }
 
-/// Pure parser behind [`listening_socket`], so the matching rule is testable.
-fn parse_listening_socket(content: &str, port: u16) -> Option<(u64, u32)> {
+/// Choose the listeners that can serve `ip`: an exact bind wins over a
+/// wildcard, and both are returned in full so the caller can detect
+/// ambiguity.
+fn select_listeners(
+    candidates: impl IntoIterator<Item = (IpAddr, u64, u32)>,
+    ip: IpAddr,
+) -> Vec<(u64, u32)> {
+    let mut specific = Vec::new();
+    let mut wildcard = Vec::new();
+    for (addr, inode, uid) in candidates {
+        if addr.is_unspecified() {
+            wildcard.push((inode, uid));
+        } else if same_host(addr, ip) {
+            specific.push((inode, uid));
+        }
+    }
+    if specific.is_empty() {
+        wildcard
+    } else {
+        specific
+    }
+}
+
+/// Whether two addresses name the same host, including an IPv4 address seen
+/// through an IPv4-mapped IPv6 socket.
+fn same_host(a: IpAddr, b: IpAddr) -> bool {
+    match (a, b) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => a == b,
+        (IpAddr::V6(a), IpAddr::V6(b)) => a == b || a.to_ipv4_mapped() == b.to_ipv4_mapped(),
+        (IpAddr::V4(a), IpAddr::V6(b)) | (IpAddr::V6(b), IpAddr::V4(a)) => {
+            b.to_ipv4_mapped() == Some(a)
+        }
+    }
+}
+
+/// Pure parser behind [`listening_sockets`]: every LISTEN entry on `port`,
+/// with the address it is bound to.
+fn parse_listening_sockets(content: &str, port: u16) -> Vec<(IpAddr, u64, u32)> {
     let port_hex = format!("{port:04X}");
+    let mut found = Vec::new();
     for line in content.lines().skip(1) {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if cols.len() < 10 || cols[3] != "0A" {
@@ -860,6 +913,9 @@ fn parse_listening_socket(content: &str, port: u16) -> Option<(u64, u32)> {
         if cols[1][colon + 1..] != port_hex {
             continue;
         }
+        let Some(addr) = parse_hex_addr(&cols[1][..colon]) else {
+            continue;
+        };
         let Ok(inode) = cols[9].parse::<u64>() else {
             continue;
         };
@@ -867,9 +923,9 @@ fn parse_listening_socket(content: &str, port: u16) -> Option<(u64, u32)> {
             continue;
         }
         let uid = cols[7].parse().unwrap_or(u32::MAX);
-        return Some((inode, uid));
+        found.push((addr, inode, uid));
     }
-    None
+    found
 }
 
 /// Whether the socket with `inode` is in a state a kernel service holds:
@@ -1262,8 +1318,70 @@ mod tests {
   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:0801 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 25664 1 0 100 0
    1: 0F02000A:0801 01010101:1F90 01 00000000:00000000 00:00000000 00000000     0        0 99001 1 0 100 0";
-        assert_eq!(parse_listening_socket(sample, 2049), Some((25664, 0)));
-        assert_eq!(parse_listening_socket(sample, 22), None);
+        let parsed = parse_listening_sockets(sample, 2049);
+        assert_eq!(
+            select_listeners(parsed, "10.0.2.15".parse().unwrap()),
+            vec![(25664, 0)],
+            "a wildcard listener serves any local address"
+        );
+        assert!(
+            parse_listening_sockets(sample, 22).is_empty(),
+            "an ESTABLISHED row is not a listener"
+        );
+    }
+
+    /// The kernel prefers an address-specific bind over a wildcard, so the
+    /// fallback must too. Before this it matched on port alone and returned
+    /// whichever line appeared first.
+    #[test]
+    fn listener_selection_prefers_an_exact_bind() {
+        let sample = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0   111 1 0 100 0
+   1: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0   222 1 0 100 0";
+        let parsed = parse_listening_sockets(sample, 8080);
+        assert_eq!(
+            select_listeners(parsed.clone(), "127.0.0.1".parse().unwrap()),
+            vec![(222, 0)],
+            "the 127.0.0.1 bind owns loopback traffic"
+        );
+        assert_eq!(
+            select_listeners(parsed, "10.0.0.5".parse().unwrap()),
+            vec![(111, 0)],
+            "other addresses fall to the wildcard bind"
+        );
+    }
+
+    /// Two listeners on the same address and port (SO_REUSEPORT, or a
+    /// supervisor alongside the service) leave the owner unproven. The
+    /// selection keeps both so the caller can refuse to guess.
+    #[test]
+    fn listener_selection_keeps_two_owners_visible() {
+        let sample = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0   333 1 0 100 0
+   1: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0   444 1 0 100 0";
+        let selected = select_listeners(
+            parse_listening_sockets(sample, 22),
+            "10.0.0.5".parse().unwrap(),
+        );
+        assert_eq!(selected.len(), 2, "ambiguity must remain visible");
+    }
+
+    /// An IPv4-mapped IPv6 bind (`::ffff:a.b.c.d`) is the same host as the
+    /// IPv4 address the packet carries.
+    #[test]
+    fn listener_selection_matches_ipv4_mapped_binds() {
+        let sample = "\
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0000000000000000FFFF00000500000A:0016 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0   555 1 0 100 0";
+        assert_eq!(
+            select_listeners(
+                parse_listening_sockets(sample, 22),
+                "10.0.0.5".parse().unwrap()
+            ),
+            vec![(555, 0)]
+        );
     }
 
     /// ESTABLISHED and LISTEN belong to long-lived service sockets; anything
