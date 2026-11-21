@@ -404,6 +404,8 @@ where
                     let (verdict, fwmark) = match parse_raw_packet(msg.get_payload()) {
                         None => {
                             counter!("netkeep.packets.parse_failed").increment(1);
+                            counter!("netkeep.packets.dropped", "reason" => "parse_failed")
+                                .increment(1);
                             (Verdict::Drop, None)
                         }
                         Some(mut raw) => {
