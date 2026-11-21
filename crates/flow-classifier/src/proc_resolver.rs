@@ -138,6 +138,28 @@ impl ProcProcessResolver {
                  (scan_complete={scan_complete} state={state:?}) — trying ss fallback"
             );
         } else {
+            diag!("{proto_str} {ip}:{port} no inode via sock-diag — checking the listener");
+            // The first packets of an inbound connection arrive before the
+            // kernel exposes the accepted socket in the diag table. The
+            // listener owns the port already, so it names both the service
+            // (a userland daemon) and the kernel-service case: if the listener
+            // has no owner, everything it accepts is kernel-owned too.
+            if let Some((listener, listener_uid)) = listening_socket(port, protocol) {
+                let (pid, complete) = find_pid_for_inode(listener, Some(listener_uid));
+                if let Some(pid) = pid {
+                    diag!("{proto_str} {ip}:{port} fdpid={pid} via listener");
+                    return PidLookup::Found(pid);
+                }
+                if complete && is_service_state(socket_state(listener)) {
+                    counter!("netkeep.proc.resolver.kernel_socket", "result" => "claimed")
+                        .increment(1);
+                    diag!(
+                        "{proto_str} {ip}:{port} listener inode={listener} has no owner — \
+                         kernel-owned service"
+                    );
+                    return PidLookup::Kernel;
+                }
+            }
             diag!("{proto_str} {ip}:{port} no inode via sock-diag — trying ss fallback");
         }
         let ss_pid = try_ss_fallback(ip, port, protocol);
@@ -802,6 +824,54 @@ fn scan_proc_for_inode(target: &str, only_uid: Option<u32>) -> (Option<u32>, boo
     (None, complete)
 }
 
+/// The listening socket bound to `port`, as `(inode, uid)`.
+///
+/// Wildcard binds (`0.0.0.0`, `::`) match any local address, which is what a
+/// service listening on all interfaces looks like. TCP uses state `0A`
+/// (LISTEN) and UDP `07` (unconnected), but only TCP needs this: a TCP
+/// connection's first packets exist before the kernel publishes the accepted
+/// socket.
+fn listening_socket(port: u16, protocol: TransportProtocol) -> Option<(u64, u32)> {
+    if protocol != TransportProtocol::Tcp {
+        return None;
+    }
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(found) = parse_listening_socket(&content, port) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Pure parser behind [`listening_socket`], so the matching rule is testable.
+fn parse_listening_socket(content: &str, port: u16) -> Option<(u64, u32)> {
+    let port_hex = format!("{port:04X}");
+    for line in content.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 10 || cols[3] != "0A" {
+            continue;
+        }
+        let Some(colon) = cols[1].rfind(':') else {
+            continue;
+        };
+        if cols[1][colon + 1..] != port_hex {
+            continue;
+        }
+        let Ok(inode) = cols[9].parse::<u64>() else {
+            continue;
+        };
+        if inode == 0 {
+            continue;
+        }
+        let uid = cols[7].parse().unwrap_or(u32::MAX);
+        return Some((inode, uid));
+    }
+    None
+}
+
 /// Whether the socket with `inode` is in a state a kernel service holds:
 /// ESTABLISHED (01) or LISTEN (0A).
 ///
@@ -1182,6 +1252,18 @@ mod tests {
             ErrorKind::PermissionDenied
         )));
         assert!(!fd_error_is_inconclusive(&Error::from(ErrorKind::NotFound)));
+    }
+
+    /// A listener is found by port even when the accepted socket is not in
+    /// the table yet, which is the case during a connection's handshake.
+    #[test]
+    fn listening_socket_is_found_by_port_and_state() {
+        let sample = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:0801 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 25664 1 0 100 0
+   1: 0F02000A:0801 01010101:1F90 01 00000000:00000000 00:00000000 00000000     0        0 99001 1 0 100 0";
+        assert_eq!(parse_listening_socket(sample, 2049), Some((25664, 0)));
+        assert_eq!(parse_listening_socket(sample, 22), None);
     }
 
     /// ESTABLISHED and LISTEN belong to long-lived service sockets; anything
