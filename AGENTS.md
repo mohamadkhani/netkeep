@@ -39,6 +39,27 @@ recorded decision, not a workaround.
   distinguish "pending", "route setup failed", "no mark", and so on.
 - **Fail closed on ambiguity.** Two possible owners, two candidate names, or a
   scan that could not read every process all mean "not proven".
+- **An ambiguity result ends the chain.** Once a stage decides the owner is not
+  proven, no later fallback may name one anyway: not `ss`, not a cache, not a
+  different port. Test the code that acts on the result, not only the helper
+  that computes it.
+
+## Verification
+
+- **Test the entry point the product uses.** A decision reachable from both the
+  control API and the packet path needs a test on the packet path;
+  `FlowRegistrar::register` is where live traffic arrives.
+- **Search before claiming removal.** `rg` the whole tree — `apps/`, `crates/`,
+  `e2e/`, scripts and docs — for the symbol, path or wording you say is gone.
+  A claim that a pattern "no longer exists" needs that search, not the one file
+  you changed.
+- **A changed default or format has several homes.** Socket paths, log-line
+  grammar, metric names and enum variants appear in e2e, the emulator, the CLI,
+  packaging, `.gitignore` and the area docs. Change them together.
+- **Evidence belongs to the commit that produced it.** A journal excerpt or
+  counter quoted in a doc verifies the build it came from. Re-capture after the
+  last code change, or name the commit; a format quoted as evidence gets a unit
+  test that pins it.
 
 ## Rust
 
@@ -88,3 +109,9 @@ recorded decision, not a workaround.
   one or needs one filed first.
 - Update the area doc in the same change that taught you something. A fix whose
   lesson stays only in the diff will be rediscovered.
+- **Land one finding per commit.** A review round becomes small commits, each
+  with the test that pins its invariant. One large catch-up push makes it
+  impossible to see which fix was verified and which was assumed.
+- **Every absolute in prose is a claim.** "Removed", "never", "only" and "no
+  longer" in a commit message, PR body or doc must survive a search of the tree
+  and a re-read of the diff before pushing.
