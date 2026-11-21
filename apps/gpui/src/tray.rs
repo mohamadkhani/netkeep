@@ -98,11 +98,11 @@ impl Tray for LogiTray {
     }
     fn icon_pixmap(&self) -> Vec<Icon> {
         let color = if self.alert_active {
-            0xf59e0b // amber — interception is on, but something is failing
+            crate::colors::TRAY_ALERT
         } else if self.nfqueue_enabled {
-            0x14b8a6 // teal
+            crate::colors::TRAY_ACTIVE
         } else {
-            0x6b7280 // gray
+            crate::colors::TRAY_IDLE
         };
         vec![shield_icon(color)]
     }
